@@ -1,0 +1,80 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# TLS certificates (keep only examples/placeholders)
+nginx/certs/*.crt
+nginx/certs/*.key
+!nginx/certs/.gitkeep
+
+# Local data directories
+/data/
+/attachments/
+/backups/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# Node.js
+node_modules/
+.next/
+out/
+.npm
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Testing
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+coverage/
+
+# Docker
+docker-compose.override.yml
+
+# Alembic
+*.db
+*.sqlite3
+
+# Misc
+*.bak
+*.tmp
+.cache/

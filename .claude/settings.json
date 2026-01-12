@@ -1,0 +1,16 @@
+{
+  "skills": {
+    "complete-task": {
+      "description": "Mark a task as completed in the Rediska Task Breakdown",
+      "command": "./scripts/tasks/complete_task.sh"
+    },
+    "list-tasks": {
+      "description": "List tasks from the Rediska Task Breakdown",
+      "command": "./scripts/tasks/list_tasks.sh"
+    }
+  },
+  "project": {
+    "name": "Rediska",
+    "description": "Local-first conversation management and lead discovery system"
+  }
+}

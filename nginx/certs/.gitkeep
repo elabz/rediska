@@ -1,0 +1,6 @@
+# Place TLS certificates here
+# tls.crt - certificate file
+# tls.key - private key file
+#
+# Generate with mkcert:
+# mkcert -cert-file tls.crt -key-file tls.key rediska.local localhost 127.0.0.1

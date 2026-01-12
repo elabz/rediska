@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" fill="none">
+  <defs>
+    <linearGradient id="radishBody" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f87171"/>
+      <stop offset="50%" style="stop-color:#dc2626"/>
+      <stop offset="100%" style="stop-color:#fecaca"/>
+    </linearGradient>
+    <linearGradient id="leaf" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" style="stop-color:#16a34a"/>
+      <stop offset="100%" style="stop-color:#22c55e"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="180" height="180" rx="40" fill="#fff5f5"/>
+  <!-- Leaves -->
+  <ellipse cx="70" cy="32" rx="16" ry="28" fill="url(#leaf)" transform="rotate(-20 70 32)"/>
+  <ellipse cx="90" cy="26" rx="14" ry="30" fill="url(#leaf)"/>
+  <ellipse cx="110" cy="32" rx="16" ry="28" fill="url(#leaf)" transform="rotate(20 110 32)"/>
+  <!-- Radish body -->
+  <path d="M90 50c-34 0-50 22-50 50c0 22 11 44 28 60c8 7 14 11 22 11s14-4 22-11c17-16 28-38 28-60c0-28-16-50-50-50z" fill="url(#radishBody)"/>
+  <!-- Root tip -->
+  <path d="M90 168c2 0 4-1 6-3c2-2 3-5 3-8l-9 14l-9-14c0 3 1 6 3 8c2 2 4 3 6 3z" fill="#fecaca"/>
+  <!-- Highlight -->
+  <ellipse cx="72" cy="90" rx="12" ry="18" fill="white" opacity="0.3"/>
+</svg>
