@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ImageIcon, Download } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -31,6 +31,14 @@ interface ConversationDetail {
   updated_at: string;
 }
 
+interface Attachment {
+  id: number;
+  mime_type: string;
+  size_bytes: number;
+  width_px: number | null;
+  height_px: number | null;
+}
+
 interface Message {
   id: number;
   direction: 'in' | 'out' | 'system';
@@ -39,6 +47,7 @@ interface Message {
   remote_visibility: string;
   identity_id: number | null;
   created_at: string;
+  attachments?: Attachment[];
 }
 
 interface MessagesResponse {
@@ -77,6 +86,9 @@ function formatMessageTime(dateString: string): string {
 function MessageBubble({ message, counterpartUsername }: { message: Message; counterpartUsername: string }) {
   const isOutgoing = message.direction === 'out';
   const isSystem = message.direction === 'system';
+  const [imageErrors, setImageErrors] = useState<Set<number>>(new Set());
+
+  const imageAttachments = (message.attachments || []).filter(att => att.mime_type.startsWith('image/'));
 
   if (isSystem) {
     return (
@@ -105,16 +117,59 @@ function MessageBubble({ message, counterpartUsername }: { message: Message; cou
         "flex flex-col max-w-[75%]",
         isOutgoing ? "items-end" : "items-start"
       )}>
-        <div className={cn(
-          "px-4 py-2.5 rounded-2xl",
-          isOutgoing
-            ? "bg-primary text-primary-foreground rounded-br-sm"
-            : "bg-muted rounded-bl-sm"
-        )}>
-          <p className="text-sm whitespace-pre-wrap break-words">
-            {message.body_text}
-          </p>
-        </div>
+        {/* Image attachments */}
+        {imageAttachments.length > 0 && (
+          <div className={cn(
+            "flex flex-wrap gap-2 mb-2",
+            isOutgoing ? "justify-end" : "justify-start"
+          )}>
+            {imageAttachments.map((att) => (
+              <div key={att.id} className="relative">
+                {imageErrors.has(att.id) ? (
+                  <div className="w-48 h-32 bg-muted rounded-lg flex items-center justify-center">
+                    <div className="text-center text-muted-foreground">
+                      <ImageIcon className="h-8 w-8 mx-auto mb-1" />
+                      <span className="text-xs">Image unavailable</span>
+                    </div>
+                  </div>
+                ) : (
+                  <a
+                    href={`/api/core/attachments/${att.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={`/api/core/attachments/${att.id}`}
+                      alt="Attachment"
+                      className="max-w-[300px] max-h-[300px] rounded-lg object-contain cursor-pointer hover:opacity-90 transition-opacity"
+                      style={{
+                        width: att.width_px ? Math.min(att.width_px, 300) : 'auto',
+                        height: att.height_px ? Math.min(att.height_px, 300) : 'auto',
+                      }}
+                      onError={() => setImageErrors(prev => { const next = new Set(prev); next.add(att.id); return next; })}
+                    />
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Message body */}
+        {message.body_text && (
+          <div className={cn(
+            "px-4 py-2.5 rounded-2xl",
+            isOutgoing
+              ? "bg-primary text-primary-foreground rounded-br-sm"
+              : "bg-muted rounded-bl-sm"
+          )}>
+            <p className="text-sm whitespace-pre-wrap break-words">
+              {message.body_text}
+            </p>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 mt-1 px-1">
           <span className="text-xs text-muted-foreground">
@@ -163,14 +218,143 @@ export default function ConversationDetailPage() {
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messageText, setMessageText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
+
+  // Fetch a single page of messages with optional cursor for pagination
+  const fetchMessagesPage = useCallback(async (cursor?: string) => {
+    const params = new URLSearchParams({ limit: '100' });
+    if (cursor) {
+      params.set('cursor', cursor);
+    }
+
+    const response = await fetch(
+      `/api/core/conversations/${conversationId}/messages?${params.toString()}`,
+      { credentials: 'include' }
+    );
+
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.detail || 'Failed to load messages');
+    }
+
+    return response.json() as Promise<MessagesResponse>;
+  }, [conversationId]);
+
+  // Fetch ALL messages by recursively loading all pages
+  const fetchAllMessages = useCallback(async (): Promise<{ messages: Message[]; nextCursor: string | null; hasMore: boolean }> => {
+    const allMessages: Message[] = [];
+    let cursor: string | undefined = undefined;
+    let hasMore = true;
+
+    // Keep fetching until we have all messages
+    while (hasMore) {
+      const page = await fetchMessagesPage(cursor);
+      allMessages.push(...page.messages);
+      cursor = page.next_cursor || undefined;
+      hasMore = page.has_more;
+
+      // Safety limit to prevent infinite loops (max 50 pages = 5000 messages)
+      if (allMessages.length > 5000) {
+        return {
+          messages: allMessages,
+          nextCursor: cursor || null,
+          hasMore: hasMore
+        };
+      }
+    }
+
+    return {
+      messages: allMessages,
+      nextCursor: null,
+      hasMore: false
+    };
+  }, [fetchMessagesPage]);
+
+  // Load older messages (used when safety limit was hit)
+  const loadOlderMessages = useCallback(async () => {
+    if (!nextCursor || loadingOlder) return;
+
+    setLoadingOlder(true);
+    try {
+      const msgsData = await fetchMessagesPage(nextCursor);
+      // Older messages (DESC order) - prepend to beginning after reversing
+      const olderMessages = msgsData.messages.reverse();
+      setMessages(prev => [...olderMessages, ...prev]);
+      setNextCursor(msgsData.next_cursor);
+      setHasMore(msgsData.has_more);
+    } catch (err) {
+      console.error('Failed to load older messages:', err);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [nextCursor, loadingOlder, fetchMessagesPage]);
+
+  // Send message
+  const sendMessage = useCallback(async () => {
+    if (!messageText.trim() || sending) return;
+
+    setSending(true);
+    setSendError(null);
+
+    try {
+      const response = await fetch(
+        `/api/core/conversations/${conversationId}/messages`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body_text: messageText.trim() }),
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to send message');
+      }
+
+      const result = await response.json();
+
+      // Add optimistic message to the list
+      const optimisticMessage: Message = {
+        id: result.message_id,
+        direction: 'out',
+        body_text: messageText.trim(),
+        sent_at: new Date().toISOString(),
+        remote_visibility: 'unknown',
+        identity_id: conversation?.identity_id || null,
+        created_at: new Date().toISOString(),
+      };
+
+      setMessages(prev => [...prev, optimisticMessage]);
+      setMessageText('');
+      setTimeout(scrollToBottom, 100);
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Failed to send message');
+    } finally {
+      setSending(false);
+    }
+  }, [messageText, sending, conversationId, conversation?.identity_id]);
+
+  // Handle Enter key to send
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }, [sendMessage]);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -178,11 +362,8 @@ export default function ConversationDetailPage() {
       setError(null);
 
       try {
-        // Fetch conversation details and messages in parallel
-        const [convResponse, msgsResponse] = await Promise.all([
-          fetch(`/api/core/conversations/${conversationId}`, { credentials: 'include' }),
-          fetch(`/api/core/conversations/${conversationId}/messages?limit=50`, { credentials: 'include' }),
-        ]);
+        // Fetch conversation details first
+        const convResponse = await fetch(`/api/core/conversations/${conversationId}`, { credentials: 'include' });
 
         if (!convResponse.ok) {
           if (convResponse.status === 404) {
@@ -195,17 +376,16 @@ export default function ConversationDetailPage() {
           throw new Error(data.detail || 'Failed to load conversation');
         }
 
-        if (!msgsResponse.ok) {
-          const data = await msgsResponse.json();
-          throw new Error(data.detail || 'Failed to load messages');
-        }
-
         const convData: ConversationDetail = await convResponse.json();
-        const msgsData: MessagesResponse = await msgsResponse.json();
-
         setConversation(convData);
-        // Messages come in DESC order, reverse for display
+
+        // Fetch ALL messages (auto-paginate through entire history)
+        const msgsData = await fetchAllMessages();
+
+        // Messages come in DESC order, reverse for display (oldest first)
         setMessages(msgsData.messages.reverse());
+        setNextCursor(msgsData.nextCursor);
+        setHasMore(msgsData.hasMore);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'An error occurred');
       } finally {
@@ -214,13 +394,13 @@ export default function ConversationDetailPage() {
     };
 
     fetchData();
-  }, [conversationId]);
+  }, [conversationId, fetchAllMessages]);
 
   useEffect(() => {
     if (!loading && messages.length > 0) {
       scrollToBottom();
     }
-  }, [loading, messages]);
+  }, [loading]);
 
   if (loading) {
     return (
@@ -321,7 +501,30 @@ export default function ConversationDetailPage() {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 min-w-0">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 min-w-0">
+        {/* Load older messages button - only shown when safety limit (5000) was hit */}
+        {hasMore && (
+          <div className="flex flex-col items-center gap-2 mb-4">
+            <p className="text-xs text-muted-foreground">
+              {messages.length.toLocaleString()} messages loaded
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={loadOlderMessages}
+              disabled={loadingOlder}
+              className="text-muted-foreground"
+            >
+              {loadingOlder ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              ) : (
+                <ChevronUp className="h-4 w-4 mr-2" />
+              )}
+              {loadingOlder ? 'Loading...' : 'Load more messages'}
+            </Button>
+          </div>
+        )}
+
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <p className="text-muted-foreground">No messages yet</p>
@@ -342,26 +545,48 @@ export default function ConversationDetailPage() {
 
       {/* Compose Box */}
       <div className="p-4 border-t border-border shrink-0">
+        {sendError && (
+          <div className="mb-2 p-2 bg-destructive/10 text-destructive text-sm rounded-md flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>{sendError}</span>
+            <button
+              onClick={() => setSendError(null)}
+              className="ml-auto text-xs underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <div className="flex gap-2 max-w-full">
           <Textarea
             value={messageText}
             onChange={(e) => setMessageText(e.target.value)}
-            placeholder="AI-assisted messaging coming soon..."
+            onKeyDown={handleKeyDown}
+            placeholder={
+              counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'
+                ? `Cannot send to ${counterpart.remote_status} user`
+                : 'Type a message... (Enter to send, Shift+Enter for new line)'
+            }
             className="min-h-[44px] max-h-32 resize-none flex-1 min-w-0"
-            disabled
+            disabled={sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
             rows={1}
           />
           <Button
             size="icon"
             className="shrink-0 h-11 w-11"
-            disabled
-            title="Sending messages will be enabled soon"
+            onClick={sendMessage}
+            disabled={!messageText.trim() || sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
+            title={sending ? 'Sending...' : 'Send message'}
           >
-            <Send className="h-4 w-4" />
+            {sending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
           </Button>
         </div>
         <p className="text-xs text-muted-foreground mt-2 text-center">
-          AI-assisted message composition coming in the next update
+          Messages are queued and sent in the background
         </p>
       </div>
     </div>

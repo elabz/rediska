@@ -17,10 +17,13 @@ Usage:
     posts = await adapter.browse_location("r/programming")
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from rediska_core.providers.base import (
     MessageDirection,
@@ -341,6 +344,7 @@ class RedditAdapter(ProviderAdapter):
         location: str,
         cursor: Optional[str] = None,
         limit: int = 25,
+        sort: str = "new",
     ) -> PaginatedResult[ProviderPost]:
         """Browse posts in a subreddit.
 
@@ -348,16 +352,22 @@ class RedditAdapter(ProviderAdapter):
             location: Subreddit name (with or without r/ prefix).
             cursor: Pagination cursor.
             limit: Maximum posts to return.
+            sort: Sort order - 'new', 'hot', 'top', 'rising'.
         """
         # Normalize location
         if not location.startswith("r/"):
             location = f"r/{location}"
 
+        # Validate sort parameter
+        valid_sorts = {"new", "hot", "top", "rising"}
+        if sort not in valid_sorts:
+            sort = "new"
+
         params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["after"] = cursor
 
-        response = await self._api_request("GET", f"/{location}/hot", params)
+        response = await self._api_request("GET", f"/{location}/{sort}", params)
 
         if response.status_code != 200:
             return PaginatedResult(items=[], next_cursor=None, has_more=False)
@@ -415,6 +425,18 @@ class RedditAdapter(ProviderAdapter):
         response = await self._api_request("GET", f"/user/{user_id}/about")
 
         if response.status_code != 200:
+            # Log the actual error from Reddit
+            try:
+                error_data = response.json()
+                logger.error(
+                    f"Reddit API error fetching profile for '{user_id}': "
+                    f"status={response.status_code}, response={error_data}"
+                )
+            except Exception:
+                logger.error(
+                    f"Reddit API error fetching profile for '{user_id}': "
+                    f"status={response.status_code}, body={response.text[:500]}"
+                )
             return None
 
         data = response.json().get("data", {})
@@ -446,7 +468,7 @@ class RedditAdapter(ProviderAdapter):
         params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["after"] = cursor
-
+        self.logger.info(f"Fetching profile items for {user_id} with params {params}")
         response = await self._api_request("GET", endpoint, params)
 
         if response.status_code != 200:

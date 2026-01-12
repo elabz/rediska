@@ -197,6 +197,7 @@ class AnalysisService:
             ProviderProfile if found, None otherwise.
         """
         if not self.provider_adapter:
+            self.logger.error("Provider adapter not initialized")
             return None
 
         return await self.provider_adapter.fetch_profile(account.external_username)

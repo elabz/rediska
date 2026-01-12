@@ -6,6 +6,18 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class AttachmentInMessageResponse(BaseModel):
+    """Response schema for an attachment in a message."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    mime_type: str
+    size_bytes: int
+    width_px: Optional[int] = None
+    height_px: Optional[int] = None
+
+
 class CounterpartResponse(BaseModel):
     """Response schema for a conversation counterpart."""
 
@@ -73,6 +85,7 @@ class MessageInConversationResponse(BaseModel):
     remote_visibility: str = "visible"
     identity_id: Optional[int] = None
     created_at: datetime
+    attachments: list[AttachmentInMessageResponse] = Field(default_factory=list)
 
 
 class MessageListResponse(BaseModel):

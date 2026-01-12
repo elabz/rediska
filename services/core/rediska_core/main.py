@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from rediska_core.api.middleware.onboarding import OnboardingGateMiddleware
+from rediska_core.api.routes import accounts as accounts_routes
 from rediska_core.api.routes import attachment as attachment_routes
 from rediska_core.api.routes import audit as audit_routes
 from rediska_core.api.routes import auth as auth_routes
@@ -15,6 +16,7 @@ from rediska_core.api.routes import directory as directory_routes
 from rediska_core.api.routes import identity as identity_routes
 from rediska_core.api.routes import leads as leads_routes
 from rediska_core.api.routes import metrics as metrics_routes
+from rediska_core.api.routes import ops as ops_routes
 from rediska_core.api.routes import reddit_oauth as reddit_oauth_routes
 from rediska_core.api.routes import search as search_routes
 from rediska_core.api.routes import setup as setup_routes
@@ -52,6 +54,7 @@ app.add_middleware(
 app.add_middleware(OnboardingGateMiddleware)
 
 # Include API routers
+app.include_router(accounts_routes.router)
 app.include_router(attachment_routes.router)
 app.include_router(audit_routes.router)
 app.include_router(auth_routes.router)
@@ -60,6 +63,7 @@ app.include_router(directory_routes.router)
 app.include_router(identity_routes.router)
 app.include_router(leads_routes.router)
 app.include_router(metrics_routes.router)
+app.include_router(ops_routes.router)
 app.include_router(reddit_oauth_routes.router)
 app.include_router(search_routes.router)
 app.include_router(setup_routes.router)

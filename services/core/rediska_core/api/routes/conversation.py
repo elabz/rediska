@@ -17,8 +17,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import joinedload
 
-from rediska_core.api.deps import CurrentUser, DBSession
+from rediska_core.api.deps import CurrentUser, DBSession, get_db
+from rediska_core.domain.models import AuditLog
 from rediska_core.api.schemas.conversation import (
+    AttachmentInMessageResponse,
     ConversationDetailResponse,
     ConversationListResponse,
     ConversationSummaryResponse,
@@ -33,7 +35,7 @@ from rediska_core.api.schemas.message import (
     SyncJobResponse,
     SyncJobStatusResponse,
 )
-from rediska_core.domain.models import Conversation, ExternalAccount, Identity, Message
+from rediska_core.domain.models import Attachment, Conversation, ExternalAccount, Identity, Message
 from rediska_core.domain.services.send_message import (
     ConversationNotFoundError,
     CounterpartStatusError,
@@ -169,7 +171,7 @@ async def list_conversations(
     # Build response
     result = []
     for conv in conversations:
-        # Get last message preview
+        # Get last message preview and actual timestamp
         last_message = (
             db.query(Message)
             .filter_by(conversation_id=conv.id)
@@ -178,6 +180,9 @@ async def list_conversations(
             .first()
         )
         preview = None
+        # Use the actual last message timestamp, not the stored last_activity_at
+        # which might be stale or set to sync time
+        last_message_time = last_message.sent_at if last_message else conv.last_activity_at
         if last_message and last_message.body_text:
             preview = last_message.body_text[:100] + "..." if len(last_message.body_text) > 100 else last_message.body_text
 
@@ -193,7 +198,7 @@ async def list_conversations(
                     external_user_id=conv.counterpart_account.external_user_id,
                     remote_status=conv.counterpart_account.remote_status,
                 ),
-                last_activity_at=conv.last_activity_at,
+                last_activity_at=last_message_time,
                 last_message_preview=preview,
                 unread_count=0,  # TODO: implement unread tracking
                 archived_at=conv.archived_at,
@@ -340,6 +345,21 @@ async def list_messages(
     if has_more:
         messages = messages[:limit]
 
+    # Fetch attachments for all messages in one query
+    message_ids = [msg.id for msg in messages]
+    attachments_by_message: dict[int, list[Attachment]] = {}
+    if message_ids:
+        all_attachments = (
+            db.query(Attachment)
+            .filter(Attachment.message_id.in_(message_ids))
+            .filter(Attachment.remote_visibility != "removed")
+            .all()
+        )
+        for att in all_attachments:
+            if att.message_id not in attachments_by_message:
+                attachments_by_message[att.message_id] = []
+            attachments_by_message[att.message_id].append(att)
+
     # Build response
     result = [
         MessageInConversationResponse(
@@ -350,6 +370,16 @@ async def list_messages(
             remote_visibility=msg.remote_visibility,
             identity_id=msg.identity_id,
             created_at=msg.created_at,
+            attachments=[
+                AttachmentInMessageResponse(
+                    id=att.id,
+                    mime_type=att.mime_type,
+                    size_bytes=att.size_bytes,
+                    width_px=att.width_px,
+                    height_px=att.height_px,
+                )
+                for att in attachments_by_message.get(msg.id, [])
+            ],
         )
         for msg in messages
     ]
@@ -384,6 +414,7 @@ async def send_message(
     request: SendMessageRequest,
     current_user: CurrentUser,
     send_service: SendMessageServiceDep,
+    db: DBSession,
 ):
     """Send a message to a conversation.
 
@@ -396,12 +427,32 @@ async def send_message(
 
     Returns 202 Accepted with job and message IDs.
     """
+    from datetime import datetime, timezone
+
     try:
         result = send_service.enqueue_send(
             conversation_id=conversation_id,
             body_text=request.body_text,
             attachment_ids=request.attachment_ids,
         )
+
+        # Audit log for successful message queue
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="message.send",
+            result="ok",
+            entity_type="message",
+            entity_id=result.message_id,
+            request_json={
+                "conversation_id": conversation_id,
+                "body_length": len(request.body_text) if request.body_text else 0,
+                "has_attachments": bool(request.attachment_ids),
+            },
+            response_json={"job_id": result.job_id, "message_id": result.message_id},
+        )
+        db.add(audit_entry)
+        db.commit()
 
         return SendMessageResponse(
             job_id=result.job_id,
@@ -479,12 +530,15 @@ async def retry_message(
     message_id: int,
     current_user: CurrentUser,
     send_service: SendMessageServiceDep,
+    db: DBSession,
 ):
     """Retry sending a pending message.
 
     Only messages with 'unknown' visibility can be retried.
     This is a manual action to handle ambiguous failures.
     """
+    from datetime import datetime, timezone
+
     result = send_service.retry_failed_send(message_id=message_id)
 
     if result is None:
@@ -492,6 +546,20 @@ async def retry_message(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Message cannot be retried (not found or already sent)",
         )
+
+    # Audit log for message retry
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="message.retry",
+        result="ok",
+        entity_type="message",
+        entity_id=message_id,
+        request_json={"conversation_id": conversation_id, "message_id": message_id},
+        response_json={"job_id": result.job_id},
+    )
+    db.add(audit_entry)
+    db.commit()
 
     return SendMessageResponse(
         job_id=result.job_id,
@@ -509,6 +577,7 @@ async def retry_message(
 )
 async def trigger_sync(
     current_user: CurrentUser,
+    db: DBSession,
     identity_id: Optional[int] = Query(None, description="Specific identity to sync (default: active identity)"),
 ):
     """Trigger a background sync job for Reddit messages.
@@ -517,6 +586,7 @@ async def trigger_sync(
     and store them in the local database. Returns immediately with a job ID
     that can be used to check status.
     """
+    from datetime import datetime, timezone
     from celery import Celery
     from rediska_core.config import get_settings
 
@@ -529,6 +599,20 @@ async def trigger_sync(
         kwargs={"provider_id": "reddit", "identity_id": identity_id},
         queue="ingest",
     )
+
+    # Audit log for sync trigger
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="sync.trigger",
+        result="ok",
+        provider_id="reddit",
+        identity_id=identity_id,
+        request_json={"identity_id": identity_id},
+        response_json={"job_id": task.id},
+    )
+    db.add(audit_entry)
+    db.commit()
 
     return SyncJobResponse(
         job_id=task.id,

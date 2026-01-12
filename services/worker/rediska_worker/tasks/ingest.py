@@ -6,24 +6,157 @@ from typing import Optional
 from rediska_worker.celery_app import app
 
 
-@app.task(name="ingest.backfill_conversations")
-def backfill_conversations(provider_id: str) -> dict:
-    """Backfill all conversations from a provider."""
-    # TODO: Implement
-    return {"status": "not_implemented", "provider_id": provider_id}
-
-
-@app.task(name="ingest.backfill_messages")
-def backfill_messages(
-    provider_id: str, external_conversation_id: str, cursor: str | None = None
+@app.task(name="ingest.backfill_conversations", bind=True)
+def backfill_conversations(
+    self,
+    provider_id: str,
+    identity_id: int | None = None,
 ) -> dict:
-    """Backfill messages for a specific conversation."""
-    # TODO: Implement
-    return {
-        "status": "not_implemented",
-        "provider_id": provider_id,
-        "external_conversation_id": external_conversation_id,
-    }
+    """Backfill all conversations from a provider.
+
+    This task fetches all conversation history from the provider's API
+    and stores them in the local database. It's similar to sync_delta
+    but intended for initial import of full history.
+
+    Args:
+        provider_id: Provider to backfill (currently only 'reddit' supported).
+        identity_id: Specific identity to backfill. If None, uses default identity.
+
+    Returns:
+        Dictionary with backfill results.
+    """
+    from rediska_core.infra.db import get_sync_session_factory
+    from rediska_core.domain.services.message_sync import MessageSyncService, SyncError
+
+    if provider_id != "reddit":
+        return {
+            "status": "skipped",
+            "provider_id": provider_id,
+            "reason": f"Provider '{provider_id}' not supported for backfill",
+        }
+
+    session_factory = get_sync_session_factory()
+    session = session_factory()
+
+    try:
+        sync_service = MessageSyncService(db=session)
+
+        # Use the existing sync method - it already handles full pagination
+        result = asyncio.run(sync_service.sync_reddit_messages(identity_id=identity_id))
+
+        return {
+            "status": "success",
+            "provider_id": provider_id,
+            "task_type": "backfill_conversations",
+            "conversations_synced": result.conversations_synced,
+            "messages_synced": result.messages_synced,
+            "new_conversations": result.new_conversations,
+            "new_messages": result.new_messages,
+            "errors": result.errors,
+        }
+
+    except SyncError as e:
+        return {
+            "status": "error",
+            "provider_id": provider_id,
+            "task_type": "backfill_conversations",
+            "error": str(e),
+        }
+    except Exception as e:
+        session.rollback()
+        return {
+            "status": "error",
+            "provider_id": provider_id,
+            "task_type": "backfill_conversations",
+            "error": str(e),
+        }
+    finally:
+        session.close()
+
+
+@app.task(name="ingest.backfill_messages", bind=True)
+def backfill_messages(
+    self,
+    provider_id: str,
+    conversation_id: int,
+    identity_id: int | None = None,
+) -> dict:
+    """Backfill all messages for a specific conversation.
+
+    This task fetches complete message history for a single conversation
+    from the provider's API. Useful for re-syncing a specific conversation
+    that may have incomplete history.
+
+    Args:
+        provider_id: Provider to backfill from.
+        conversation_id: Local conversation ID to backfill messages for.
+        identity_id: Identity to use for API access.
+
+    Returns:
+        Dictionary with backfill results.
+    """
+    from rediska_core.infra.db import get_sync_session_factory
+    from rediska_core.domain.services.message_sync import MessageSyncService, SyncError
+    from rediska_core.domain.models import Conversation
+
+    if provider_id != "reddit":
+        return {
+            "status": "skipped",
+            "provider_id": provider_id,
+            "conversation_id": conversation_id,
+            "reason": f"Provider '{provider_id}' not supported for backfill",
+        }
+
+    session_factory = get_sync_session_factory()
+    session = session_factory()
+
+    try:
+        # Get the conversation to find its external ID
+        conversation = session.query(Conversation).filter_by(id=conversation_id).first()
+        if not conversation:
+            return {
+                "status": "error",
+                "provider_id": provider_id,
+                "conversation_id": conversation_id,
+                "error": f"Conversation {conversation_id} not found",
+            }
+
+        sync_service = MessageSyncService(db=session)
+
+        # Sync messages for this specific conversation's thread
+        result = asyncio.run(sync_service.sync_reddit_messages(
+            identity_id=identity_id or conversation.identity_id
+        ))
+
+        return {
+            "status": "success",
+            "provider_id": provider_id,
+            "conversation_id": conversation_id,
+            "task_type": "backfill_messages",
+            "messages_synced": result.messages_synced,
+            "new_messages": result.new_messages,
+            "errors": result.errors,
+        }
+
+    except SyncError as e:
+        return {
+            "status": "error",
+            "provider_id": provider_id,
+            "conversation_id": conversation_id,
+            "task_type": "backfill_messages",
+            "error": str(e),
+        }
+    except Exception as e:
+        session.rollback()
+        return {
+            "status": "error",
+            "provider_id": provider_id,
+            "conversation_id": conversation_id,
+            "task_type": "backfill_messages",
+            "error": str(e),
+        }
+    finally:
+        session.close()
 
 
 @app.task(name="ingest.sync_delta", bind=True)

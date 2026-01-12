@@ -1,14 +1,17 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import Link from 'next/link';
-import { Loader2, MessageSquare, RefreshCw } from 'lucide-react';
+import { Loader2, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components';
+import { IdentityFilter, IdentityBadge } from '@/components/identity';
+import { useIdentities } from '@/hooks/useIdentities';
 
 interface Counterpart {
   id: number;
@@ -71,7 +74,7 @@ function ConversationSkeleton() {
   );
 }
 
-function ConversationItem({ conversation }: { conversation: Conversation }) {
+function ConversationItem({ conversation, identity }: { conversation: Conversation; identity?: { provider_id: string; display_name: string; external_username: string } }) {
   const { counterpart, last_message_preview, last_activity_at, unread_count } = conversation;
 
   return (
@@ -88,6 +91,9 @@ function ConversationItem({ conversation }: { conversation: Conversation }) {
             <span className="font-medium truncate">
               u/{counterpart.external_username}
             </span>
+            {identity && (
+              <IdentityBadge identity={identity} size="sm" />
+            )}
             {counterpart.remote_status === 'deleted' && (
               <Badge variant="secondary" className="text-xs">Deleted</Badge>
             )}
@@ -125,6 +131,45 @@ export default function InboxPage() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [totalCount, setTotalCount] = useState(0);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [identityFilter, setIdentityFilter] = useState<number | null>(null);
+
+  const { identities, loading: identitiesLoading } = useIdentities();
+
+  // Build identity lookup map
+  const identityMap = useMemo(() => {
+    const map: Record<number, typeof identities[0]> = {};
+    identities.forEach(i => { map[i.id] = i; });
+    return map;
+  }, [identities]);
+
+  // Filter conversations based on search query and identity
+  const filteredConversations = useMemo(() => {
+    let filtered = conversations;
+
+    // Filter by identity
+    if (identityFilter !== null) {
+      filtered = filtered.filter(conv => conv.identity_id === identityFilter);
+    }
+
+    // Filter by search query
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      filtered = filtered.filter((conv) => {
+        // Search in username
+        if (conv.counterpart.external_username.toLowerCase().includes(query)) {
+          return true;
+        }
+        // Search in message preview
+        if (conv.last_message_preview?.toLowerCase().includes(query)) {
+          return true;
+        }
+        return false;
+      });
+    }
+
+    return filtered;
+  }, [conversations, searchQuery, identityFilter]);
 
   const fetchConversations = async (isRefresh = false, cursor?: string) => {
     if (cursor) {
@@ -256,35 +301,97 @@ export default function InboxPage() {
         </Button>
       </div>
 
-      <Card className="overflow-hidden">
-        {conversations.map((conversation) => (
-          <ConversationItem key={conversation.id} conversation={conversation} />
-        ))}
-      </Card>
-
-      {hasMore && (
-        <div className="flex justify-center mt-4">
-          <Button
-            variant="outline"
-            onClick={loadMore}
-            disabled={loadingMore}
-          >
-            {loadingMore ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                Loading...
-              </>
-            ) : (
-              'Load More'
-            )}
-          </Button>
+      {/* Identity Filter */}
+      {identities.length > 1 && (
+        <div className="mb-4">
+          <IdentityFilter
+            identities={identities}
+            value={identityFilter}
+            onChange={setIdentityFilter}
+            showAll={true}
+          />
         </div>
       )}
 
-      <p className="text-sm text-muted-foreground text-center mt-4">
-        Showing {conversations.length} conversation{conversations.length !== 1 ? 's' : ''}
-        {hasMore && ' (more available)'}
-      </p>
+      {/* Search Field */}
+      <div className="relative mb-4">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          type="text"
+          placeholder="Search conversations by username or message..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="pl-10 pr-10"
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+
+      {filteredConversations.length === 0 && searchQuery ? (
+        <Card className="p-8">
+          <div className="text-center">
+            <Search className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            <p className="text-muted-foreground">
+              No conversations matching &quot;{searchQuery}&quot;
+            </p>
+            <Button
+              variant="link"
+              onClick={() => setSearchQuery('')}
+              className="mt-2"
+            >
+              Clear search
+            </Button>
+          </div>
+        </Card>
+      ) : (
+        <>
+          <Card className="overflow-hidden">
+            {filteredConversations.map((conversation) => (
+              <ConversationItem
+                key={conversation.id}
+                conversation={conversation}
+                identity={identities.length > 1 ? identityMap[conversation.identity_id] : undefined}
+              />
+            ))}
+          </Card>
+
+          {hasMore && !searchQuery && (
+            <div className="flex justify-center mt-4">
+              <Button
+                variant="outline"
+                onClick={loadMore}
+                disabled={loadingMore}
+              >
+                {loadingMore ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    Loading...
+                  </>
+                ) : (
+                  'Load More'
+                )}
+              </Button>
+            </div>
+          )}
+
+          <p className="text-sm text-muted-foreground text-center mt-4">
+            {searchQuery ? (
+              <>Showing {filteredConversations.length} of {conversations.length} conversation{conversations.length !== 1 ? 's' : ''}</>
+            ) : (
+              <>
+                Showing {conversations.length} conversation{conversations.length !== 1 ? 's' : ''}
+                {hasMore && ' (more available)'}
+              </>
+            )}
+          </p>
+        </>
+      )}
     </div>
   );
 }

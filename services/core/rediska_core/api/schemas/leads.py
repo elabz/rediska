@@ -25,6 +25,20 @@ class SaveLeadRequest(BaseModel):
     post_created_at: Optional[datetime] = Field(default=None, description="When the post was created")
 
 
+class AuthorInfo(BaseModel):
+    """Author information from analysis."""
+
+    username: str = Field(..., description="Author's username")
+    account_created_at: Optional[datetime] = Field(default=None, description="When the account was created")
+    karma: Optional[int] = Field(default=None, description="Total karma")
+    post_count: Optional[int] = Field(default=None, description="Number of posts analyzed")
+    comment_count: Optional[int] = Field(default=None, description="Number of comments analyzed")
+    analysis_state: Optional[str] = Field(default=None, description="Analysis state")
+    bio: Optional[str] = Field(default=None, description="User bio")
+    is_verified: Optional[bool] = Field(default=None, description="Whether user is verified")
+    is_suspended: Optional[bool] = Field(default=None, description="Whether user is suspended")
+
+
 class LeadResponse(BaseModel):
     """Response schema for a lead."""
 
@@ -36,7 +50,10 @@ class LeadResponse(BaseModel):
     title: Optional[str] = Field(default=None, description="Post title")
     body_text: Optional[str] = Field(default=None, description="Post body text")
     author_account_id: Optional[int] = Field(default=None, description="Author account ID")
+    author_username: Optional[str] = Field(default=None, description="Author's username")
+    author_info: Optional[AuthorInfo] = Field(default=None, description="Detailed author info from analysis")
     status: str = Field(..., description="Lead status")
+    score: Optional[int] = Field(default=None, description="Lead score")
     post_created_at: Optional[datetime] = Field(default=None, description="When the post was created")
     created_at: datetime = Field(..., description="When the lead was saved")
 

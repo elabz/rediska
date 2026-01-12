@@ -8,24 +8,34 @@ Provides endpoints for:
 - POST /leads/{id}/analyze - Analyze a lead's author
 """
 
+import json
+import logging
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from rediska_core.api.deps import CurrentUser, get_db
+from rediska_core.config import get_settings
+from rediska_core.domain.models import AuditLog, Identity
 from rediska_core.api.schemas.leads import (
     AnalyzeLeadResponse,
+    AuthorInfo,
     LeadResponse,
     ListLeadsResponse,
     SaveLeadRequest,
     UpdateLeadStatusRequest,
 )
+from rediska_core.domain.models import ExternalAccount, ProfileItem, ProfileSnapshot
 from rediska_core.domain.services.analysis import AnalysisError, AnalysisService
+from rediska_core.domain.services.credentials import CredentialsService
 from rediska_core.domain.services.leads import LeadsService, VALID_STATUSES
+from rediska_core.infrastructure.crypto import CryptoService
 from rediska_core.providers.base import ProviderAdapter
+from rediska_core.providers.reddit.adapter import RedditAdapter
 
 router = APIRouter(prefix="/leads", tags=["leads"])
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -33,18 +43,68 @@ router = APIRouter(prefix="/leads", tags=["leads"])
 # =============================================================================
 
 
-# Global provider adapter registry (can be overridden in tests)
-_provider_adapters: dict[str, ProviderAdapter] = {}
+def get_reddit_adapter(db: Session) -> Optional[RedditAdapter]:
+    """Create a Reddit adapter with credentials from the default identity.
+
+    Dynamically creates the adapter with OAuth credentials,
+    similar to how sources.py handles it.
+    """
+    settings = get_settings()
+
+    if not settings.encryption_key:
+        logger.error("Encryption key not configured")
+        return None
+
+    # Get active identity
+    identity = db.query(Identity).filter_by(is_active=True).first()
+    if not identity:
+        logger.error("No active identity found")
+        return None
+
+    # Get credentials
+    crypto = CryptoService(settings.encryption_key)
+    credentials_service = CredentialsService(db=db, crypto=crypto)
+    credential = credentials_service.get_credential_decrypted(
+        provider_id="reddit",
+        identity_id=identity.id,
+        credential_type="oauth_tokens",
+    )
+
+    if not credential:
+        logger.error(f"No Reddit credentials found for identity {identity.id}")
+        return None
+
+    try:
+        tokens = json.loads(credential)
+
+        # Create token refresh callback
+        def on_token_refresh(new_access_token: str) -> None:
+            tokens["access_token"] = new_access_token
+            credentials_service.store_credential(
+                provider_id="reddit",
+                identity_id=identity.id,
+                credential_type="oauth_tokens",
+                secret=json.dumps(tokens),
+            )
+
+        return RedditAdapter(
+            access_token=tokens["access_token"],
+            refresh_token=tokens["refresh_token"],
+            client_id=settings.provider_reddit_client_id,
+            client_secret=settings.provider_reddit_client_secret,
+            user_agent=settings.provider_reddit_user_agent,
+            on_token_refresh=on_token_refresh,
+        )
+    except Exception as e:
+        logger.error(f"Failed to create Reddit adapter: {e}")
+        return None
 
 
-def register_provider_adapter(provider_id: str, adapter: ProviderAdapter) -> None:
-    """Register a provider adapter for a given provider."""
-    _provider_adapters[provider_id] = adapter
-
-
-def get_provider_adapter(provider_id: str) -> Optional[ProviderAdapter]:
+def get_provider_adapter(provider_id: str, db: Session) -> Optional[ProviderAdapter]:
     """Get a provider adapter for the given provider."""
-    return _provider_adapters.get(provider_id)
+    if provider_id == "reddit":
+        return get_reddit_adapter(db)
+    return None
 
 
 def get_indexing_service(db: Session):
@@ -82,6 +142,88 @@ LeadsServiceDep = Annotated[LeadsService, Depends(get_leads_service)]
 
 
 # =============================================================================
+# RESPONSE HELPERS
+# =============================================================================
+
+
+def build_lead_response(lead, db: Session) -> LeadResponse:
+    """Build a LeadResponse with author info if available.
+
+    Fetches the author's ExternalAccount and ProfileSnapshot to
+    provide detailed author information in the response.
+    """
+    from datetime import datetime
+
+    # Get author account if linked
+    author_info = None
+    author_username = None
+
+    if lead.author_account_id:
+        account = db.query(ExternalAccount).filter(
+            ExternalAccount.id == lead.author_account_id
+        ).first()
+
+        if account:
+            author_username = account.external_username
+
+            # Get latest profile snapshot for signals
+            snapshot = db.query(ProfileSnapshot).filter(
+                ProfileSnapshot.account_id == account.id
+            ).order_by(ProfileSnapshot.fetched_at.desc()).first()
+
+            # Count profile items
+            post_count = db.query(ProfileItem).filter(
+                ProfileItem.account_id == account.id,
+                ProfileItem.item_type == "post",
+            ).count()
+            comment_count = db.query(ProfileItem).filter(
+                ProfileItem.account_id == account.id,
+                ProfileItem.item_type == "comment",
+            ).count()
+
+            # Parse signals from snapshot
+            signals: dict = snapshot.signals_json if snapshot and snapshot.signals_json else {}
+            account_created_at = None
+            created_at_str = signals.get("created_at")
+            if created_at_str:
+                try:
+                    account_created_at = datetime.fromisoformat(
+                        str(created_at_str).replace("Z", "+00:00")
+                    )
+                except (ValueError, AttributeError):
+                    pass
+
+            author_info = AuthorInfo(
+                username=account.external_username,
+                account_created_at=account_created_at,
+                karma=signals.get("karma"),
+                post_count=post_count if post_count > 0 else None,
+                comment_count=comment_count if comment_count > 0 else None,
+                analysis_state=account.analysis_state,
+                bio=signals.get("bio"),
+                is_verified=signals.get("is_verified"),
+                is_suspended=signals.get("is_suspended"),
+            )
+
+    return LeadResponse(
+        id=lead.id,
+        provider_id=lead.provider_id,
+        source_location=lead.source_location,
+        external_post_id=lead.external_post_id,
+        post_url=lead.post_url,
+        title=lead.title,
+        body_text=lead.body_text,
+        author_account_id=lead.author_account_id,
+        author_username=author_username,
+        author_info=author_info,
+        status=lead.status,
+        score=None,  # TODO: Add lead scoring
+        post_created_at=lead.post_created_at,
+        created_at=lead.created_at,
+    )
+
+
+# =============================================================================
 # SAVE LEAD
 # =============================================================================
 
@@ -97,12 +239,15 @@ async def save_lead(
     request: SaveLeadRequest,
     current_user: CurrentUser,
     leads_service: LeadsServiceDep,
+    db: Session = Depends(get_db),
 ):
     """Save a post as a lead.
 
     Creates a new lead_posts row or updates an existing one
     if the external_post_id already exists.
     """
+    from datetime import datetime, timezone
+
     lead = leads_service.save_lead(
         provider_id=request.provider_id,
         source_location=request.source_location,
@@ -115,7 +260,25 @@ async def save_lead(
         post_created_at=request.post_created_at,
     )
 
-    return LeadResponse.model_validate(lead)
+    # Audit log for lead save
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="lead.save",
+        result="ok",
+        provider_id=request.provider_id,
+        entity_type="lead_post",
+        entity_id=lead.id,
+        request_json={
+            "source_location": request.source_location,
+            "external_post_id": request.external_post_id,
+            "author_username": request.author_username,
+        },
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return build_lead_response(lead, db)
 
 
 # =============================================================================
@@ -132,6 +295,7 @@ async def save_lead(
 async def list_leads(
     current_user: CurrentUser,
     leads_service: LeadsServiceDep,
+    db: Session = Depends(get_db),
     provider_id: str | None = Query(default=None, description="Filter by provider"),
     source_location: str | None = Query(default=None, description="Filter by source location"),
     status: str | None = Query(default=None, description="Filter by status"),
@@ -148,7 +312,7 @@ async def list_leads(
     )
 
     return ListLeadsResponse(
-        leads=[LeadResponse.model_validate(lead) for lead in leads],
+        leads=[build_lead_response(lead, db) for lead in leads],
         total=len(leads),  # TODO: Add proper count query for pagination
     )
 
@@ -168,6 +332,7 @@ async def get_lead(
     lead_id: int,
     current_user: CurrentUser,
     leads_service: LeadsServiceDep,
+    db: Session = Depends(get_db),
 ):
     """Get a lead by ID."""
     lead = leads_service.get_lead(lead_id)
@@ -178,7 +343,7 @@ async def get_lead(
             detail=f"Lead {lead_id} not found",
         )
 
-    return LeadResponse.model_validate(lead)
+    return build_lead_response(lead, db)
 
 
 # =============================================================================
@@ -197,8 +362,11 @@ async def update_lead_status(
     request: UpdateLeadStatusRequest,
     current_user: CurrentUser,
     leads_service: LeadsServiceDep,
+    db: Session = Depends(get_db),
 ):
     """Update a lead's status."""
+    from datetime import datetime, timezone
+
     # Validate status
     if request.status not in VALID_STATUSES:
         raise HTTPException(
@@ -214,7 +382,21 @@ async def update_lead_status(
             detail=f"Lead {lead_id} not found",
         )
 
-    return LeadResponse.model_validate(lead)
+    # Audit log for status update
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="lead.status_update",
+        result="ok",
+        provider_id=lead.provider_id,
+        entity_type="lead_post",
+        entity_id=lead_id,
+        request_json={"new_status": request.status},
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return build_lead_response(lead, db)
 
 
 # =============================================================================
@@ -239,6 +421,8 @@ async def analyze_lead(
     Fetches the author's profile and content from the provider,
     stores profile data locally, indexes for search, and generates embeddings.
     """
+    from datetime import datetime, timezone
+
     # Get the lead to determine provider
     leads_service = LeadsService(db=db)
     lead = leads_service.get_lead(lead_id)
@@ -256,7 +440,12 @@ async def analyze_lead(
         )
 
     # Get services
-    provider_adapter = get_provider_adapter(lead.provider_id)
+    provider_adapter = get_provider_adapter(lead.provider_id, db)
+    if not provider_adapter:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Provider adapter not available. Check that credentials are configured.",
+        )
     indexing_service = get_indexing_service(db)
     embedding_service = get_embedding_service(db)
 
@@ -271,6 +460,27 @@ async def analyze_lead(
     try:
         result = await analysis_service.analyze_lead(lead_id)
 
+        # Audit log for successful analysis
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="lead.analyze",
+            result="ok" if result.success else "error",
+            provider_id=lead.provider_id,
+            entity_type="lead_post",
+            entity_id=lead_id,
+            request_json={"author_account_id": lead.author_account_id},
+            response_json={
+                "profile_snapshot_id": result.profile_snapshot_id,
+                "profile_items_count": result.profile_items_count,
+                "indexed_count": result.indexed_count,
+                "embedded_count": result.embedded_count,
+            },
+            error_detail=result.error if not result.success else None,
+        )
+        db.add(audit_entry)
+        db.commit()
+
         return AnalyzeLeadResponse(
             lead_id=result.lead_id,
             account_id=result.account_id,
@@ -284,6 +494,21 @@ async def analyze_lead(
 
     except AnalysisError as e:
         error_msg = str(e)
+
+        # Audit log for failed analysis
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="lead.analyze",
+            result="error",
+            provider_id=lead.provider_id,
+            entity_type="lead_post",
+            entity_id=lead_id,
+            error_detail=error_msg,
+        )
+        db.add(audit_entry)
+        db.commit()
+
         if "not found" in error_msg.lower():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -299,6 +524,20 @@ async def analyze_lead(
             detail=error_msg,
         )
     except Exception as e:
+        # Audit log for unexpected failure
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="lead.analyze",
+            result="error",
+            provider_id=lead.provider_id,
+            entity_type="lead_post",
+            entity_id=lead_id,
+            error_detail=str(e),
+        )
+        db.add(audit_entry)
+        db.commit()
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Analysis failed: {e}",

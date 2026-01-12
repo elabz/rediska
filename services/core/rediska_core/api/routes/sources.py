@@ -4,7 +4,9 @@ Provides endpoints for:
 - GET /sources/{provider_id}/locations/{location}/posts - Browse posts from a location
 """
 
-from typing import Annotated, Optional
+import json
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -14,45 +16,13 @@ from rediska_core.api.schemas.sources import (
     BrowsePost,
     BrowsePostsResponse,
 )
-from rediska_core.domain.services.browse import BrowseError, BrowseService, ProviderClient
+from rediska_core.config import get_settings
+from rediska_core.domain.models import Identity, Provider
+from rediska_core.domain.services.credentials import CredentialsService
+from rediska_core.infrastructure.crypto import CryptoService
+from rediska_core.providers.reddit.adapter import RedditAdapter
 
 router = APIRouter(prefix="/sources", tags=["sources"])
-
-
-# =============================================================================
-# PROVIDER CLIENT FACTORY
-# =============================================================================
-
-
-# Global provider client registry (can be overridden in tests)
-_provider_clients: dict[str, ProviderClient] = {}
-
-
-def register_provider_client(provider_id: str, client: ProviderClient) -> None:
-    """Register a provider client for a given provider."""
-    _provider_clients[provider_id] = client
-
-
-def get_provider_client(provider_id: str) -> Optional[ProviderClient]:
-    """Get a provider client for the given provider.
-
-    Args:
-        provider_id: The provider ID.
-
-    Returns:
-        A provider client instance or None.
-    """
-    return _provider_clients.get(provider_id)
-
-
-def get_browse_service(
-    db: Session = Depends(get_db),
-) -> BrowseService:
-    """Get the browse service."""
-    return BrowseService(db=db, provider_client=None)
-
-
-BrowseServiceDep = Annotated[BrowseService, Depends(get_browse_service)]
 
 
 # =============================================================================
@@ -75,48 +45,122 @@ async def browse_posts(
     sort: str = Query(default="hot", description="Sort order ('hot', 'new', 'top', 'rising')"),
     limit: int = Query(default=25, ge=1, le=100, description="Maximum posts to return"),
     cursor: Optional[str] = Query(default=None, description="Cursor for pagination"),
+    identity_id: Optional[int] = Query(default=None, description="Identity to use for API access"),
 ):
     """Browse posts from a provider location.
 
     Fetches posts from the specified location (e.g., subreddit)
     and returns them in a normalized format.
     """
-    # Get provider client
-    provider_client = get_provider_client(provider_id)
+    settings = get_settings()
 
-    # Create browse service with provider client
-    browse_service = BrowseService(db=db, provider_client=provider_client)
+    # Validate provider
+    provider = db.query(Provider).filter(Provider.provider_id == provider_id).first()
+    if not provider:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Unknown provider: {provider_id}"},
+        )
+
+    # Only Reddit is supported for now
+    if provider_id != "reddit":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": f"Provider '{provider_id}' does not support browsing"},
+        )
+
+    # Get identity with credentials
+    if identity_id:
+        identity = db.query(Identity).filter_by(id=identity_id, is_active=True).first()
+    else:
+        identity = db.query(Identity).filter_by(is_active=True).first()
+
+    if not identity:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "No active identity found. Please set up an identity first."},
+        )
+
+    # Get credentials
+    if not settings.encryption_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Encryption key not configured"},
+        )
+    crypto = CryptoService(settings.encryption_key)
+    credentials_service = CredentialsService(db=db, crypto=crypto)
+    credential = credentials_service.get_credential_decrypted(
+        provider_id="reddit",
+        identity_id=identity.id,
+        credential_type="oauth_tokens",
+    )
+
+    if not credential:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "No Reddit credentials found. Please connect your Reddit account."},
+        )
 
     try:
-        result = browse_service.browse_location(
-            provider_id=provider_id,
+        tokens = json.loads(credential)
+
+        # Create token refresh callback
+        def on_token_refresh(new_access_token: str) -> None:
+            tokens["access_token"] = new_access_token
+            credentials_service.store_credential(
+                provider_id="reddit",
+                identity_id=identity.id,
+                credential_type="oauth_tokens",
+                secret=json.dumps(tokens),
+            )
+
+        # Create Reddit adapter
+        adapter = RedditAdapter(
+            access_token=tokens["access_token"],
+            refresh_token=tokens["refresh_token"],
+            client_id=settings.provider_reddit_client_id,
+            client_secret=settings.provider_reddit_client_secret,
+            user_agent=settings.provider_reddit_user_agent,
+            on_token_refresh=on_token_refresh,
+        )
+
+        # Fetch posts from Reddit
+        result = await adapter.browse_location(
             location=location,
-            sort=sort,
-            limit=limit,
             cursor=cursor,
+            limit=limit,
+            sort=sort,
         )
 
         # Convert to response schema
-        posts = [BrowsePost(**post) for post in result["posts"]]
+        posts = []
+        for post in result.items:
+            # Convert timestamp
+            created_at = None
+            if post.created_at:
+                created_at = post.created_at.isoformat()
+
+            posts.append(BrowsePost(
+                provider_id=provider_id,
+                source_location=location,
+                external_post_id=post.external_id,
+                title=post.title or "",
+                body_text=post.body_text or "",
+                author_username=post.author_username or "",
+                author_external_id=post.author_id,
+                post_url=post.url or "",
+                post_created_at=created_at,
+                score=post.score or 0,
+                num_comments=post.num_comments or 0,
+            ))
 
         return BrowsePostsResponse(
             posts=posts,
-            cursor=result.get("cursor"),
+            cursor=result.next_cursor,
             source_location=location,
             provider_id=provider_id,
         )
 
-    except BrowseError as e:
-        error_msg = str(e)
-        if "Unknown provider" in error_msg:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": error_msg},
-            )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": error_msg},
-        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

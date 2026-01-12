@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, Response
 
 from rediska_core.api.deps import CurrentUser, DBSession
+from rediska_core.domain.models import AuditLog
 from rediska_core.api.schemas.attachment import (
     AttachmentMetaResponse,
     AttachmentUploadResponse,
@@ -49,6 +50,7 @@ AttachmentServiceDep = Annotated[AttachmentService, Depends(get_attachment_servi
 async def upload_attachment(
     current_user: CurrentUser,
     attachment_service: AttachmentServiceDep,
+    db: DBSession,
     file: UploadFile = File(..., description="File to upload"),
 ):
     """Upload a new attachment.
@@ -61,6 +63,8 @@ async def upload_attachment(
 
     Returns attachment details including ID and SHA256 hash.
     """
+    from datetime import datetime, timezone
+
     # Read file content
     content = await file.read()
 
@@ -73,6 +77,27 @@ async def upload_attachment(
             filename=file.filename or "upload",
             content_type=content_type,
         )
+
+        # Audit log for successful upload
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="attachment.upload",
+            result="ok",
+            entity_type="attachment",
+            entity_id=result.attachment_id,
+            request_json={
+                "filename": file.filename,
+                "content_type": content_type,
+                "size_bytes": len(content),
+            },
+            response_json={
+                "attachment_id": result.attachment_id,
+                "sha256": result.sha256,
+            },
+        )
+        db.add(audit_entry)
+        db.commit()
 
         return AttachmentUploadResponse.from_upload_result(result)
 

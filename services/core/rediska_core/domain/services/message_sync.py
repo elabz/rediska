@@ -4,13 +4,17 @@ Syncs conversations and messages from providers (e.g., Reddit) to the local data
 """
 
 import json
+import re
+import httpx
 from datetime import datetime, timezone
 from typing import Optional
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from rediska_core.config import get_settings
 from rediska_core.domain.models import (
+    Attachment,
     Conversation,
     ExternalAccount,
     Identity,
@@ -48,11 +52,121 @@ class MessageSyncResult:
 class MessageSyncService:
     """Service for syncing messages from providers."""
 
+    # Image URL patterns to detect in message bodies
+    IMAGE_URL_PATTERNS = [
+        # Reddit hosted images
+        r'https?://i\.redd\.it/[^\s\)]+',
+        r'https?://preview\.redd\.it/[^\s\)]+',
+        # Imgur
+        r'https?://(?:i\.)?imgur\.com/[^\s\)]+\.(?:jpg|jpeg|png|gif|webp)',
+        # Generic image URLs
+        r'https?://[^\s\)]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\s\)]*)?',
+    ]
+
+    # Allowed image content types
+    ALLOWED_IMAGE_TYPES = {
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+    }
+
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
         crypto = CryptoService(self.settings.encryption_key)
         self.credentials_service = CredentialsService(db=db, crypto=crypto)
+
+    def _extract_image_urls(self, text: str) -> list[str]:
+        """Extract image URLs from message text."""
+        if not text:
+            return []
+
+        urls = []
+        for pattern in self.IMAGE_URL_PATTERNS:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            urls.extend(matches)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_urls = []
+        for url in urls:
+            # Normalize URL (remove trailing punctuation that might have been captured)
+            url = url.rstrip('.,;:!?)')
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+
+        return unique_urls[:5]  # Limit to 5 images per message
+
+    async def _download_image(self, url: str) -> tuple[bytes, str] | None:
+        """Download an image from URL. Returns (data, content_type) or None on failure."""
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+                response = await client.get(
+                    url,
+                    headers={'User-Agent': self.settings.provider_reddit_user_agent}
+                )
+
+                if response.status_code != 200:
+                    return None
+
+                content_type = response.headers.get('Content-Type', '').split(';')[0].strip()
+                if content_type not in self.ALLOWED_IMAGE_TYPES:
+                    return None
+
+                # Limit to 10MB
+                content = response.content
+                if len(content) > 10 * 1024 * 1024:
+                    return None
+
+                return content, content_type
+
+        except Exception:
+            return None
+
+    async def _download_and_store_images(
+        self,
+        message_id: int,
+        image_urls: list[str],
+    ) -> int:
+        """Download images and create attachments. Returns count of images saved."""
+        if not image_urls:
+            return 0
+
+        from rediska_core.domain.services.attachment import AttachmentService
+
+        attachment_service = AttachmentService(
+            db=self.db,
+            storage_path=self.settings.attachments_path,
+        )
+
+        count = 0
+        for url in image_urls:
+            result = await self._download_image(url)
+            if result is None:
+                continue
+
+            data, content_type = result
+
+            try:
+                # Generate a filename from URL
+                url_path = url.split('?')[0].split('/')[-1]
+                if '.' not in url_path:
+                    ext = content_type.split('/')[-1]
+                    url_path = f"image.{ext}"
+
+                upload_result = attachment_service.upload(
+                    file_data=data,
+                    filename=url_path,
+                    content_type=content_type,
+                    message_id=message_id,
+                )
+                count += 1
+            except Exception:
+                continue
+
+        return count
 
     def _get_reddit_adapter(self, identity: Identity) -> RedditAdapter:
         """Create a Reddit adapter for the given identity."""
@@ -323,18 +437,32 @@ class MessageSyncService:
 
                         # Create message
                         sent_at = self._parse_reddit_timestamp(msg_data.get("created_utc"))
-                        _, is_new_msg = self._create_message_if_not_exists(
+                        body_text = msg_data.get("body", "")
+                        message, is_new_msg = self._create_message_if_not_exists(
                             conversation=conversation,
                             identity=identity,
                             external_message_id=msg_id,
                             direction=direction,
-                            body_text=msg_data.get("body", ""),
+                            body_text=body_text,
                             sent_at=sent_at,
                             sender_username=author,
                         )
 
                         if is_new_msg:
                             result.new_messages += 1
+
+                            # Download images for new messages
+                            if message:
+                                try:
+                                    image_urls = self._extract_image_urls(body_text)
+                                    if image_urls:
+                                        await self._download_and_store_images(
+                                            message_id=message.id,
+                                            image_urls=image_urls,
+                                        )
+                                except Exception as img_err:
+                                    result.errors.append(f"Failed to download images for message {msg_id}: {img_err}")
+
                         result.messages_synced += 1
 
                     except Exception as e:

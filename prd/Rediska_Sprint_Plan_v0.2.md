@@ -169,11 +169,15 @@ After OAuth, the system backfills conversations/messages into MySQL and keeps sy
   - [ ] Last sync time and result summary per identity
 
 #### Inbox UI (real data)
-- [ ] Conversation list reflects imported data, grouped by identity
-- [ ] Badges:
-  - [ ] counterpart deleted/suspended
-  - [ ] message deleted/removed
-- [ ] Search in Inbox list (client-side string filter ok; real search later)
+- [x] Conversation list reflects imported data, grouped by identity
+- [x] Badges:
+  - [x] counterpart deleted/suspended
+  - [x] message deleted/removed
+- [x] Search in Inbox list (client-side string filter ok; real search later)
+- [x] Load older messages pagination in conversation detail
+- [x] Manual message send functionality (compose box enabled)
+- [x] Image attachments displayed inline in messages
+- [x] Automatic image download during sync
 
 ### Acceptance Criteria
 - [ ] OAuth connects successfully and is persisted per identity.

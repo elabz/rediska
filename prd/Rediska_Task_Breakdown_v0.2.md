@@ -131,24 +131,30 @@ Test file naming:
   - AC: New users must create identity before using system.
 
 ### Epic 1.5 — Audit log (append-only)
-- [ ] (T) Write unit tests for audit entry creation
-- [ ] Implement audit writer utility (DB insert only; never update)
-  - [ ] Include identity_id in audit entries where applicable
+- [x] (T) Write unit tests for audit entry creation
+- [x] Implement audit writer utility (DB insert only; never update)
+  - [x] Include identity_id in audit entries where applicable
   - AC: All mutating endpoints write an audit entry with actor/action/result/identity.
-- [ ] (T) Write integration tests for audit query
-- [ ] Implement audit query endpoint: `GET /audit?cursor=&limit=&action_type=&identity_id=`
+- [x] (T) Write integration tests for audit query
+- [x] Implement audit query endpoint: `GET /audit?cursor=&limit=&action_type=&identity_id=`
   - AC: UI can page through audit entries, filter by identity.
+- [x] Add audit coverage to mutating endpoints:
+  - [x] conversation.py: send_message, retry_message, trigger_sync
+  - [x] leads.py: save_lead, update_lead_status, analyze_lead
+  - [x] attachment.py: upload_attachment
+  - [x] auth.py: login, logout (already had)
+  - [x] identity.py: create (already had)
 
 ### Epic 1.6 — Jobs ledger & idempotency utilities
-- [ ] (T) Write unit tests for dedupe_key computation
-- [ ] Implement `jobs` helper:
-  - [ ] compute `dedupe_key`
-  - [ ] atomic insert/upsert of job row
-  - [ ] lock/claim job for execution
-  - [ ] update status transitions and attempt counters
+- [x] (T) Write unit tests for dedupe_key computation
+- [x] Implement `jobs` helper:
+  - [x] compute `dedupe_key`
+  - [x] atomic insert/upsert of job row
+  - [x] lock/claim job for execution
+  - [x] update status transitions and attempt counters
   - AC: Re-running same job payload does not duplicate work.
-- [ ] (T) Write unit tests for error serialization
-- [ ] Implement consistent error serialization for `last_error`
+- [x] (T) Write unit tests for error serialization
+- [x] Implement consistent error serialization for `last_error`
   - AC: Ops view can display meaningful failure reasons.
 
 ---
@@ -165,12 +171,12 @@ Test file naming:
   - AC: a test task can be queued and executed.
 
 ### Epic 2.2 — Redis-backed rate limiter (provider calls)
-- [ ] (T) Write unit tests for token bucket algorithm
-- [ ] Implement token bucket + inflight concurrency limiter using Redis keys
+- [x] (T) Write unit tests for token bucket algorithm
+- [x] Implement token bucket + inflight concurrency limiter using Redis keys
   - Keys: `rate:{provider_id}:tokens`, `rate:{provider_id}:last_refill_ts`, `rate:{provider_id}:inflight`
   - AC: Under load, provider calls do not exceed QPM/concurrency settings.
-- [ ] (T) Write unit tests for backoff strategy
-- [ ] Implement backoff strategy helper (429/5xx aware)
+- [x] (T) Write unit tests for backoff strategy
+- [x] Implement backoff strategy helper (429/5xx aware)
   - AC: 429 triggers throttled retries, not hot loops.
 
 ---
@@ -180,33 +186,33 @@ Test file naming:
 > Provider-specific code may use "reddit" in filenames/classes.
 
 ### Epic 3.1 — OAuth setup (Reddit) - Identity-aware
-- [ ] (T) Write unit tests for credential encryption/decryption
-- [ ] Implement provider credentials storage (encrypt refresh token) linked to identity
+- [x] (T) Write unit tests for credential encryption/decryption
+- [x] Implement provider credentials storage (encrypt refresh token) linked to identity
   - AC: Refresh token stored encrypted; can be rotated; linked to identity.
-- [ ] (T) Write integration tests for OAuth flow
-- [ ] Implement OAuth endpoints:
-  - [ ] `GET /providers/reddit/oauth/start?identity_id`
-  - [ ] `GET /providers/reddit/oauth/callback`
+- [x] (T) Write integration tests for OAuth flow
+- [x] Implement OAuth endpoints:
+  - [x] `GET /providers/reddit/oauth/start?identity_id`
+  - [x] `GET /providers/reddit/oauth/callback`
   - AC: User can authorize identity; credentials persist; audit entry written with identity.
 
 ### Epic 3.2 — Provider adapter interface + mappers
-- [ ] (T) Write unit tests for provider interface methods
-- [ ] Define provider-agnostic interface in core (`ProviderClient` / service layer)
+- [x] (T) Write unit tests for provider interface methods
+- [x] Define provider-agnostic interface in core (`ProviderClient` / service layer)
   - AC: Core can call provider methods through interface.
-- [ ] (T) Write unit tests for Reddit adapter with mocked responses
-- [ ] Implement Reddit adapter methods (minimum):
-  - [ ] list conversations (for identity)
-  - [ ] list messages for a conversation
-  - [ ] browse location (subreddit)
-  - [ ] fetch post
-  - [ ] fetch user profile
-  - [ ] fetch user items (posts/comments/images)
-  - [ ] send message (using identity credentials)
+- [x] (T) Write unit tests for Reddit adapter with mocked responses
+- [x] Implement Reddit adapter methods (minimum):
+  - [x] list conversations (for identity)
+  - [x] list messages for a conversation
+  - [x] browse location (subreddit)
+  - [x] fetch post
+  - [x] fetch user profile
+  - [x] fetch user items (posts/comments/images)
+  - [x] send message (using identity credentials)
   - AC: Each method returns normalized DTOs with stable IDs when available.
 
 ### Epic 3.3 — "No remote delete" mapping rules
-- [ ] (T) Write unit tests for status mapping logic
-- [ ] Map provider deletion states to:
+- [x] (T) Write unit tests for status mapping logic
+- [x] Map provider deletion states to:
   - `external_accounts.remote_status`
   - `messages/lead_posts/profile_items.remote_visibility`
   - AC: Sync never deletes local rows; UI can show "deleted/removed" badges.
@@ -216,11 +222,11 @@ Test file naming:
 ## Phase 4 — Ingestion pipelines (backfill + delta sync) within API limits
 
 ### Epic 4.1 — Backfill orchestration (conversations → messages) - Identity-aware
-- [ ] (T) Write unit tests for backfill task logic
-- [ ] Implement task: `ingest.backfill_conversations(identity_id)`
+- [x] (T) Write unit tests for backfill task logic
+- [x] Implement task: `ingest.backfill_conversations(identity_id)`
   - AC: Creates conversations in DB without duplicates, linked to identity.
-- [ ] (T) Write unit tests for message backfill
-- [ ] Implement task: `ingest.backfill_messages(provider_id, external_conversation_id, cursor)`
+- [x] (T) Write unit tests for message backfill
+- [x] Implement task: `ingest.backfill_messages(provider_id, conversation_id, identity_id)`
   - AC: Ingests full history for that conversation; cursor-driven; idempotent.
 - [ ] (T) Write integration tests for fan-out
 - [ ] Implement fan-out strategy:
@@ -248,26 +254,30 @@ Test file naming:
 ## Phase 5 — Attachments (local filesystem) + message sending (manual only)
 
 ### Epic 5.1 — Local attachment store
-- [ ] (T) Write unit tests for file validation and storage
-- [ ] Implement `POST /attachments/upload` (multipart)
+- [x] (T) Write unit tests for file validation and storage
+- [x] Implement `POST /attachments/upload` (multipart)
   - validations: size <= 10MB, mime allowlist, sha256, (optional) width/height
   - AC: Returns attachment_id; file exists at computed storage key.
-- [ ] (T) Write integration tests for attachment download
-- [ ] Implement `GET /attachments/{id}` streaming download with auth
+- [x] (T) Write integration tests for attachment download
+- [x] Implement `GET /attachments/{id}` streaming download with auth
   - AC: Browser can view/download attachments.
+- [x] Implement automatic image download during message sync
+  - Detects image URLs in message bodies (Reddit images, Imgur, common formats)
+  - Downloads and stores as attachments linked to message
+  - AC: Images from messages are stored locally and displayed in UI.
 
 ### Epic 5.2 — Manual send message (v1) - Identity-aware
-- [ ] (T) Write unit tests for send validation logic
-- [ ] Implement Core endpoint: `POST /conversations/{id}/messages`
+- [x] (T) Write unit tests for send validation logic
+- [x] Implement Core endpoint: `POST /conversations/{id}/messages`
   - enqueues `message.send_manual`
   - Uses conversation's identity for sending
   - AC: Endpoint refuses if counterpart remote_status is deleted/suspended (unless override flag later).
-- [ ] (T) Write integration tests for send task
-- [ ] Implement worker task: `message.send_manual`
+- [x] (T) Write integration tests for send task
+- [x] Implement worker task: `message.send_manual`
   - (D) provider adapter must support send with identity credentials
   - AC: Message appears in provider and gets synced back into DB with identity.
-- [ ] (T) Write unit tests for at-most-once semantics
-- [ ] Implement at-most-once semantics & "unknown" state handling
+- [x] (T) Write unit tests for at-most-once semantics
+- [x] Implement at-most-once semantics & "unknown" state handling
   - AC: Ambiguous failures never auto-retry; user can manually reconcile.
 
 ---
@@ -275,26 +285,26 @@ Test file naming:
 ## Phase 6 — Elasticsearch + embeddings + hybrid search
 
 ### Epic 6.1 — ES index creation & client
-- [ ] (T) Write unit tests for ES client wrapper
-- [ ] Implement ES client in core and create index `rediska_content_docs_v1`
+- [x] (T) Write unit tests for ES client wrapper
+- [x] Implement ES client in core and create index `rediska_content_docs_v1`
   - Include identity_id in mapping
   - AC: Index exists on startup or via admin op.
-- [ ] (T) Write unit tests for upsert_content
-- [ ] Implement `index.upsert_content(doc_type, entity_id)` task
+- [x] (T) Write unit tests for upsert_content
+- [x] Implement `index.upsert_content(doc_type, entity_id)` task
   - AC: DB entity becomes ES doc with correct IDs and filters including identity_id.
 
 ### Epic 6.2 — Embeddings pipeline
-- [ ] (T) Write unit tests for embeddings client
-- [ ] Implement llama.cpp embeddings client wrapper
-- [ ] (T) Write unit tests for embed.generate task
-- [ ] Implement `embed.generate(doc_type, entity_id, text)` task
+- [x] (T) Write unit tests for embeddings client
+- [x] Implement llama.cpp embeddings client wrapper
+- [x] (T) Write unit tests for embed.generate task
+- [x] Implement `embed.generate(doc_type, entity_id, text)` task
   - AC: Stores embedding in ES doc and/or updates doc with embedding.
-- [ ] Decide embeddings dimension and finalize mapping
+- [x] Decide embeddings dimension and finalize mapping
   - AC: Mapping dims match model output; no ES errors.
 
 ### Epic 6.3 — Hybrid search API
-- [ ] (T) Write unit tests for search logic
-- [ ] Implement `POST /search` in core
+- [x] (T) Write unit tests for search logic
+- [x] Implement `POST /search` in core
   - BM25 + kNN + score blending
   - filters: provider_id, **identity_id**, remote_status exclusions, local_deleted
   - AC: Search returns stable, relevant results across doc types, filterable by identity.
@@ -304,24 +314,24 @@ Test file naming:
 ## Phase 7 — Leads workflow: browse, save, analyze, directories
 
 ### Epic 7.1 — Manual browse UI + API
-- [ ] (T) Write unit tests for browse endpoint
-- [ ] Implement Core endpoint for browsing provider location posts:
+- [x] (T) Write unit tests for browse endpoint
+- [x] Implement Core endpoint for browsing provider location posts:
   - `GET /sources/{provider_id}/locations/{location}/posts`
   - AC: Pagination/cursors work; posts render in UI.
-- [ ] (T) Write unit tests for lead save
-- [ ] Implement "save post":
+- [x] (T) Write unit tests for lead save
+- [x] Implement "save post":
   - `POST /leads/save`
   - AC: lead_posts row created/upserted; status=saved.
 
 ### Epic 7.2 — Lead analysis pipeline (profile fetch + agent)
-- [ ] (T) Write integration tests for analysis pipeline
-- [ ] Implement `POST /leads/{id}/analyze`:
+- [x] (T) Write integration tests for analysis pipeline
+- [x] Implement `POST /leads/{id}/analyze`:
   - enqueue: fetch post (if needed) → fetch author profile/items → embeddings/index → agent summary/scoring
   - AC: One click results in populated profile + scoring + searchable content.
 
 ### Epic 7.3 — Directories
-- [ ] (T) Write unit tests for directory filters
-- [ ] Implement directory endpoints:
+- [x] (T) Write unit tests for directory filters
+- [x] Implement directory endpoints:
   - analyzed/contacted/engaged filters based on state fields
   - AC: Directory lists update as workflow progresses.
 
@@ -330,10 +340,10 @@ Test file naming:
 ## Phase 8 — Agent workflows (PydanticAI) + evidence + safety rails
 
 ### Epic 8.1 — Agent infrastructure - Voice-aware
-- [ ] (T) Write unit tests for inference client
-- [ ] Implement llama.cpp inference wrapper (chat/completion)
-- [ ] (T) Write unit tests for agent harness
-- [ ] Implement agent runner harness with:
+- [x] (T) Write unit tests for inference client
+- [x] Implement llama.cpp inference wrapper (chat/completion)
+- [x] (T) Write unit tests for agent harness
+- [x] Implement agent runner harness with:
   - tool allowlist
   - structured outputs (Pydantic models)
   - model_info_json recording
@@ -341,27 +351,27 @@ Test file naming:
   - AC: agent runs are reproducible and logged; use identity's voice.
 
 ### Epic 8.2 — Profile summary agent
-- [ ] (T) Write unit tests for profile summary generation
-- [ ] Implement `agent.profile_summary(account_id)`
+- [x] (T) Write unit tests for profile summary generation
+- [x] Implement `agent.profile_summary(account_id)`
   - inputs: profile items + key metadata
   - outputs: summary_text + signals_json + risk_flags_json + citations/evidence references
   - AC: profile_snapshots row created; UI renders summary + evidence.
 
 ### Epic 8.3 — Lead scoring agent
-- [ ] (T) Write unit tests for lead scoring
-- [ ] Implement `agent.lead_scoring(lead_post_id)`
+- [x] (T) Write unit tests for lead scoring
+- [x] Implement `agent.lead_scoring(lead_post_id)`
   - output: score + reasons + flags + recommended next action
   - AC: stored in lead or snapshot structures; used for sorting.
 
 ### Epic 8.4 — Draft intro agent (manual only) - Voice-aware
-- [ ] (T) Write unit tests for draft generation with voice config
-- [ ] Implement `agent.draft_intro(target, identity_id)`
+- [x] (T) Write unit tests for draft generation with voice config
+- [x] Implement `agent.draft_intro(target, identity_id)`
   - produces draft text using identity's voice_config; does **not** send
   - AC: UI shows draft + "Send" button requiring explicit click; voice matches identity.
 
 ### Epic 8.5 — Duplicate detection suggestions (optional v1.1)
-- [ ] (T) Write unit tests for duplicate detection
-- [ ] Implement "possible duplicates" heuristic:
+- [x] (T) Write unit tests for duplicate detection
+- [x] Implement "possible duplicates" heuristic:
   - same/similar username, overlapping image hashes, etc.
   - AC: UI shows suggestions; no automatic merges.
 
@@ -393,12 +403,18 @@ Test file naming:
   - AC: Users can manage multiple identities.
 
 ### Epic 9.3 — Inbox & conversation view - Identity-aware
-- [ ] (T) Write component tests for inbox
-- [ ] Inbox list with search/filter/badges
+- [x] (T) Write component tests for inbox
+- [x] Inbox list with search/filter/badges
+  - [x] Search field to filter by username or message content
+  - [x] Conversation time shows actual last message timestamp
   - [ ] **Identity filter/selector**
   - [ ] Group/sort conversations by identity
-- [ ] (T) Write component tests for conversation view
-- [ ] Conversation view with pagination, attachment display, compose box
+- [x] (T) Write component tests for conversation view
+- [x] Conversation view with pagination, attachment display, compose box
+  - [x] Load older messages button with cursor-based pagination
+  - [x] Display attachments/images inline in message bubbles
+  - [x] Compose box with manual send functionality
+  - [x] Disabled compose for deleted/suspended users
   - [ ] **Display which identity is used**
 - [ ] Draft suggestion panel (agent output)
   - AC: User can find chats and read history quickly; identity is always visible.
@@ -418,21 +434,33 @@ Test file naming:
   - AC: User can manage large sets of chats/counterparts.
 
 ### Epic 9.6 — Ops + Audit UIs
-- [ ] (T) Write component tests for ops page
-- [ ] Ops page: sync/backfill controls, job statuses, last backup/restore test status
+- [x] (T) Write component tests for ops page
+- [x] Ops page: sync/backfill controls, job statuses, last backup/restore test status
   - [ ] **Per-identity sync status**
-- [ ] (T) Write component tests for audit page
-- [ ] Audit page: filterable list of audit_log events
+- [x] (T) Write component tests for audit page
+- [x] Audit page: filterable list of audit_log events
+  - [x] Filter by action_type, actor, result
+  - [x] Expandable entries showing request/response JSON
+  - [x] Cursor-based pagination
   - [ ] **Filter by identity**
   - AC: user can audit system actions by identity.
+
+### Epic 9.7 — Search UI (NEW)
+- [x] Implement search page with hybrid search
+  - [x] Query input with search button
+  - [x] Search mode selector (hybrid/text/vector)
+  - [x] Document type filter
+  - [x] Search results with relevance scores
+  - [x] Click-through to conversations/messages
+  - AC: user can search across all indexed content.
 
 ---
 
 ## Phase 10 — Backups & restore tests (local-only)
 
 ### Epic 10.1 — Local backup job + scripts
-- [ ] (T) Write unit tests for backup task
-- [ ] Implement maintenance tasks:
+- [x] (T) Write unit tests for backup task
+- [x] Implement maintenance tasks:
   - `maintenance.mysql_dump_local`
   - `maintenance.attachments_snapshot_local`
   - AC: Creates dated dumps + checksums; snapshots attachments.
@@ -441,8 +469,8 @@ Test file naming:
   - AC: backups run without manual intervention.
 
 ### Epic 10.2 — Restore test automation
-- [ ] (T) Write integration tests for restore flow
-- [ ] Implement `maintenance.restore_test_local`
+- [x] (T) Write integration tests for restore flow
+- [x] Implement `maintenance.restore_test_local`
   - spins ephemeral MySQL container, imports latest dump, runs integrity queries, samples attachments
   - AC: Records pass/fail in audit_log and surfaces in Ops UI.
 
@@ -451,26 +479,26 @@ Test file naming:
 ## Phase 11 — Hardening, QA, and "done" criteria
 
 ### Epic 11.1 — Data safety & correctness
-- [ ] (T) Write E2E tests for no-remote-delete policy
-- [ ] Verify **no remote deletes** end-to-end
+- [x] (T) Write E2E tests for no-remote-delete policy
+- [x] Verify **no remote deletes** end-to-end
   - AC: deleted users/messages remain locally accessible with badge.
 - [ ] (T) Write E2E tests for local delete/purge
 - [ ] Verify local delete/purge flows work and are audited
   - AC: user can delete counterpart and content; optional purge removes files.
 
 ### Epic 11.2 — Performance & scaling (single host)
-- [ ] Add pagination everywhere (inbox, messages, posts, audit)
+- [x] Add pagination everywhere (inbox, messages, posts, audit)
 - [ ] Add DB indexes as needed from slow query logs
 - [ ] Add ES query limits/timeouts
   - AC: UI remains responsive with "hundreds of chats".
 
 ### Epic 11.3 — Observability (local)
-- [ ] Add structured logs for core and worker (JSON logs recommended)
-- [ ] Add basic metrics endpoints (optional): queue depth, last sync times
+- [x] Add structured logs for core and worker (JSON logs recommended)
+- [x] Add basic metrics endpoints (optional): queue depth, last sync times
   - AC: troubleshooting is possible without external tooling.
 
 ### Epic 11.4 — Test Coverage Review
-- [ ] Review and fill gaps in unit test coverage (target 80%+)
+- [x] Review and fill gaps in unit test coverage (target 80%+)
 - [ ] Review and fill gaps in integration test coverage
 - [ ] Add E2E tests for critical user flows
   - AC: Comprehensive test suite provides confidence for releases.
