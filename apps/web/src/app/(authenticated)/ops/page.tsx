@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
+import Link from 'next/link';
 import {
   Loader2,
   Download,
@@ -18,6 +19,8 @@ import {
   Play,
   XCircle,
   Timer,
+  Trash2,
+  ExternalLink,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -46,6 +49,12 @@ interface BackfillResult {
   jobId?: string;
 }
 
+interface JobPayload {
+  conversation_id?: number;
+  message_id?: number;
+  identity_id?: number;
+}
+
 interface Job {
   id: number;
   queue_name: string;
@@ -57,6 +66,7 @@ interface Job {
   next_run_at: string | null;
   created_at: string;
   updated_at: string;
+  payload?: JobPayload | null;
 }
 
 interface JobCounts {
@@ -65,6 +75,7 @@ interface JobCounts {
   retrying: number;
   failed: number;
   done: number;
+  cancelled: number;
   total: number;
 }
 
@@ -106,6 +117,7 @@ function getStatusColor(status: string): string {
     case 'retrying': return 'bg-orange-500/10 text-orange-600 border-orange-500/20';
     case 'failed': return 'bg-red-500/10 text-red-600 border-red-500/20';
     case 'done': return 'bg-green-500/10 text-green-600 border-green-500/20';
+    case 'cancelled': return 'bg-gray-500/10 text-gray-600 border-gray-500/20';
     default: return 'bg-gray-500/10 text-gray-600 border-gray-500/20';
   }
 }
@@ -117,6 +129,7 @@ function getStatusIcon(status: string) {
     case 'retrying': return <RotateCcw className="h-3 w-3" />;
     case 'failed': return <XCircle className="h-3 w-3" />;
     case 'done': return <CheckCircle className="h-3 w-3" />;
+    case 'cancelled': return <XCircle className="h-3 w-3" />;
     default: return <Timer className="h-3 w-3" />;
   }
 }
@@ -125,8 +138,22 @@ function getStatusIcon(status: string) {
 // Components
 // =============================================================================
 
-function JobRow({ job, onRetry }: { job: Job; onRetry: (id: number) => void }) {
+function JobRow({
+  job,
+  onRetry,
+  onDelete,
+  isDeleting,
+}: {
+  job: Job;
+  onRetry: (id: number) => void;
+  onDelete?: (conversationId: number, messageId: number) => void;
+  isDeleting?: boolean;
+}) {
   const [showError, setShowError] = useState(false);
+
+  const isMessageJob = job.job_type === 'message.send_manual';
+  const canDelete = isMessageJob && job.status === 'queued' && job.payload?.conversation_id && job.payload?.message_id && onDelete;
+  const hasConversationLink = isMessageJob && job.payload?.conversation_id;
 
   return (
     <div className="border-b last:border-b-0 px-4 py-3">
@@ -141,6 +168,16 @@ function JobRow({ job, onRetry }: { job: Job; onRetry: (id: number) => void }) {
           </Badge>
           <span className="font-medium truncate">{job.job_type}</span>
           <span className="text-xs text-muted-foreground shrink-0">#{job.id}</span>
+          {hasConversationLink && (
+            <Link
+              href={`/inbox/${job.payload!.conversation_id}`}
+              className="text-xs text-primary hover:underline flex items-center gap-1"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ExternalLink className="h-3 w-3" />
+              View conversation
+            </Link>
+          )}
         </div>
 
         <div className="flex items-center gap-4 shrink-0">
@@ -150,6 +187,22 @@ function JobRow({ job, onRetry }: { job: Job; onRetry: (id: number) => void }) {
           <span className="text-xs text-muted-foreground">
             {formatDate(job.created_at)}
           </span>
+          {canDelete && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onDelete(job.payload!.conversation_id!, job.payload!.message_id!)}
+              disabled={isDeleting}
+              className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              {isDeleting ? (
+                <Loader2 className="h-3 w-3 animate-spin mr-1" />
+              ) : (
+                <Trash2 className="h-3 w-3 mr-1" />
+              )}
+              Delete
+            </Button>
+          )}
           {job.status === 'failed' && (
             <Button
               variant="ghost"
@@ -191,6 +244,7 @@ function JobsPanel() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<number | null>(null);
+  const [deletingMessage, setDeletingMessage] = useState<string | null>(null);
 
   const fetchJobs = useCallback(async () => {
     setLoading(true);
@@ -242,6 +296,31 @@ function JobsPanel() {
     }
   };
 
+  const handleDelete = async (conversationId: number, messageId: number) => {
+    const key = `${conversationId}-${messageId}`;
+    setDeletingMessage(key);
+    try {
+      const response = await fetch(
+        `/api/core/conversations/${conversationId}/messages/${messageId}`,
+        {
+          method: 'DELETE',
+          credentials: 'include',
+        }
+      );
+
+      if (response.ok) {
+        await fetchJobs();
+      } else {
+        const data = await response.json();
+        console.error('Failed to delete message:', data.detail);
+      }
+    } catch (err) {
+      console.error('Failed to delete message:', err);
+    } finally {
+      setDeletingMessage(null);
+    }
+  };
+
   const statusFilters = [
     { key: null, label: 'All', count: counts?.total },
     { key: 'queued', label: 'Queued', count: counts?.queued },
@@ -249,6 +328,7 @@ function JobsPanel() {
     { key: 'retrying', label: 'Retrying', count: counts?.retrying },
     { key: 'failed', label: 'Failed', count: counts?.failed },
     { key: 'done', label: 'Done', count: counts?.done },
+    { key: 'cancelled', label: 'Cancelled', count: counts?.cancelled },
   ];
 
   return (
@@ -308,6 +388,8 @@ function JobsPanel() {
                 key={job.id}
                 job={job}
                 onRetry={handleRetry}
+                onDelete={handleDelete}
+                isDeleting={deletingMessage === `${job.payload?.conversation_id}-${job.payload?.message_id}`}
               />
             ))}
           </div>

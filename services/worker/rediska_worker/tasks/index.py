@@ -120,6 +120,97 @@ def delete_content(doc_type: str, entity_id: int) -> dict[str, Any]:
         session.close()
 
 
+@app.task(name="index.bulk_index_all_messages")
+def bulk_index_all_messages(batch_size: int = 500) -> dict[str, Any]:
+    """Index all messages in the database to Elasticsearch.
+
+    Processes messages in batches to avoid memory issues.
+
+    Args:
+        batch_size: Number of messages to process per batch.
+
+    Returns:
+        Dictionary with indexing results.
+    """
+    import logging
+    from rediska_core.config import get_settings
+    from rediska_core.domain.models import Message
+    from rediska_core.domain.services.indexing import IndexingService
+    from rediska_core.infra.db import get_sync_session_factory
+
+    logger = logging.getLogger(__name__)
+    settings = get_settings()
+    session_factory = get_sync_session_factory()
+    session = session_factory()
+
+    total_indexed = 0
+    total_errors = 0
+
+    try:
+        service = IndexingService(
+            db=session,
+            es_url=settings.elastic_url,
+        )
+
+        # Ensure the index exists
+        service.ensure_index()
+
+        # Get total count
+        total_messages = session.query(Message.id).count()
+        logger.info(f"Starting bulk index of {total_messages} messages")
+
+        # Process in batches
+        offset = 0
+        batch_num = 0
+        while True:
+            message_ids = [
+                row[0] for row in
+                session.query(Message.id)
+                .order_by(Message.id)
+                .offset(offset)
+                .limit(batch_size)
+                .all()
+            ]
+
+            if not message_ids:
+                break
+
+            batch_num += 1
+            result = service.bulk_index_messages(message_ids)
+
+            indexed = result.get("indexed", 0)
+            errors = result.get("error_count", 0)
+            total_indexed += indexed
+            total_errors += errors
+
+            if batch_num % 10 == 0:
+                logger.info(
+                    f"Indexed batch {batch_num}: {total_indexed}/{total_messages} messages"
+                )
+
+            offset += batch_size
+
+        logger.info(f"Bulk indexing complete: {total_indexed} indexed, {total_errors} errors")
+
+        return {
+            "status": "success",
+            "total_messages": total_messages,
+            "indexed": total_indexed,
+            "error_count": total_errors,
+        }
+
+    except Exception as e:
+        logger.error(f"Bulk indexing failed: {e}")
+        return {
+            "status": "error",
+            "indexed": total_indexed,
+            "error_count": total_errors,
+            "error": str(e),
+        }
+    finally:
+        session.close()
+
+
 @app.task(name="index.bulk_index_conversation")
 def bulk_index_conversation(conversation_id: int) -> dict[str, Any]:
     """Bulk index all messages in a conversation.

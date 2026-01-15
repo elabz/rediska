@@ -37,6 +37,14 @@ router = APIRouter(prefix="/ops", tags=["operations"])
 # =============================================================================
 
 
+class JobPayload(BaseModel):
+    """Job payload with relevant fields extracted."""
+
+    conversation_id: Optional[int] = None
+    message_id: Optional[int] = None
+    identity_id: Optional[int] = None
+
+
 class JobResponse(BaseModel):
     """Job response schema."""
 
@@ -50,6 +58,7 @@ class JobResponse(BaseModel):
     next_run_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    payload: Optional[JobPayload] = None
 
     class Config:
         from_attributes = True
@@ -111,6 +120,7 @@ class JobCountsResponse(BaseModel):
     retrying: int
     failed: int
     done: int
+    cancelled: int
     total: int
 
 
@@ -140,6 +150,19 @@ def get_celery_app() -> Celery:
     """Get a Celery app instance."""
     settings = get_settings()
     return Celery(broker=settings.celery_broker_url, backend=settings.celery_result_backend)
+
+
+def extract_job_payload(job: Job) -> Optional[JobPayload]:
+    """Extract relevant payload fields from a job."""
+    if not job.payload_json:
+        return None
+
+    payload = job.payload_json
+    return JobPayload(
+        conversation_id=payload.get("conversation_id"),
+        message_id=payload.get("message_id"),
+        identity_id=payload.get("identity_id"),
+    )
 
 
 # =============================================================================
@@ -189,6 +212,7 @@ async def list_jobs(
                 next_run_at=job.next_run_at,
                 created_at=job.created_at,
                 updated_at=job.updated_at,
+                payload=extract_job_payload(job),
             )
             for job in jobs
         ],
@@ -221,6 +245,7 @@ async def get_job_counts(
         retrying=count_map.get("retrying", 0),
         failed=count_map.get("failed", 0),
         done=count_map.get("done", 0),
+        cancelled=count_map.get("cancelled", 0),
         total=sum(count_map.values()),
     )
 
@@ -255,6 +280,7 @@ async def get_job(
         next_run_at=job.next_run_at,
         created_at=job.created_at,
         updated_at=job.updated_at,
+        payload=extract_job_payload(job),
     )
 
 

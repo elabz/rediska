@@ -21,17 +21,19 @@ interface SearchHit {
   score: number;
   source: {
     doc_type?: string;
-    text?: string;
+    content?: string;
+    title?: string;
     provider_id?: string;
-    identity_id?: string;
-    account_id?: string;
-    conversation_id?: string;
-    message_id?: string;
-    lead_post_id?: string;
+    identity_id?: number;
+    account_id?: number;
+    conversation_id?: number;
+    entity_id?: number;
+    direction?: string;
     source_location?: string;
     created_at?: string;
     remote_status?: string;
     remote_visibility?: string;
+    counterpart_username?: string;
   };
 }
 
@@ -68,8 +70,10 @@ function getDocTypeInfo(docType: string) {
 function SearchResultCard({ hit }: { hit: SearchHit }) {
   const docType = hit.source.doc_type || 'unknown';
   const { icon: Icon, label, color } = getDocTypeInfo(docType);
-  const text = hit.source.text || '';
+  const text = hit.source.content || hit.source.title || '';
   const preview = text.length > 200 ? text.substring(0, 200) + '...' : text;
+  const username = hit.source.counterpart_username;
+  const direction = hit.source.direction;
 
   // Determine link based on doc type
   let linkHref: string | null = null;
@@ -78,6 +82,8 @@ function SearchResultCard({ hit }: { hit: SearchHit }) {
   } else if (docType === 'conversation') {
     const convId = hit.id.split(':')[1];
     if (convId) linkHref = `/inbox/${convId}`;
+  } else if (docType === 'lead_post' && hit.source.entity_id) {
+    linkHref = `/leads/${hit.source.entity_id}`;
   }
 
   const content = (
@@ -96,14 +102,21 @@ function SearchResultCard({ hit }: { hit: SearchHit }) {
                 {hit.source.provider_id}
               </Badge>
             )}
+            {username && (
+              <span className="text-xs font-medium text-primary">
+                {direction === 'in' ? 'From' : 'To'}: u/{username}
+              </span>
+            )}
             {hit.source.source_location && (
               <span className="text-xs text-muted-foreground">
                 r/{hit.source.source_location}
               </span>
             )}
-            <span className="text-xs text-muted-foreground ml-auto">
-              Score: {hit.score.toFixed(2)}
-            </span>
+            {hit.score > 0 && (
+              <span className="text-xs text-muted-foreground ml-auto">
+                Score: {hit.score.toFixed(2)}
+              </span>
+            )}
           </div>
           <p className="text-sm whitespace-pre-wrap break-words line-clamp-3">
             {preview || <span className="text-muted-foreground italic">No text content</span>}

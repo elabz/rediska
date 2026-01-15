@@ -289,6 +289,9 @@ export default function ConversationDetailPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const fastPollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [isFastPolling, setIsFastPolling] = useState(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -363,6 +366,82 @@ export default function ConversationDetailPage() {
     }
   }, [nextCursor, loadingOlder, fetchMessagesPage]);
 
+  // Poll for message updates (new messages + status changes)
+  const pollMessages = useCallback(async () => {
+    if (loading) return;
+
+    try {
+      // Fetch fresh messages (just the first page for speed)
+      const msgsData = await fetchMessagesPage();
+      const freshMessages = msgsData.messages.reverse();
+
+      setMessages(prev => {
+        // Build a map of existing messages by ID
+        const existingMap = new Map(prev.map(m => [m.id, m]));
+
+        // Merge fresh messages, updating existing ones and adding new ones
+        const updated: Message[] = [];
+        const seenIds = new Set<number>();
+
+        // First, include all existing messages, updating them if fresh data exists
+        for (const existing of prev) {
+          const fresh = freshMessages.find(f => f.id === existing.id);
+          if (fresh) {
+            // Update with fresh data (including remote_visibility changes)
+            updated.push(fresh);
+          } else {
+            // Keep existing message
+            updated.push(existing);
+          }
+          seenIds.add(existing.id);
+        }
+
+        // Add any new messages that weren't in the existing list
+        for (const fresh of freshMessages) {
+          if (!seenIds.has(fresh.id)) {
+            updated.push(fresh);
+          }
+        }
+
+        // Sort by sent_at to maintain order
+        updated.sort((a, b) => new Date(a.sent_at).getTime() - new Date(b.sent_at).getTime());
+
+        return updated;
+      });
+    } catch (err) {
+      console.error('Failed to poll messages:', err);
+    }
+  }, [loading, fetchMessagesPage]);
+
+  // Check if there are any pending outgoing messages
+  const hasPendingMessages = useCallback(() => {
+    return messages.some(m => m.direction === 'out' && m.remote_visibility === 'unknown');
+  }, [messages]);
+
+  // Start fast polling (every 2 seconds for up to 30 seconds)
+  const startFastPolling = useCallback(() => {
+    // Clear any existing fast poll timeout
+    if (fastPollTimeoutRef.current) {
+      clearTimeout(fastPollTimeoutRef.current);
+    }
+
+    setIsFastPolling(true);
+
+    // Stop fast polling after 30 seconds
+    fastPollTimeoutRef.current = setTimeout(() => {
+      setIsFastPolling(false);
+    }, 30000);
+  }, []);
+
+  // Stop fast polling
+  const stopFastPolling = useCallback(() => {
+    if (fastPollTimeoutRef.current) {
+      clearTimeout(fastPollTimeoutRef.current);
+      fastPollTimeoutRef.current = null;
+    }
+    setIsFastPolling(false);
+  }, []);
+
   // Send message
   const sendMessage = useCallback(async () => {
     if (!messageText.trim() || sending) return;
@@ -406,12 +485,15 @@ export default function ConversationDetailPage() {
       setMessageText('');
       setAttachmentIds([]);
       setTimeout(scrollToBottom, 100);
+
+      // Start fast polling to catch status updates quickly
+      startFastPolling();
     } catch (err) {
       setSendError(err instanceof Error ? err.message : 'Failed to send message');
     } finally {
       setSending(false);
     }
-  }, [messageText, sending, conversationId, conversation?.identity_id, attachmentIds]);
+  }, [messageText, sending, conversationId, conversation?.identity_id, attachmentIds, startFastPolling]);
 
   // Delete message
   const deleteMessage = useCallback(async (messageId: number) => {
@@ -547,6 +629,48 @@ export default function ConversationDetailPage() {
       scrollToBottom();
     }
   }, [loading]);
+
+  // Polling interval management
+  useEffect(() => {
+    if (loading) return;
+
+    // Determine polling interval: 2s for fast polling, 10s for normal
+    const interval = isFastPolling ? 2000 : 10000;
+
+    // Clear existing interval
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
+
+    // Set up new polling interval
+    pollIntervalRef.current = setInterval(() => {
+      pollMessages();
+    }, interval);
+
+    // Cleanup on unmount or when interval changes
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [loading, isFastPolling, pollMessages]);
+
+  // Stop fast polling when all pending messages are resolved
+  useEffect(() => {
+    if (isFastPolling && !hasPendingMessages()) {
+      stopFastPolling();
+    }
+  }, [isFastPolling, hasPendingMessages, stopFastPolling]);
+
+  // Cleanup fast poll timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (fastPollTimeoutRef.current) {
+        clearTimeout(fastPollTimeoutRef.current);
+      }
+    };
+  }, []);
 
   if (loading) {
     return (

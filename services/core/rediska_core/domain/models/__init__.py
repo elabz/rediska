@@ -753,7 +753,7 @@ class Job(Base):
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
 
     status: Mapped[str] = mapped_column(
-        Enum("queued", "running", "retrying", "failed", "done", name="job_status_enum"),
+        Enum("queued", "running", "retrying", "failed", "done", "cancelled", name="job_status_enum"),
         nullable=False,
         default="queued",
     )

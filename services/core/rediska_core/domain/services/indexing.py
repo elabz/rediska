@@ -98,6 +98,11 @@ class IndexingService:
         Returns:
             Dictionary suitable for ES indexing.
         """
+        # Try to get counterpart username from conversation relationship
+        counterpart_username = None
+        if message.conversation and message.conversation.counterpart_account:
+            counterpart_username = message.conversation.counterpart_account.external_username
+
         return {
             "doc_type": "message",
             "entity_id": message.id,
@@ -110,6 +115,7 @@ class IndexingService:
             "local_deleted": False,
             "created_at": message.sent_at.isoformat() if message.sent_at else None,
             "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "counterpart_username": counterpart_username,
         }
 
     def conversation_to_document(self, conversation: Conversation) -> dict[str, Any]:
@@ -371,9 +377,14 @@ class IndexingService:
         if not message_ids:
             return {"success": True, "indexed": 0}
 
-        # Fetch messages
+        from sqlalchemy.orm import joinedload
+
+        # Fetch messages with conversation and counterpart for username
         messages = (
             self.db.query(Message)
+            .options(
+                joinedload(Message.conversation).joinedload(Conversation.counterpart_account)
+            )
             .filter(Message.id.in_(message_ids))
             .all()
         )

@@ -431,9 +431,8 @@ class MessageSyncService:
         for endpoint in endpoints:
             cursor = None
             pages_fetched = 0
-            max_pages = 50
 
-            while pages_fetched < max_pages and my_attachment_count < limit:
+            while my_attachment_count < limit:
                 try:
                     messages_page = await adapter.fetch_inbox_messages(
                         cursor=cursor, limit=100, endpoint=endpoint
@@ -494,8 +493,19 @@ class MessageSyncService:
                             logger.error(f"Error backfilling message {msg_data.get('id')}: {e}")
                             result["errors"].append(str(e))
 
+                    # Log progress every 10 pages
+                    if pages_fetched % 10 == 0:
+                        logger.info(
+                            f"Attachment backfill {endpoint}: Page {pages_fetched}, "
+                            f"{result['messages_processed']} messages checked, "
+                            f"{result['attachments_created']} attachments created"
+                        )
+
                     cursor = messages_page.next_cursor
                     if not messages_page.has_more or not cursor:
+                        logger.info(
+                            f"Attachment backfill {endpoint}: Completed after {pages_fetched} pages"
+                        )
                         break
 
                 except Exception as e:
@@ -557,12 +567,14 @@ class MessageSyncService:
 
         # Fetch from both endpoints
         endpoints = ["/message/inbox", "/message/sent"]
-        max_pages_per_endpoint = 50  # Safety limit to prevent infinite loops
 
         for endpoint in endpoints:
             cursor = None
             pages_fetched = 0
-            while pages_fetched < max_pages_per_endpoint:
+            endpoint_messages = 0
+            logger.info(f"Starting to fetch messages from {endpoint}")
+
+            while True:  # Continue until Reddit returns no more data
                 try:
                     # Fetch a page of raw messages
                     messages_page = await adapter.fetch_inbox_messages(
@@ -673,13 +685,26 @@ class MessageSyncService:
                                     result.errors.append(f"Failed to download images for message {msg_id}: {img_err}")
 
                         result.messages_synced += 1
+                        endpoint_messages += 1
 
                     except Exception as e:
                         result.errors.append(f"Failed to process message: {e}")
 
+                # Log progress every 10 pages
+                if pages_fetched % 10 == 0:
+                    logger.info(
+                        f"{endpoint}: Page {pages_fetched}, "
+                        f"{endpoint_messages} messages processed, "
+                        f"{result.new_messages} new"
+                    )
+
                 # Move to next page
                 cursor = messages_page.next_cursor
                 if not messages_page.has_more or not cursor:
+                    logger.info(
+                        f"{endpoint}: Completed after {pages_fetched} pages, "
+                        f"{endpoint_messages} messages total"
+                    )
                     break
 
         # Commit all changes

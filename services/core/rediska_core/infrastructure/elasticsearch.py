@@ -123,6 +123,9 @@ CONTENT_DOCS_MAPPING = {
             "direction": {
                 "type": "keyword",
             },
+            "counterpart_username": {
+                "type": "keyword",
+            },
 
             # Lead post-specific fields
             "source_location": {
@@ -502,8 +505,6 @@ class ElasticsearchClient:
             result = self._client.search(
                 index=index,
                 body=body,
-                from_=from_,
-                size=size,
             )
 
             hits = result.get("hits", {})

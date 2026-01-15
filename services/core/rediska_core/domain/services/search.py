@@ -365,7 +365,17 @@ class SearchService:
             except (SearchError, EmbeddingsError):
                 pass  # Fall back to BM25 only
 
-        # Blend results
+        # If no kNN results, return BM25 results directly with original scores
+        if not knn_results.get("hits"):
+            bm25_hits = bm25_results.get("hits", [])
+            paginated = bm25_hits[offset : offset + limit]
+            return {
+                "total": bm25_results.get("total", len(bm25_hits)),
+                "hits": paginated,
+                "max_score": paginated[0]["score"] if paginated else None,
+            }
+
+        # Blend results using RRF when we have both BM25 and kNN
         blended = self._blend_results(
             bm25_hits=bm25_results.get("hits", []),
             knn_hits=knn_results.get("hits", []),

@@ -311,6 +311,8 @@ class SendMessageService:
         Updates the message visibility to 'visible' and records
         the external message ID from the provider.
 
+        Also marks the associated job as 'done'.
+
         Args:
             message_id: The local message ID.
             external_message_id: The provider's message ID.
@@ -322,6 +324,23 @@ class SendMessageService:
             },
             synchronize_session=False,
         )
+
+        # Mark associated job as done
+        jobs = (
+            self.db.query(Job)
+            .filter(
+                Job.job_type == SEND_JOB_TYPE,
+                Job.queue_name == SEND_JOB_QUEUE,
+                Job.status.in_(["queued", "running"]),
+            )
+            .all()
+        )
+
+        for job in jobs:
+            if job.payload_json and job.payload_json.get("message_id") == message_id:
+                job.status = "done"
+                break
+
         self.db.flush()
 
     def mark_message_failed(
@@ -561,9 +580,9 @@ class SendMessageService:
                 job_id = job.id
                 # Check job status and attempt cancellation
                 if job.status in ["queued", "retrying"]:
-                    # Mark job as failed to prevent execution
-                    job.status = "failed"
-                    job.last_error = "CANCELLED_BY_USER"
+                    # Mark job as cancelled to prevent execution
+                    job.status = "cancelled"
+                    job.last_error = "Cancelled by user"
                     job.dedupe_key = None
                     self.db.flush()
                     job_cancelled = True
@@ -601,14 +620,13 @@ class SendMessageService:
             "messages_fixed": [],
         }
 
-        # Find all failed send_manual jobs with last_error = "CANCELLED_BY_USER"
+        # Find all cancelled send_manual jobs
         failed_jobs = (
             self.db.query(Job)
             .filter(
                 Job.job_type == SEND_JOB_TYPE,
                 Job.queue_name == SEND_JOB_QUEUE,
-                Job.status == "failed",
-                Job.last_error == "CANCELLED_BY_USER",
+                Job.status == "cancelled",
             )
             .all()
         )

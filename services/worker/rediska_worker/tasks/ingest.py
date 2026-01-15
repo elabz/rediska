@@ -44,6 +44,16 @@ def backfill_conversations(
         # Use the existing sync method - it already handles full pagination
         result = asyncio.run(sync_service.sync_reddit_messages(identity_id=identity_id))
 
+        # Queue indexing if new messages were synced
+        index_task_id = None
+        if result.new_messages > 0:
+            index_task = app.send_task(
+                "index.bulk_index_all_messages",
+                kwargs={"batch_size": 500},
+                queue="celery",
+            )
+            index_task_id = index_task.id
+
         return {
             "status": "success",
             "provider_id": provider_id,
@@ -53,6 +63,7 @@ def backfill_conversations(
             "new_conversations": result.new_conversations,
             "new_messages": result.new_messages,
             "errors": result.errors,
+            "index_task_id": index_task_id,
         }
 
     except SyncError as e:
@@ -193,6 +204,16 @@ def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[in
         # Run the async sync function
         result = asyncio.run(sync_service.sync_reddit_messages(identity_id=identity_id))
 
+        # Queue indexing if new messages were synced
+        index_task_id = None
+        if result.new_messages > 0:
+            index_task = app.send_task(
+                "index.bulk_index_all_messages",
+                kwargs={"batch_size": 500},
+                queue="celery",
+            )
+            index_task_id = index_task.id
+
         return {
             "status": "success",
             "provider_id": "reddit",
@@ -201,6 +222,7 @@ def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[in
             "new_conversations": result.new_conversations,
             "new_messages": result.new_messages,
             "errors": result.errors,
+            "index_task_id": index_task_id,
         }
 
     except SyncError as e:
