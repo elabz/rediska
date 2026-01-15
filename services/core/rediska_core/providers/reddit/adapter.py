@@ -468,7 +468,7 @@ class RedditAdapter(ProviderAdapter):
         params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["after"] = cursor
-        self.logger.info(f"Fetching profile items for {user_id} with params {params}")
+        logger.info(f"Fetching profile items for {user_id} with params {params}")
         response = await self._api_request("GET", endpoint, params)
 
         if response.status_code != 200:
@@ -606,8 +606,53 @@ class RedditAdapter(ProviderAdapter):
             return None
         return datetime.fromtimestamp(ts, tz=timezone.utc)
 
+    def _extract_message_attachments(self, data: dict) -> list[str]:
+        """Extract attachment URLs from Reddit message data.
+
+        Reddit's private messages can have:
+        - media_metadata: Contains image/video metadata
+        - gallery_data: Contains gallery structure
+        """
+        attachments = []
+
+        # Check for media_metadata (images/videos in messages)
+        if "media_metadata" in data and data["media_metadata"]:
+            for media_id, media_info in data["media_metadata"].items():
+                if media_info.get("type") == "giphy.gif":
+                    # Giphy GIF
+                    if "url" in media_info.get("s", {}):
+                        attachments.append(media_info["s"]["url"])
+                elif media_info.get("type") in ("reddit_video", "giphy.gif"):
+                    # Video or GIF - try to get thumbnail
+                    if "p" in media_info:
+                        # Get highest res thumbnail
+                        for size in reversed(media_info["p"]):
+                            if "x" in size:
+                                attachments.append(size["x"])
+                                break
+                else:
+                    # Image - get original
+                    if "s" in media_info and "x" in media_info["s"]:
+                        attachments.append(media_info["s"]["x"])
+
+        # Check for embeds (inline videos, etc)
+        if "media" in data and data["media"]:
+            media = data["media"]
+            if "oembed" in media:
+                oembed = media["oembed"]
+                if oembed.get("type") == "rich":
+                    if "thumbnail_url" in oembed:
+                        attachments.append(oembed["thumbnail_url"])
+
+        # Check body text for links (as fallback)
+        # This is handled by message_sync service, but we extract media URLs here
+
+        return attachments[:5]  # Limit to 5 attachments per message
+
     def _map_message(self, data: dict, conversation_id: str) -> ProviderMessage:
         """Map Reddit message data to ProviderMessage."""
+        attachments = self._extract_message_attachments(data)
+
         return ProviderMessage(
             external_id=data.get("id", ""),
             conversation_id=conversation_id,
@@ -616,6 +661,7 @@ class RedditAdapter(ProviderAdapter):
             sent_at=self._parse_timestamp(data.get("created_utc")) or datetime.now(timezone.utc),
             sender_id=None,
             sender_username=data.get("author"),
+            attachments=attachments,  # Now populated with extracted media URLs
             remote_visibility=RemoteVisibility.VISIBLE,
             raw_data=data,
         )

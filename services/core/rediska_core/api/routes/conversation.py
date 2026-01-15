@@ -7,13 +7,14 @@ Provides endpoints for:
 - POST /conversations/{id}/messages - Send a message to a conversation
 - GET /conversations/{id}/pending - Get pending (unsent) messages
 - POST /conversations/{id}/messages/{id}/retry - Retry sending a failed message
+- POST /conversations/initiate/from-lead/{lead_id} - Start conversation with lead author
 """
 
 import base64
 import json
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import joinedload
 
@@ -29,6 +30,7 @@ from rediska_core.api.schemas.conversation import (
     MessageListResponse,
 )
 from rediska_core.api.schemas.message import (
+    DeleteMessageResponse,
     PendingMessageResponse,
     SendMessageRequest,
     SendMessageResponse,
@@ -40,6 +42,9 @@ from rediska_core.domain.services.send_message import (
     ConversationNotFoundError,
     CounterpartStatusError,
     EmptyMessageError,
+    MessageAccessDeniedError,
+    MessageNotFoundError,
+    MessageNotPendingError,
     MissingCredentialsError,
     SendMessageService,
 )
@@ -107,9 +112,11 @@ async def list_conversations(
 ):
     """List conversations with cursor-based pagination.
 
-    Conversations are ordered by last_activity_at DESC, then by id DESC.
-    The cursor encodes (last_activity_at, id) for stable pagination.
+    Conversations are ordered by the timestamp of their last message DESC, then by id DESC.
+    The cursor encodes (last_message_sent_at, id) for stable pagination.
     """
+    from sqlalchemy import func
+
     # Build base query
     query = (
         db.query(Conversation)
@@ -138,26 +145,45 @@ async def list_conversations(
     if not include_archived:
         query = query.filter(Conversation.archived_at.is_(None))
 
+    # Create a subquery to get the max message sent_at for each conversation
+    # This ensures we order by actual last message time, not stale last_activity_at
+    max_message_time = (
+        db.query(
+            Message.conversation_id,
+            func.max(Message.sent_at).label('max_sent_at')
+        )
+        .filter(Message.deleted_at.is_(None))
+        .group_by(Message.conversation_id)
+        .subquery()
+    )
+
+    # Left join with the subquery to get the actual last message time
+    query = query.outerjoin(
+        max_message_time,
+        Conversation.id == max_message_time.c.conversation_id
+    )
+
     # Apply cursor if provided
     if cursor:
         cursor_data = decode_cursor(cursor)
         cursor_time = cursor_data.get("last_activity_at")
         cursor_id = cursor_data.get("id")
 
-        # Cursor condition: (last_activity_at, id) < (cursor_time, cursor_id)
+        # Cursor condition: (max_sent_at, id) < (cursor_time, cursor_id)
+        # We need to compare with the subquery's max_sent_at
         query = query.filter(
             or_(
-                Conversation.last_activity_at < cursor_time,
+                max_message_time.c.max_sent_at < cursor_time,
                 and_(
-                    Conversation.last_activity_at == cursor_time,
+                    max_message_time.c.max_sent_at == cursor_time,
                     Conversation.id < cursor_id,
                 ),
             )
         )
 
-    # Order and limit
+    # Order by actual last message time (max_sent_at) DESC, then by id DESC
     query = query.order_by(
-        desc(Conversation.last_activity_at),
+        desc(max_message_time.c.max_sent_at),
         desc(Conversation.id),
     ).limit(limit + 1)  # Fetch one extra to check if there are more
 
@@ -180,8 +206,7 @@ async def list_conversations(
             .first()
         )
         preview = None
-        # Use the actual last message timestamp, not the stored last_activity_at
-        # which might be stale or set to sync time
+        # Use the actual last message timestamp
         last_message_time = last_message.sent_at if last_message else conv.last_activity_at
         if last_message and last_message.body_text:
             preview = last_message.body_text[:100] + "..." if len(last_message.body_text) > 100 else last_message.body_text
@@ -206,12 +231,20 @@ async def list_conversations(
             )
         )
 
-    # Generate next cursor
+    # Generate next cursor using the actual last message time
     next_cursor = None
     if has_more and conversations:
         last = conversations[-1]
+        last_message = (
+            db.query(Message)
+            .filter_by(conversation_id=last.id)
+            .filter(Message.deleted_at.is_(None))
+            .order_by(desc(Message.sent_at))
+            .first()
+        )
+        last_message_time = last_message.sent_at if last_message else last.last_activity_at
         next_cursor = encode_cursor(
-            last.last_activity_at.isoformat() if last.last_activity_at else "",
+            last_message_time.isoformat() if last_message_time else "",
             last.id,
         )
 
@@ -428,6 +461,7 @@ async def send_message(
     Returns 202 Accepted with job and message IDs.
     """
     from datetime import datetime, timezone
+    from celery import Celery
 
     try:
         result = send_service.enqueue_send(
@@ -435,6 +469,50 @@ async def send_message(
             body_text=request.body_text,
             attachment_ids=request.attachment_ids,
         )
+
+        # Send the actual Celery task
+        from rediska_core.domain.models import Job
+        from rediska_core.config import get_settings
+
+        # Get the job to retrieve the payload
+        job = db.query(Job).filter(Job.id == result.job_id).first()
+
+        if job and job.payload_json:
+            try:
+                settings = get_settings()
+                # Create a properly configured Celery app instance matching worker config
+                from celery import Celery
+                celery_app = Celery(
+                    "rediska",
+                    broker=settings.celery_broker_url,
+                    backend=settings.celery_result_backend,
+                )
+                # Configure with exact same serialization as worker
+                celery_app.conf.update(
+                    task_serializer="json",
+                    accept_content=["json"],
+                    result_serializer="json",
+                    timezone="UTC",
+                    enable_utc=True,
+                    task_acks_late=True,
+                    task_reject_on_worker_lost=True,
+                    task_soft_time_limit=300,
+                    task_time_limit=600,
+                    task_default_retry_delay=60,
+                    task_max_retries=10,
+                    task_routes={
+                        "message.send_manual": {"queue": "messages"},
+                    },
+                )
+                celery_app.send_task(
+                    "message.send_manual",
+                    kwargs={"payload": job.payload_json},
+                    queue="messages",
+                )
+            except Exception as e:
+                # Log the error but don't fail the request
+                import logging
+                logging.error(f"Error enqueueing message send task: {e}", exc_info=True)
 
         # Audit log for successful message queue
         audit_entry = AuditLog(
@@ -538,6 +616,7 @@ async def retry_message(
     This is a manual action to handle ambiguous failures.
     """
     from datetime import datetime, timezone
+    from celery import Celery
 
     result = send_service.retry_failed_send(message_id=message_id)
 
@@ -545,6 +624,21 @@ async def retry_message(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Message cannot be retried (not found or already sent)",
+        )
+
+    # Send the actual Celery task
+    from rediska_core.config import get_settings
+    from rediska_core.domain.models import Job
+    settings = get_settings()
+    celery_app = Celery(broker=settings.celery_broker_url, backend=settings.celery_result_backend)
+
+    job = db.query(Job).filter(Job.id == result.job_id).first()
+
+    if job and job.payload_json:
+        celery_app.send_task(
+            "message.send_manual",
+            kwargs={"payload": job.payload_json},
+            queue="messages",
         )
 
     # Audit log for message retry
@@ -566,6 +660,85 @@ async def retry_message(
         message_id=result.message_id,
         status=result.status,
     )
+
+
+@router.delete(
+    "/{conversation_id}/messages/{message_id}",
+    response_model=DeleteMessageResponse,
+    summary="Delete a pending message",
+    description="Delete a pending (unsent) message. Only messages with 'unknown' "
+                "visibility can be deleted. Attempts to cancel the associated send job.",
+)
+async def delete_pending_message(
+    conversation_id: int,
+    message_id: int,
+    current_user: CurrentUser,
+    send_service: SendMessageServiceDep,
+    db: DBSession,
+):
+    """Delete a pending message.
+
+    Only pending outgoing messages (remote_visibility='unknown') can be deleted.
+    The message is soft-deleted and the associated send job is cancelled if possible.
+
+    Args:
+        conversation_id: The conversation ID (for audit logging)
+        message_id: The message ID to delete
+        current_user: Current authenticated user
+        send_service: Send message service
+        db: Database session
+
+    Raises:
+        HTTPException: If message not found (404), not pending (409), or access denied (403)
+
+    Returns:
+        DeleteMessageResponse with deletion details
+    """
+    from datetime import datetime, timezone
+
+    try:
+        result = send_service.delete_pending_message(message_id=message_id)
+
+        # Audit log for message deletion
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="message.delete",
+            result="ok",
+            entity_type="message",
+            entity_id=message_id,
+            request_json={
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+            },
+            response_json=result,
+        )
+        db.add(audit_entry)
+        db.commit()
+
+        return DeleteMessageResponse(
+            message="Message deleted successfully",
+            message_id=result["message_id"],
+            job_cancelled=result["job_cancelled"],
+        )
+
+    except MessageNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found",
+        )
+
+    except MessageNotPendingError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+
+    except MessageAccessDeniedError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied",
+        )
 
 
 @router.post(
@@ -663,3 +836,232 @@ async def get_sync_status(
             status="pending",
             result=None,
         )
+
+
+@router.post(
+    "/{conversation_id}/attachments",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload an attachment for a conversation message",
+    description="Upload a file as an attachment for a conversation. Maximum size is 10MB.",
+)
+async def upload_conversation_attachment(
+    conversation_id: int,
+    db: DBSession,
+    file: UploadFile = File(..., description="File to upload"),
+):
+    """Upload an attachment for a conversation message.
+
+    The file will be validated for size and MIME type.
+
+    Returns attachment ID for use when sending messages.
+    """
+    from datetime import datetime, timezone
+    from rediska_core.domain.services.attachment import (
+        AttachmentService,
+        FileTooLargeError,
+        InvalidMimeTypeError,
+    )
+    from rediska_core.config import get_settings
+
+    settings = get_settings()
+    attachment_service = AttachmentService(db=db, storage_path=settings.attachments_path)
+
+    # Read file content
+    content = await file.read()
+
+    # Validate content type
+    content_type = file.content_type or "application/octet-stream"
+
+    try:
+        result = attachment_service.upload(
+            file_data=content,
+            filename=file.filename or "upload",
+            content_type=content_type,
+        )
+
+        # Audit log for successful upload
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="attachment.upload",
+            result="ok",
+            entity_type="attachment",
+            entity_id=result.attachment_id,
+            request_json={
+                "filename": file.filename,
+                "content_type": content_type,
+                "size_bytes": len(content),
+                "conversation_id": conversation_id,
+            },
+            response_json={
+                "attachment_id": result.attachment_id,
+                "sha256": result.sha256,
+            },
+        )
+        db.add(audit_entry)
+        db.commit()
+
+        return {
+            "attachment_id": result.attachment_id,
+            "sha256": result.sha256,
+            "size_bytes": len(content),
+            "mime_type": content_type,
+        }
+
+    except InvalidMimeTypeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File type not supported. Allowed types: images, PDFs, and common documents.",
+        )
+    except FileTooLargeError:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File size exceeds 10MB limit.",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload file: {str(e)}",
+        )
+
+
+@router.post(
+    "/initiate/from-lead/{lead_id}",
+    response_model=ConversationSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Initiate a conversation with a lead author",
+    description="Create or get a conversation with the author of a saved lead.",
+)
+async def initiate_conversation_from_lead(
+    lead_id: int,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Initiate a new conversation with a lead author.
+
+    This endpoint:
+    1. Fetches the lead and its author
+    2. Gets or creates an ExternalAccount for the author
+    3. Gets or creates a Conversation between the default identity and that account
+    4. Returns the conversation details
+
+    The user can then send messages through the conversation endpoint.
+    """
+    from rediska_core.domain.models import LeadPost
+
+    # Get the lead
+    lead = (
+        db.query(LeadPost)
+        .filter(LeadPost.id == lead_id)
+        .first()
+    )
+
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lead not found",
+        )
+
+    if not lead.author_account_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lead has no author information",
+        )
+
+    # Get the author's external account
+    author_external_account = (
+        db.query(ExternalAccount)
+        .filter(ExternalAccount.id == lead.author_account_id)
+        .first()
+    )
+
+    if not author_external_account:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Author account not found",
+        )
+
+    author_username = author_external_account.external_username
+
+    # Get the default identity
+    identity = (
+        db.query(Identity)
+        .filter_by(provider_id="reddit", is_active=True, is_default=True)
+        .first()
+    )
+
+    if not identity:
+        # Fall back to first active identity
+        identity = (
+            db.query(Identity)
+            .filter_by(provider_id="reddit", is_active=True)
+            .first()
+        )
+
+    if not identity:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active identity configured",
+        )
+
+    # Get or create conversation with the lead author
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.provider_id == "reddit",
+            Conversation.identity_id == identity.id,
+            Conversation.counterpart_account_id == author_external_account.id,
+        )
+        .first()
+    )
+
+    if not conversation:
+        # Create new conversation
+        from datetime import datetime, timezone
+
+        conversation = Conversation(
+            provider_id="reddit",
+            external_conversation_id=f"reddit:pair:{identity.external_username.lower()}:{author_username.lower()}",
+            counterpart_account_id=author_external_account.id,
+            identity_id=identity.id,
+            last_activity_at=datetime.now(timezone.utc),
+        )
+        db.add(conversation)
+        db.flush()
+
+        # Audit log
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="conversation.initiate",
+            result="ok",
+            entity_type="conversation",
+            entity_id=conversation.id,
+            request_json={"lead_id": lead_id, "author_username": author_username},
+            response_json={"conversation_id": conversation.id},
+        )
+        db.add(audit_entry)
+        db.commit()
+
+    # Build counterpart response
+    from rediska_core.api.schemas.conversation import CounterpartResponse
+
+    counterpart = CounterpartResponse(
+        id=author_external_account.id,
+        external_username=author_external_account.external_username,
+        external_user_id=author_external_account.external_user_id,
+        remote_status=author_external_account.remote_status,
+    )
+
+    return ConversationSummaryResponse(
+        id=conversation.id,
+        provider_id=conversation.provider_id,
+        identity_id=identity.id,
+        external_conversation_id=conversation.external_conversation_id,
+        counterpart=counterpart,
+        last_activity_at=conversation.last_activity_at,
+        unread_count=0,  # Newly created conversation has no unread messages
+        archived_at=conversation.archived_at,
+        created_at=conversation.created_at,
+    )

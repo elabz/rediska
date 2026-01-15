@@ -3,13 +3,27 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ImageIcon, Download } from 'lucide-react';
+import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ImageIcon, Download, MoreVertical, Trash2, X, Paperclip } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Skeleton } from '@/components/ui/skeleton';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 
 interface Counterpart {
@@ -83,10 +97,22 @@ function formatMessageTime(dateString: string): string {
   });
 }
 
-function MessageBubble({ message, counterpartUsername }: { message: Message; counterpartUsername: string }) {
+function MessageBubble({
+  message,
+  counterpartUsername,
+  onDelete,
+  isDeleting,
+}: {
+  message: Message;
+  counterpartUsername: string;
+  onDelete?: (messageId: number) => void;
+  isDeleting?: boolean;
+}) {
   const isOutgoing = message.direction === 'out';
   const isSystem = message.direction === 'system';
   const [imageErrors, setImageErrors] = useState<Set<number>>(new Set());
+  const isPending = message.remote_visibility === 'unknown';
+  const canDelete = isOutgoing && isPending && onDelete;
 
   const imageAttachments = (message.attachments || []).filter(att => att.mime_type.startsWith('image/'));
 
@@ -102,7 +128,7 @@ function MessageBubble({ message, counterpartUsername }: { message: Message; cou
 
   return (
     <div className={cn(
-      "flex gap-3 mb-4",
+      "flex gap-3 mb-4 group",
       isOutgoing ? "flex-row-reverse" : "flex-row"
     )}>
       {!isOutgoing && (
@@ -185,6 +211,35 @@ function MessageBubble({ message, counterpartUsername }: { message: Message; cou
               Deleted
             </Badge>
           )}
+
+          {/* Delete button - only for pending outgoing messages */}
+          {canDelete && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-5 w-5 p-0"
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <MoreVertical className="h-3 w-3" />
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-40">
+                <DropdownMenuItem
+                  onClick={() => onDelete(message.id)}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
     </div>
@@ -225,9 +280,15 @@ export default function ConversationDetailPage() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [deletingMessages, setDeletingMessages] = useState<Set<number>>(new Set());
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [messageToDelete, setMessageToDelete] = useState<number | null>(null);
+  const [attachmentIds, setAttachmentIds] = useState<number[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -316,7 +377,10 @@ export default function ConversationDetailPage() {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ body_text: messageText.trim() }),
+          body: JSON.stringify({
+            body_text: messageText.trim(),
+            attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
+          }),
         }
       );
 
@@ -340,13 +404,95 @@ export default function ConversationDetailPage() {
 
       setMessages(prev => [...prev, optimisticMessage]);
       setMessageText('');
+      setAttachmentIds([]);
       setTimeout(scrollToBottom, 100);
     } catch (err) {
       setSendError(err instanceof Error ? err.message : 'Failed to send message');
     } finally {
       setSending(false);
     }
-  }, [messageText, sending, conversationId, conversation?.identity_id]);
+  }, [messageText, sending, conversationId, conversation?.identity_id, attachmentIds]);
+
+  // Delete message
+  const deleteMessage = useCallback(async (messageId: number) => {
+    // Add to deleting set
+    setDeletingMessages(prev => {
+      const next = new Set(prev);
+      next.add(messageId);
+      return next;
+    });
+
+    setDeleteError(null);
+
+    try {
+      const response = await fetch(
+        `/api/core/conversations/${conversationId}/messages/${messageId}`,
+        {
+          method: 'DELETE',
+          credentials: 'include',
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to delete message');
+      }
+
+      // Optimistically remove message from UI
+      setMessages(prev => prev.filter(m => m.id !== messageId));
+      setMessageToDelete(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete message');
+    } finally {
+      // Remove from deleting set
+      setDeletingMessages(prev => {
+        const next = new Set(prev);
+        next.delete(messageId);
+        return next;
+      });
+    }
+  }, [conversationId]);
+
+  // Handle attachment file selection
+  const handleAttachmentSelect = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+
+    setUploadingAttachment(true);
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch(
+          `/api/core/conversations/${conversationId}/attachments`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            body: formData,
+          }
+        );
+
+        if (!response.ok) {
+          const data = await response.json();
+          setSendError(data.detail || `Failed to upload ${file.name}`);
+          continue;
+        }
+
+        const data = await response.json();
+        setAttachmentIds(prev => [...prev, data.attachment_id]);
+      }
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Failed to upload attachment');
+    } finally {
+      setUploadingAttachment(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, [conversationId]);
 
   // Handle Enter key to send
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -531,11 +677,13 @@ export default function ConversationDetailPage() {
           </div>
         ) : (
           <>
-            {messages.map((message) => (
+            {messages.map((msg) => (
               <MessageBubble
-                key={message.id}
-                message={message}
+                key={msg.id}
+                message={msg}
                 counterpartUsername={counterpart.external_username}
+                onDelete={setMessageToDelete}
+                isDeleting={deletingMessages.has(msg.id)}
               />
             ))}
             <div ref={messagesEndRef} />
@@ -557,6 +705,29 @@ export default function ConversationDetailPage() {
             </button>
           </div>
         )}
+        {deleteError && (
+          <div className="mb-4 rounded-lg border border-destructive bg-destructive/10 p-3">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-destructive">
+                  Failed to delete message
+                </p>
+                <p className="text-sm text-destructive/80 mt-1">
+                  {deleteError}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setDeleteError(null)}
+                className="h-6 w-6 p-0"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="flex gap-2 max-w-full">
           <Textarea
             value={messageText}
@@ -571,24 +742,107 @@ export default function ConversationDetailPage() {
             disabled={sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
             rows={1}
           />
-          <Button
-            size="icon"
-            className="shrink-0 h-11 w-11"
-            onClick={sendMessage}
-            disabled={!messageText.trim() || sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
-            title={sending ? 'Sending...' : 'Send message'}
-          >
-            {sending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-          </Button>
+          <div className="flex gap-1 shrink-0">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-11 w-11"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingAttachment || sending}
+              title="Attach files"
+            >
+              {uploadingAttachment ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Paperclip className="h-4 w-4" />
+              )}
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx"
+              className="hidden"
+              onChange={(e) => handleAttachmentSelect(e.target.files)}
+              disabled={uploadingAttachment || sending}
+            />
+            <Button
+              size="icon"
+              className="shrink-0 h-11 w-11"
+              onClick={sendMessage}
+              disabled={!messageText.trim() || sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
+              title={sending ? 'Sending...' : 'Send message'}
+            >
+              {sending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
         </div>
+
+        {/* Show uploaded attachments */}
+        {attachmentIds.length > 0 && (
+          <div className="mt-2 p-2 bg-muted rounded-md">
+            <p className="text-xs font-medium text-muted-foreground mb-1">
+              {attachmentIds.length} attachment{attachmentIds.length !== 1 ? 's' : ''} attached
+            </p>
+            <div className="flex gap-1 flex-wrap">
+              {attachmentIds.map((id) => (
+                <Badge key={id} variant="secondary" className="text-xs">
+                  Attachment #{id}
+                  <button
+                    onClick={() => setAttachmentIds(prev => prev.filter(aid => aid !== id))}
+                    className="ml-1 hover:text-destructive"
+                  >
+                    ✕
+                  </button>
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+
         <p className="text-xs text-muted-foreground mt-2 text-center">
           Messages are queued and sent in the background
         </p>
       </div>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={messageToDelete !== null} onOpenChange={(open) => !open && setMessageToDelete(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Message?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete this pending message. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setMessageToDelete(null)}
+              disabled={messageToDelete !== null && deletingMessages.has(messageToDelete)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => messageToDelete && deleteMessage(messageToDelete)}
+              disabled={messageToDelete !== null && deletingMessages.has(messageToDelete)}
+            >
+              {messageToDelete !== null && deletingMessages.has(messageToDelete) ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

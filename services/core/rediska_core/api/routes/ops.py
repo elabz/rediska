@@ -27,6 +27,7 @@ from rediska_core.domain.models import (
     Message,
 )
 from rediska_core.domain.services.jobs import JobService
+from rediska_core.domain.services.send_message import SendMessageService
 
 router = APIRouter(prefix="/ops", tags=["operations"])
 
@@ -111,6 +112,15 @@ class JobCountsResponse(BaseModel):
     failed: int
     done: int
     total: int
+
+
+class ConsistencyCheckResponse(BaseModel):
+    """Consistency check response."""
+
+    checked_jobs: int
+    fixed_messages: int
+    messages_fixed: list[int]
+    message: str
 
 
 # =============================================================================
@@ -275,6 +285,17 @@ async def retry_job(
         )
 
     try:
+        # For send_manual jobs, check if the message was deleted
+        if job.job_type == "send_manual":
+            if job.payload_json and "message_id" in job.payload_json:
+                message_id = job.payload_json["message_id"]
+                message = db.query(Message).filter(Message.id == message_id).first()
+                if message and message.deleted_at is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Cannot retry job: associated message was deleted by user",
+                    )
+
         job_service.requeue_job(job_id)
         db.commit()
 
@@ -354,6 +375,42 @@ async def trigger_backfill_conversations(
         job_id=task.id,
         status="queued",
         message="Backfill job queued. Full conversation history will be imported in the background.",
+    )
+
+
+@router.post(
+    "/consistency/check",
+    response_model=ConsistencyCheckResponse,
+    summary="Check and fix consistency between cancelled jobs and deleted messages",
+    description="Audit and repair any inconsistencies where cancelled jobs have undel messages.",
+)
+async def check_consistency(
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Check and fix consistency between cancelled jobs and deleted messages."""
+    send_service = SendMessageService(db=db)
+    results = send_service.ensure_cancelled_jobs_consistency()
+    db.commit()
+
+    # Audit log
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="consistency.check",
+        result="ok",
+        entity_type="jobs",
+        request_json={},
+        response_json=results,
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return ConsistencyCheckResponse(
+        checked_jobs=results["checked_jobs"],
+        fixed_messages=results["fixed_messages"],
+        messages_fixed=results["messages_fixed"],
+        message=f"Checked {results['checked_jobs']} cancelled jobs, fixed {results['fixed_messages']} messages",
     )
 
 

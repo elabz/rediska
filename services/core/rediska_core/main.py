@@ -1,10 +1,24 @@
 """Rediska Core API - Main Application."""
 
+import logging
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Configure logging to stdout with DEBUG level for development
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
+# Set specific loggers
+logging.getLogger("rediska_core").setLevel(logging.DEBUG)
+logging.getLogger("httpx").setLevel(logging.INFO)  # Reduce httpx noise
+logging.getLogger("uvicorn").setLevel(logging.INFO)
 
 from rediska_core.api.middleware.onboarding import OnboardingGateMiddleware
 from rediska_core.api.routes import accounts as accounts_routes

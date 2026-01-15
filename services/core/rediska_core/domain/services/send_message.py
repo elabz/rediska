@@ -69,6 +69,21 @@ class MissingCredentialsError(SendMessageError):
     pass
 
 
+class MessageNotFoundError(SendMessageError):
+    """Raised when message does not exist."""
+    pass
+
+
+class MessageNotPendingError(SendMessageError):
+    """Raised when message is not in pending state."""
+    pass
+
+
+class MessageAccessDeniedError(SendMessageError):
+    """Raised when user doesn't own the message."""
+    pass
+
+
 # =============================================================================
 # DATA CLASSES
 # =============================================================================
@@ -455,6 +470,169 @@ class SendMessageService:
 
         return query.order_by(Message.sent_at.desc()).limit(limit).all()
 
+    def delete_pending_message(
+        self,
+        message_id: int,
+    ) -> dict:
+        """Delete a pending (unsent) message.
+
+        Soft-deletes the message by setting deleted_at timestamp.
+        Attempts to cancel the associated Celery job if still queued.
+
+        Args:
+            message_id: The message ID to delete.
+
+        Returns:
+            Dict with deletion details:
+            {
+                "message_id": int,
+                "job_id": Optional[int],
+                "job_cancelled": bool,
+                "reason": str (if job wasn't cancelled)
+            }
+
+        Raises:
+            MessageNotFoundError: If message doesn't exist.
+            MessageNotPendingError: If message is not pending (already sent or incoming).
+            MessageAccessDeniedError: If message doesn't belong to an active identity.
+        """
+        # Get message with conversation
+        message = (
+            self.db.query(Message)
+            .filter(Message.id == message_id)
+            .first()
+        )
+
+        if not message:
+            raise MessageNotFoundError(f"Message {message_id} not found")
+
+        # Check if already deleted
+        if message.deleted_at is not None:
+            raise MessageNotFoundError(f"Message {message_id} already deleted")
+
+        # Check that it's an outgoing message
+        if message.direction != "out":
+            raise MessageNotPendingError(
+                "Only pending outgoing messages can be deleted"
+            )
+
+        # Check that it's still pending (not already sent)
+        if message.remote_visibility != "unknown":
+            raise MessageNotPendingError(
+                f"Message has already been sent (status: {message.remote_visibility})"
+            )
+
+        # Verify message belongs to an active identity (authorization)
+        from rediska_core.domain.models import Identity
+
+        identity = (
+            self.db.query(Identity)
+            .filter(
+                Identity.id == message.conversation.identity_id,
+                Identity.is_active == True,
+            )
+            .first()
+        )
+
+        if not identity:
+            raise MessageAccessDeniedError("Access denied")
+
+        # Perform soft delete
+        message.deleted_at = datetime.now(timezone.utc)
+        self.db.flush()
+
+        # Try to cancel associated job
+        job_id = None
+        job_cancelled = False
+        reason = None
+
+        # Find job by searching for message_id in payload
+        jobs = (
+            self.db.query(Job)
+            .filter(
+                Job.job_type == SEND_JOB_TYPE,
+                Job.queue_name == SEND_JOB_QUEUE,
+            )
+            .all()
+        )
+
+        for job in jobs:
+            if job.payload_json and job.payload_json.get("message_id") == message_id:
+                job_id = job.id
+                # Check job status and attempt cancellation
+                if job.status in ["queued", "retrying"]:
+                    # Mark job as failed to prevent execution
+                    job.status = "failed"
+                    job.last_error = "CANCELLED_BY_USER"
+                    job.dedupe_key = None
+                    self.db.flush()
+                    job_cancelled = True
+                elif job.status == "running":
+                    reason = "Job is currently executing"
+                else:
+                    reason = f"Job already {job.status}"
+                break
+
+        return {
+            "message_id": message_id,
+            "job_id": job_id,
+            "job_cancelled": job_cancelled,
+            "reason": reason,
+        }
+
+    def ensure_cancelled_jobs_consistency(self) -> dict:
+        """Ensure consistency between cancelled jobs and deleted messages.
+
+        This method enforces the invariant that if a send_manual job is cancelled,
+        its associated message must also be marked as deleted to prevent accidental
+        resending.
+
+        Returns:
+            Dict with consistency check results:
+            {
+                "checked_jobs": int,
+                "fixed_messages": int,
+                "messages_fixed": List[int] (message IDs fixed)
+            }
+        """
+        results = {
+            "checked_jobs": 0,
+            "fixed_messages": 0,
+            "messages_fixed": [],
+        }
+
+        # Find all failed send_manual jobs with last_error = "CANCELLED_BY_USER"
+        failed_jobs = (
+            self.db.query(Job)
+            .filter(
+                Job.job_type == SEND_JOB_TYPE,
+                Job.queue_name == SEND_JOB_QUEUE,
+                Job.status == "failed",
+                Job.last_error == "CANCELLED_BY_USER",
+            )
+            .all()
+        )
+
+        for job in failed_jobs:
+            results["checked_jobs"] += 1
+
+            if job.payload_json and "message_id" in job.payload_json:
+                message_id = job.payload_json["message_id"]
+                message = (
+                    self.db.query(Message)
+                    .filter(Message.id == message_id)
+                    .first()
+                )
+
+                # If message exists and is not deleted, delete it
+                if message and message.deleted_at is None:
+                    message.deleted_at = datetime.now(timezone.utc)
+                    self.db.flush()
+                    results["fixed_messages"] += 1
+                    results["messages_fixed"].append(message_id)
+
+        return results
+
 
 # =============================================================================
 # EXPORTS
@@ -471,6 +649,9 @@ __all__ = [
     "CounterpartStatusError",
     "EmptyMessageError",
     "MissingCredentialsError",
+    "MessageNotFoundError",
+    "MessageNotPendingError",
+    "MessageAccessDeniedError",
     "SEND_JOB_QUEUE",
     "SEND_JOB_TYPE",
 ]

@@ -10,6 +10,7 @@ Provides endpoints for:
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from rediska_core.api.deps import CurrentUser, get_db
 from rediska_core.config import get_settings
-from rediska_core.domain.models import AuditLog, Identity
+from rediska_core.domain.models import AuditLog, Identity, LeadPost
 from rediska_core.api.schemas.leads import (
     AnalyzeLeadResponse,
     AuthorInfo,
@@ -27,9 +28,17 @@ from rediska_core.api.schemas.leads import (
     UpdateLeadStatusRequest,
 )
 from rediska_core.domain.models import ExternalAccount, ProfileItem, ProfileSnapshot
+from rediska_core.domain.schemas.multi_agent_analysis import (
+    MultiAgentAnalysisResponse,
+    MultiAgentAnalysisSummary,
+)
 from rediska_core.domain.services.analysis import AnalysisError, AnalysisService
+from rediska_core.domain.services.agent_prompt import AgentPromptService
 from rediska_core.domain.services.credentials import CredentialsService
 from rediska_core.domain.services.leads import LeadsService, VALID_STATUSES
+from rediska_core.domain.services.multi_agent_analysis import (
+    MultiAgentAnalysisService,
+)
 from rediska_core.infrastructure.crypto import CryptoService
 from rediska_core.providers.base import ProviderAdapter
 from rediska_core.providers.reddit.adapter import RedditAdapter
@@ -108,15 +117,17 @@ def get_provider_adapter(provider_id: str, db: Session) -> Optional[ProviderAdap
 
 
 def get_indexing_service(db: Session):
-    """Get the indexing service.
+    """Get the indexing service with correct Elasticsearch URL.
 
     Returns None if not configured - will be set up in production.
     """
     try:
         from rediska_core.domain.services.indexing import IndexingService
 
-        return IndexingService(db=db)
-    except Exception:
+        settings = get_settings()
+        return IndexingService(db=db, es_url=settings.elastic_url)
+    except Exception as e:
+        logger.error(f"Failed to initialize indexing service: {e}")
         return None
 
 
@@ -128,8 +139,10 @@ def get_embedding_service(db: Session):
     try:
         from rediska_core.domain.services.embedding import EmbeddingService
 
-        return EmbeddingService(db=db)
-    except Exception:
+        settings = get_settings()
+        return EmbeddingService(db=db, es_url=settings.elastic_url)
+    except Exception as e:
+        logger.error(f"Failed to initialize embedding service: {e}")
         return None
 
 
@@ -542,3 +555,270 @@ async def analyze_lead(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Analysis failed: {e}",
         )
+
+
+# =============================================================================
+# MULTI-AGENT ANALYSIS ENDPOINTS
+# =============================================================================
+
+
+@router.post("/{lead_id}/analyze-multi", response_model=MultiAgentAnalysisResponse)
+async def analyze_lead_multi(
+    lead_id: int,
+    current_user: Annotated[CurrentUser, Depends()],
+    db: Annotated[Session, Depends(get_db)],
+) -> MultiAgentAnalysisResponse:
+    """
+    Run multi-agent analysis on a lead.
+
+    Executes all 5 specialized analysis agents in parallel, then synthesizes
+    results with a meta-analysis coordinator agent.
+
+    This endpoint:
+    1. Validates the lead exists
+    2. Ensures profile data has been analyzed
+    3. Runs dimension agents (demographics, preferences, relationship goals, risk flags, sexual preferences)
+    4. Runs meta-analysis coordinator
+    5. Returns comprehensive analysis with suitability recommendation
+
+    Manual trigger only (no autosend).
+
+    Args:
+        lead_id: ID of lead to analyze
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        MultiAgentAnalysisResponse: Complete analysis results
+    """
+    # Fetch lead
+    lead = db.query(LeadPost).filter(LeadPost.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead not found: {lead_id}",
+        )
+
+    if not lead.author_account_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lead has no author account",
+        )
+
+    try:
+        # Check that profile has been analyzed (profile snapshot exists)
+        profile_snapshot = (
+            db.query(ProfileSnapshot)
+            .filter(ProfileSnapshot.account_id == lead.author_account_id)
+            .order_by(ProfileSnapshot.fetched_at.desc())
+            .first()
+        )
+
+        if not profile_snapshot:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Lead's profile has not been analyzed yet. Analyze profile first.",
+            )
+
+        # Get inference client (from environment/config)
+        # This should be injected in production; for now create a placeholder
+        # In real implementation, use dependency injection
+        inference_client = None  # TODO: Inject actual inference client
+
+        if not inference_client:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="LLM inference service not configured",
+            )
+
+        # Run multi-agent analysis
+        prompt_service = AgentPromptService(db)
+        analysis_service = MultiAgentAnalysisService(
+            db=db,
+            inference_client=inference_client,
+            prompt_service=prompt_service,
+        )
+
+        # This would be async in a real implementation
+        import asyncio
+
+        analysis = asyncio.run(analysis_service.analyze_lead(lead_id))
+
+        # Audit log
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="lead.analyze_multi",
+            result="ok",
+            provider_id=lead.provider_id,
+            entity_type="lead_post",
+            entity_id=lead_id,
+            request_json={"lead_id": lead_id},
+            response_json={
+                "analysis_id": analysis.id,
+                "recommendation": analysis.final_recommendation,
+                "confidence": float(analysis.confidence_score or 0),
+            },
+        )
+        db.add(audit_entry)
+        db.commit()
+
+        # Build response
+        return MultiAgentAnalysisResponse(
+            id=analysis.id,
+            lead_id=analysis.lead_id,
+            account_id=analysis.account_id,
+            status=analysis.status,
+            started_at=analysis.started_at.isoformat(),
+            completed_at=analysis.completed_at.isoformat()
+            if analysis.completed_at
+            else None,
+            final_recommendation=analysis.final_recommendation,
+            recommendation_reasoning=analysis.recommendation_reasoning,
+            confidence_score=analysis.confidence_score,
+            prompt_versions=analysis.prompt_versions_json,
+            meta_analysis=analysis.meta_analysis_json,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Multi-agent analysis failed for lead {lead_id}: {e}")
+
+        # Audit log for error
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="lead.analyze_multi",
+            result="error",
+            provider_id=lead.provider_id,
+            entity_type="lead_post",
+            entity_id=lead_id,
+            error_detail=str(e),
+        )
+        db.add(audit_entry)
+        db.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Multi-agent analysis failed: {str(e)}",
+        )
+
+
+@router.get("/{lead_id}/analysis", response_model=MultiAgentAnalysisResponse)
+async def get_lead_analysis(
+    lead_id: int,
+    current_user: Annotated[CurrentUser, Depends()],
+    db: Annotated[Session, Depends(get_db)],
+) -> MultiAgentAnalysisResponse:
+    """
+    Get the latest multi-agent analysis for a lead.
+
+    Returns the most recent analysis results if one exists.
+
+    Args:
+        lead_id: ID of lead
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        MultiAgentAnalysisResponse: Latest analysis results
+
+    Raises:
+        HTTPException: If lead or analysis not found
+    """
+    # Fetch lead
+    lead = db.query(LeadPost).filter(LeadPost.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead not found: {lead_id}",
+        )
+
+    # Get latest analysis
+    if not lead.latest_analysis_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No analysis found for this lead",
+        )
+
+    from rediska_core.domain.models import LeadAnalysis
+
+    analysis = db.query(LeadAnalysis).filter(
+        LeadAnalysis.id == lead.latest_analysis_id
+    ).first()
+
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Analysis not found",
+        )
+
+    return MultiAgentAnalysisResponse(
+        id=analysis.id,
+        lead_id=analysis.lead_id,
+        account_id=analysis.account_id,
+        status=analysis.status,
+        started_at=analysis.started_at.isoformat(),
+        completed_at=analysis.completed_at.isoformat()
+        if analysis.completed_at
+        else None,
+        final_recommendation=analysis.final_recommendation,
+        recommendation_reasoning=analysis.recommendation_reasoning,
+        confidence_score=analysis.confidence_score,
+        prompt_versions=analysis.prompt_versions_json,
+        meta_analysis=analysis.meta_analysis_json,
+    )
+
+
+@router.get("/{lead_id}/analysis/history", response_model=list[MultiAgentAnalysisSummary])
+async def get_lead_analysis_history(
+    lead_id: int,
+    current_user: Annotated[CurrentUser, Depends()],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[MultiAgentAnalysisSummary]:
+    """
+    Get all analyses for a lead (for re-analysis tracking).
+
+    Returns all historical analyses for a lead, ordered by most recent first.
+
+    Args:
+        lead_id: ID of lead
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        list[MultiAgentAnalysisSummary]: All analyses for the lead
+    """
+    # Validate lead exists
+    lead = db.query(LeadPost).filter(LeadPost.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead not found: {lead_id}",
+        )
+
+    from rediska_core.domain.models import LeadAnalysis
+
+    # Get all analyses
+    analyses = (
+        db.query(LeadAnalysis)
+        .filter(LeadAnalysis.lead_id == lead_id)
+        .order_by(LeadAnalysis.created_at.desc())
+        .all()
+    )
+
+    return [
+        MultiAgentAnalysisSummary(
+            id=analysis.id,
+            lead_id=analysis.lead_id,
+            status=analysis.status,
+            final_recommendation=analysis.final_recommendation,
+            confidence_score=analysis.confidence_score,
+            created_at=analysis.created_at.isoformat(),
+            completed_at=analysis.completed_at.isoformat()
+            if analysis.completed_at
+            else None,
+        )
+        for analysis in analyses
+    ]

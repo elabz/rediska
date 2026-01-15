@@ -1,5 +1,3 @@
-version: "3.9"
-
 x-health-defaults: &health_defaults
   interval: 10s
   timeout: 5s

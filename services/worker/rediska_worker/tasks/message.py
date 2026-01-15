@@ -66,6 +66,30 @@ def send_manual(self, payload: dict[str, Any]) -> dict:
     try:
         send_service = SendMessageService(db=session)
 
+        # Check if message was deleted before we got here (defense-in-depth)
+        from rediska_core.domain.models import Message
+
+        message = (
+            session.query(Message)
+            .filter(Message.id == message_id)
+            .first()
+        )
+
+        if not message:
+            return {
+                "status": "error",
+                "error": f"Message {message_id} not found",
+                "message_id": message_id,
+            }
+
+        if message.deleted_at is not None:
+            # Message was deleted - don't send
+            return {
+                "status": "cancelled",
+                "message": "Message was deleted before sending",
+                "message_id": message_id,
+            }
+
         # Get conversation and counterpart username
         conversation = (
             session.query(Conversation)
@@ -97,13 +121,13 @@ def send_manual(self, payload: dict[str, Any]) -> dict:
         crypto = CryptoService(settings.encryption_key)
         credentials_service = CredentialsService(db=session, crypto=crypto)
 
-        creds = credentials_service.get_credential(
+        creds_json = credentials_service.get_credential_decrypted(
             provider_id=provider_id,
-            credential_type="oauth",
+            credential_type="oauth_tokens",
             identity_id=identity_id,
         )
 
-        if not creds:
+        if not creds_json:
             send_service.handle_send_failure(
                 job_id=self.request.id,
                 message_id=message_id,
@@ -117,10 +141,34 @@ def send_manual(self, payload: dict[str, Any]) -> dict:
                 "message_id": message_id,
             }
 
+        # Handle attachments - append image URLs to message body
+        attachment_ids = payload.get("attachment_ids", [])
+        if attachment_ids:
+            from rediska_core.domain.models import Attachment
+
+            attachments = (
+                session.query(Attachment)
+                .filter(Attachment.id.in_(attachment_ids))
+                .all()
+            )
+
+            if attachments and body_text:
+                # Append attachment URLs to the message body
+                attachment_section = "\n\n---\n**Attachments:**\n"
+                for attachment in attachments:
+                    if attachment.mime_type.startswith("image/"):
+                        # For images, include them as links
+                        attachment_section += f"- [Image ({attachment.mime_type})](attach:{attachment.id})\n"
+                    else:
+                        # For other files, include as links
+                        attachment_section += f"- [File ({attachment.mime_type})](attach:{attachment.id})\n"
+
+                body_text = body_text + attachment_section
+
         # Create provider adapter
         if provider_id == "reddit":
             import json
-            token_data = json.loads(creds)
+            token_data = json.loads(creds_json)
             adapter = RedditAdapter(
                 access_token=token_data.get("access_token", ""),
                 refresh_token=token_data.get("refresh_token", ""),
@@ -136,9 +184,10 @@ def send_manual(self, payload: dict[str, Any]) -> dict:
             }
 
         # Send the message
+        # Note: Reddit API requires non-empty subject; use single space as minimal subject
         result = asyncio.run(adapter.send_message(
             recipient_username=counterpart.external_username,
-            subject="Re: Conversation",  # Reddit requires a subject
+            subject=" ",  # Minimal subject (Reddit requires non-empty)
             body=body_text,
         ))
 

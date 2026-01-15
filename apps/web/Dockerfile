@@ -8,6 +8,17 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
+# Development stage - used when running with docker-compose.override.yml
+FROM base AS dev
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY . .
+EXPOSE 3000
+ENV PORT=3000
+CMD ["npm", "run", "dev"]
+
 # Rebuild the source code only when needed
 FROM base AS builder
 WORKDIR /app

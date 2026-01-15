@@ -4,6 +4,7 @@ Syncs conversations and messages from providers (e.g., Reddit) to the local data
 """
 
 import json
+import logging
 import re
 import httpx
 from datetime import datetime, timezone
@@ -23,6 +24,8 @@ from rediska_core.domain.models import (
 from rediska_core.domain.services.credentials import CredentialsService
 from rediska_core.infrastructure.crypto import CryptoService
 from rediska_core.providers.reddit.adapter import RedditAdapter
+
+logger = logging.getLogger(__name__)
 
 
 class SyncError(Exception):
@@ -52,6 +55,9 @@ class MessageSyncResult:
 class MessageSyncService:
     """Service for syncing messages from providers."""
 
+    # Markdown image syntax pattern: [text](url)
+    MARKDOWN_IMAGE_PATTERN = r'\[([^\]]*)\]\((https?://[^\)]+)\)'
+
     # Image URL patterns to detect in message bodies
     IMAGE_URL_PATTERNS = [
         # Reddit hosted images
@@ -77,12 +83,65 @@ class MessageSyncService:
         crypto = CryptoService(self.settings.encryption_key)
         self.credentials_service = CredentialsService(db=db, crypto=crypto)
 
+    def _extract_media_attachments_from_reddit(self, msg_data: dict) -> list[str]:
+        """Extract attachment URLs from Reddit private message data.
+
+        Handles:
+        - media_metadata: Images/videos in messages
+        - media.oembed: Embedded content
+        """
+        attachments = []
+
+        # Check for media_metadata (images/videos in messages)
+        if "media_metadata" in msg_data and msg_data["media_metadata"]:
+            for media_id, media_info in msg_data["media_metadata"].items():
+                if media_info.get("type") == "giphy.gif":
+                    # Giphy GIF
+                    if "url" in media_info.get("s", {}):
+                        attachments.append(media_info["s"]["url"])
+                elif media_info.get("type") in ("reddit_video", "giphy.gif"):
+                    # Video or GIF - try to get thumbnail
+                    if "p" in media_info:
+                        # Get highest res thumbnail
+                        for size in reversed(media_info["p"]):
+                            if "x" in size:
+                                attachments.append(size["x"])
+                                break
+                else:
+                    # Image - get original
+                    if "s" in media_info and "x" in media_info["s"]:
+                        attachments.append(media_info["s"]["x"])
+
+        # Check for embeds (inline videos, etc)
+        if "media" in msg_data and msg_data["media"]:
+            media = msg_data["media"]
+            if "oembed" in media:
+                oembed = media["oembed"]
+                if oembed.get("type") == "rich":
+                    if "thumbnail_url" in oembed:
+                        attachments.append(oembed["thumbnail_url"])
+
+        return attachments[:5]  # Limit to 5 attachments per message
+
     def _extract_image_urls(self, text: str) -> list[str]:
-        """Extract image URLs from message text."""
+        """
+        Extract image URLs from message text.
+
+        Supports:
+        - Bare URLs: https://i.redd.it/abc.jpg
+        - Markdown syntax: [alt text](https://example.com/image.jpg)
+        """
         if not text:
             return []
 
         urls = []
+
+        # Extract markdown image URLs: [text](url)
+        markdown_matches = re.findall(self.MARKDOWN_IMAGE_PATTERN, text)
+        for alt_text, url in markdown_matches:
+            urls.append(url)
+
+        # Extract bare URLs (existing patterns)
         for pattern in self.IMAGE_URL_PATTERNS:
             matches = re.findall(pattern, text, re.IGNORECASE)
             urls.extend(matches)
@@ -143,13 +202,14 @@ class MessageSyncService:
 
         count = 0
         for url in image_urls:
-            result = await self._download_image(url)
-            if result is None:
-                continue
-
-            data, content_type = result
-
             try:
+                result = await self._download_image(url)
+                if result is None:
+                    logger.warning(f"Failed to download image from {url}")
+                    continue
+
+                data, content_type = result
+
                 # Generate a filename from URL
                 url_path = url.split('?')[0].split('/')[-1]
                 if '.' not in url_path:
@@ -163,9 +223,13 @@ class MessageSyncService:
                     message_id=message_id,
                 )
                 count += 1
-            except Exception:
+                logger.debug(f"Stored image attachment {upload_result.attachment_id} for message {message_id}")
+            except Exception as e:
+                logger.error(f"Error storing image from {url} for message {message_id}: {e}")
                 continue
 
+        if count > 0:
+            logger.info(f"Downloaded and stored {count} images for message {message_id}")
         return count
 
     def _get_reddit_adapter(self, identity: Identity) -> RedditAdapter:
@@ -308,6 +372,137 @@ class MessageSyncService:
             self.db.flush()
 
         return message, True
+
+    async def backfill_attachments_for_existing_messages(
+        self,
+        identity_id: Optional[int] = None,
+        limit: int = 100,
+    ) -> dict:
+        """Backfill attachments for existing messages that may have been synced before extraction was added.
+
+        Args:
+            identity_id: Specific identity, or None for default
+            limit: Maximum new attachments to create
+
+        Returns:
+            Dict with results: {"messages_processed": int, "attachments_created": int, "errors": []}
+        """
+        result = {
+            "messages_processed": 0,
+            "attachments_created": 0,
+            "errors": [],
+        }
+
+        # Get identity
+        if identity_id:
+            identity = (
+                self.db.query(Identity)
+                .filter_by(id=identity_id, is_active=True)
+                .first()
+            )
+        else:
+            identity = (
+                self.db.query(Identity)
+                .filter_by(provider_id="reddit", is_active=True, is_default=True)
+                .first()
+            )
+            if not identity:
+                identity = (
+                    self.db.query(Identity)
+                    .filter_by(provider_id="reddit", is_active=True)
+                    .first()
+                )
+
+        if not identity:
+            return result
+
+        try:
+            adapter = self._get_reddit_adapter(identity)
+        except SyncError as e:
+            result["errors"].append(str(e))
+            return result
+
+        my_username = identity.external_username.lower()
+        my_attachment_count = 0
+
+        # Fetch raw messages again to get latest metadata
+        endpoints = ["/message/inbox", "/message/sent"]
+
+        for endpoint in endpoints:
+            cursor = None
+            pages_fetched = 0
+            max_pages = 50
+
+            while pages_fetched < max_pages and my_attachment_count < limit:
+                try:
+                    messages_page = await adapter.fetch_inbox_messages(
+                        cursor=cursor, limit=100, endpoint=endpoint
+                    )
+                    pages_fetched += 1
+
+                    if not messages_page.items:
+                        break
+
+                    for msg_data in messages_page.items:
+                        if my_attachment_count >= limit:
+                            break
+
+                        try:
+                            msg_id = msg_data.get("id", "")
+                            if not msg_id:
+                                continue
+
+                            # Find existing message in DB
+                            message = (
+                                self.db.query(Message)
+                                .filter(Message.provider_id == "reddit", Message.external_message_id == msg_id)
+                                .first()
+                            )
+
+                            if not message:
+                                continue
+
+                            # Check if already has attachments
+                            if len(message.attachments) > 0:
+                                continue
+
+                            # Extract media attachments
+                            media_attachments = self._extract_media_attachments_from_reddit(msg_data)
+
+                            # Extract image URLs from body
+                            image_urls = self._extract_image_urls(message.body_text or "")
+
+                            # Combine
+                            all_urls = media_attachments + image_urls
+                            all_urls = list(dict.fromkeys(all_urls))
+
+                            # Download
+                            if all_urls:
+                                logger.debug(f"Backfilling attachments for message {msg_id}: {len(all_urls)} URLs")
+                                images_saved = await self._download_and_store_images(
+                                    message_id=message.id,
+                                    image_urls=all_urls,
+                                )
+                                if images_saved > 0:
+                                    my_attachment_count += images_saved
+                                    result["attachments_created"] += images_saved
+                                    logger.info(f"Message {msg_id}: backfilled {images_saved} attachments")
+
+                            result["messages_processed"] += 1
+
+                        except Exception as e:
+                            logger.error(f"Error backfilling message {msg_data.get('id')}: {e}")
+                            result["errors"].append(str(e))
+
+                    cursor = messages_page.next_cursor
+                    if not messages_page.has_more or not cursor:
+                        break
+
+                except Exception as e:
+                    result["errors"].append(f"Failed to fetch messages from {endpoint}: {e}")
+                    break
+
+        return result
 
     async def sync_reddit_messages(
         self,
@@ -454,13 +649,27 @@ class MessageSyncService:
                             # Download images for new messages
                             if message:
                                 try:
+                                    # Extract media attachments from Reddit message metadata
+                                    media_attachments = self._extract_media_attachments_from_reddit(msg_data)
+
+                                    # Extract image URLs from message body text
                                     image_urls = self._extract_image_urls(body_text)
-                                    if image_urls:
-                                        await self._download_and_store_images(
+
+                                    # Combine both sources
+                                    all_urls = media_attachments + image_urls
+                                    all_urls = list(dict.fromkeys(all_urls))  # Deduplicate while preserving order
+
+                                    if all_urls:
+                                        logger.debug(f"Found {len(all_urls)} media attachments in message {msg_id}: {len(media_attachments)} from metadata, {len(image_urls)} from body text")
+                                        images_saved = await self._download_and_store_images(
                                             message_id=message.id,
-                                            image_urls=image_urls,
+                                            image_urls=all_urls,
                                         )
+                                        logger.info(f"Message {msg_id}: extracted {len(all_urls)} URLs, saved {images_saved} images")
+                                    else:
+                                        logger.debug(f"No images found in message {msg_id}")
                                 except Exception as img_err:
+                                    logger.error(f"Failed to download images for message {msg_id}: {img_err}", exc_info=True)
                                     result.errors.append(f"Failed to download images for message {msg_id}: {img_err}")
 
                         result.messages_synced += 1

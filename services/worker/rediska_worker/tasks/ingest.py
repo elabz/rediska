@@ -10,7 +10,7 @@ from rediska_worker.celery_app import app
 def backfill_conversations(
     self,
     provider_id: str,
-    identity_id: int | None = None,
+    identity_id: Optional[int] = None,
 ) -> dict:
     """Backfill all conversations from a provider.
 
@@ -79,7 +79,7 @@ def backfill_messages(
     self,
     provider_id: str,
     conversation_id: int,
-    identity_id: int | None = None,
+    identity_id: Optional[int] = None,
 ) -> dict:
     """Backfill all messages for a specific conversation.
 
@@ -160,7 +160,7 @@ def backfill_messages(
 
 
 @app.task(name="ingest.sync_delta", bind=True)
-def sync_delta(self, provider_id: str | None = None, identity_id: int | None = None) -> dict:
+def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[int] = None) -> dict:
     """Sync new messages since last sync.
 
     Args:
@@ -221,7 +221,7 @@ def sync_delta(self, provider_id: str | None = None, identity_id: int | None = N
 
 
 @app.task(name="ingest.browse_location")
-def browse_location(provider_id: str, location: str, cursor: str | None = None) -> dict:
+def browse_location(provider_id: str, location: str, cursor: Optional[str] = None) -> dict:
     """Browse posts from a provider location (e.g., subreddit)."""
     # TODO: Implement
     return {"status": "not_implemented", "provider_id": provider_id, "location": location}

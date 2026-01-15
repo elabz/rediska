@@ -19,6 +19,8 @@ app = Celery(
         "rediska_worker.tasks.embed",
         "rediska_worker.tasks.agent",
         "rediska_worker.tasks.maintenance",
+        "rediska_worker.tasks.message",
+        "rediska_worker.tasks.multi_agent_analysis",
     ],
 )
 
@@ -46,6 +48,8 @@ app.conf.update(
         "rediska_worker.tasks.embed.*": {"queue": "embed"},
         "rediska_worker.tasks.agent.*": {"queue": "agent"},
         "rediska_worker.tasks.maintenance.*": {"queue": "maintenance"},
+        "rediska_worker.tasks.message.*": {"queue": "messages"},
+        "rediska_worker.tasks.multi_agent_analysis.*": {"queue": "multi_agent_analysis"},
     },
     # Worker settings
     worker_prefetch_multiplier=1,

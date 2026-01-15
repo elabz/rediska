@@ -135,14 +135,18 @@ function LeadCard({
   lead,
   onStatusChange,
   onAnalyze,
+  onContact,
   isUpdating,
   isAnalyzing,
+  isContacting,
 }: {
   lead: Lead;
   onStatusChange: (status: string) => void;
   onAnalyze: () => void;
+  onContact: () => void;
   isUpdating: boolean;
   isAnalyzing: boolean;
+  isContacting: boolean;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const hasLongContent = lead.body_text && lead.body_text.length > 200;
@@ -284,6 +288,24 @@ function LeadCard({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Contact Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onContact}
+            disabled={isContacting || !lead.author_username}
+            title={!lead.author_username ? 'No author to contact' : 'Start a conversation with this user'}
+          >
+            {isContacting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <>
+                <MessageSquare className="h-4 w-4 mr-1" />
+                Contact
+              </>
+            )}
+          </Button>
+
           {/* Analyze Button */}
           <Button
             variant="outline"
@@ -347,6 +369,8 @@ export default function LeadsPage() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [updatingLeads, setUpdatingLeads] = useState<Set<number>>(new Set());
   const [analyzingLeads, setAnalyzingLeads] = useState<Set<number>>(new Set());
+  const [contactingLeads, setContactingLeads] = useState<Set<number>>(new Set());
+  const [contactError, setContactError] = useState<string | null>(null);
 
   const LIMIT = 20;
 
@@ -451,6 +475,41 @@ export default function LeadsPage() {
     }
   }, [fetchLeads, offset]);
 
+  const contactLead = useCallback(async (leadId: number) => {
+    setContactingLeads(prev => {
+      const next = new Set(prev);
+      next.add(leadId);
+      return next;
+    });
+
+    setContactError(null);
+
+    try {
+      const response = await fetch(`/api/core/conversations/initiate/from-lead/${leadId}`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to initiate conversation');
+      }
+
+      const conversation = await response.json();
+      window.location.href = `/inbox/${conversation.id}`;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to start conversation';
+      setContactError(errorMsg);
+      console.error('Failed to contact lead:', err);
+    } finally {
+      setContactingLeads(prev => {
+        const next = new Set(prev);
+        next.delete(leadId);
+        return next;
+      });
+    }
+  }, []);
+
   const refresh = () => fetchLeads();
 
   if (loading && leads.length === 0) {
@@ -522,6 +581,31 @@ export default function LeadsPage() {
         </div>
       </Card>
 
+      {/* Error Alert */}
+      {contactError && (
+        <div className="rounded-lg border border-destructive bg-destructive/10 p-3">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-destructive">
+                Failed to start conversation
+              </p>
+              <p className="text-sm text-destructive/80 mt-1">
+                {contactError}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setContactError(null)}
+              className="h-6 w-6 p-0"
+            >
+              <XCircle className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Leads List */}
       {leads.length === 0 ? (
         <EmptyState
@@ -541,8 +625,10 @@ export default function LeadsPage() {
                 lead={lead}
                 onStatusChange={(status) => updateLeadStatus(lead.id, status)}
                 onAnalyze={() => analyzeLead(lead.id)}
+                onContact={() => contactLead(lead.id)}
                 isUpdating={updatingLeads.has(lead.id)}
                 isAnalyzing={analyzingLeads.has(lead.id)}
+                isContacting={contactingLeads.has(lead.id)}
               />
             ))}
           </div>

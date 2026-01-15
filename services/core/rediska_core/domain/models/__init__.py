@@ -109,6 +109,32 @@ class JobStatus(str):
     DONE = "done"
 
 
+class AnalysisStatus(str):
+    """Lead analysis status values."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class RecommendationStatus(str):
+    """Lead suitability recommendation values."""
+
+    SUITABLE = "suitable"
+    NOT_RECOMMENDED = "not_recommended"
+    NEEDS_REVIEW = "needs_review"
+
+
+class DimensionStatus(str):
+    """Individual analysis dimension status values."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class AuditActor(str):
     """Audit actor values."""
 
@@ -511,6 +537,19 @@ class LeadPost(Base):
     )
     remote_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
+    # Multi-agent analysis fields
+    latest_analysis_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("lead_analyses.id", ondelete="SET NULL"), nullable=True
+    )
+    analysis_recommendation: Mapped[Optional[str]] = mapped_column(
+        Enum(
+            "suitable", "not_recommended", "needs_review",
+            name="lead_recommendation_enum"
+        ),
+        nullable=True,
+    )
+    analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
@@ -524,12 +563,19 @@ class LeadPost(Base):
         Index("idx_source", "provider_id", "source_location"),
         Index("idx_author", "author_account_id"),
         Index("idx_status", "status"),
+        Index("idx_lead_analysis_recommendation", "analysis_recommendation"),
     )
 
     # Relationships
     provider: Mapped["Provider"] = relationship(back_populates="lead_posts")
     author_account: Mapped[Optional["ExternalAccount"]] = relationship(
         back_populates="lead_posts"
+    )
+    latest_analysis: Mapped[Optional["LeadAnalysis"]] = relationship(
+        uselist=False,
+        foreign_keys=[latest_analysis_id],
+        lazy="selectin",
+        viewonly=True,
     )
 
 
@@ -728,6 +774,152 @@ class Job(Base):
     __table_args__ = (Index("idx_jobs_status", "status", "next_run_at"),)
 
 
+# =============================================================================
+# Multi-Agent Analysis Models
+# =============================================================================
+
+
+class AgentPrompt(Base):
+    """Versioned prompts for analysis agents."""
+
+    __tablename__ = "agent_prompts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agent_dimension: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    output_schema_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    temperature: Mapped[float] = mapped_column(nullable=False, default=0.7)
+    max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=2048)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("agent_dimension", "version", name="uq_agent_prompt_version"),
+        Index("idx_agent_prompt_active", "agent_dimension", "is_active"),
+    )
+
+
+class LeadAnalysis(Base):
+    """Multi-dimensional analysis results for leads."""
+
+    __tablename__ = "lead_analyses"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    lead_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("lead_posts.id"), nullable=False
+    )
+    account_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("external_accounts.id"), nullable=False
+    )
+
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        Enum(
+            "pending", "running", "completed", "failed",
+            name="analysis_status_enum"
+        ),
+        nullable=False,
+        default="pending",
+    )
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Dimension results (JSON storage)
+    demographics_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    preferences_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    relationship_goals_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    risk_flags_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    sexual_preferences_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Meta-analysis result
+    meta_analysis_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    final_recommendation: Mapped[Optional[str]] = mapped_column(
+        Enum(
+            "suitable", "not_recommended", "needs_review",
+            name="recommendation_enum"
+        ),
+        nullable=True,
+    )
+    recommendation_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    confidence_score: Mapped[Optional[float]] = mapped_column(nullable=True)
+
+    # Metadata
+    prompt_versions_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    model_info_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("idx_analysis_lead_completed", "lead_id", "completed_at"),
+        Index("idx_analysis_status", "status"),
+        Index("idx_analysis_recommendation", "final_recommendation"),
+    )
+
+    # Relationships
+    lead_post: Mapped["LeadPost"] = relationship(
+        foreign_keys=[lead_id],
+    )
+    account: Mapped["ExternalAccount"] = relationship()
+    dimensions: Mapped[list["AnalysisDimension"]] = relationship(
+        back_populates="analysis",
+        cascade="all, delete-orphan",
+    )
+
+
+class AnalysisDimension(Base):
+    """Individual dimension execution tracking for analyses."""
+
+    __tablename__ = "analysis_dimensions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    analysis_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("lead_analyses.id", ondelete="CASCADE"), nullable=False
+    )
+    dimension: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        Enum(
+            "pending", "running", "completed", "failed",
+            name="dimension_status_enum"
+        ),
+        nullable=False,
+        default="pending",
+    )
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    input_data_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    output_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    raw_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    model_info_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    prompt_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("idx_dimension_analysis", "analysis_id", "dimension"),
+        Index("idx_dimension_status", "status"),
+    )
+
+    # Relationships
+    analysis: Mapped["LeadAnalysis"] = relationship(back_populates="dimensions")
+
+
 # Export all models
 __all__ = [
     "Base",
@@ -746,4 +938,7 @@ __all__ = [
     "DoNotContact",
     "AuditLog",
     "Job",
+    "AgentPrompt",
+    "LeadAnalysis",
+    "AnalysisDimension",
 ]

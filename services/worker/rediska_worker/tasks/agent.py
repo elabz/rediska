@@ -1,5 +1,7 @@
 """Agent tasks for LLM-powered analysis."""
 
+from typing import Optional
+
 from rediska_worker.celery_app import app
 
 
@@ -18,7 +20,7 @@ def lead_scoring(lead_post_id: int) -> dict:
 
 
 @app.task(name="agent.draft_intro")
-def draft_intro(target_account_id: int, context: str | None = None) -> dict:
+def draft_intro(target_account_id: int, context: Optional[str] = None) -> dict:
     """Draft an introduction message using LLM."""
     # TODO: Implement
     return {"status": "not_implemented", "target_account_id": target_account_id}

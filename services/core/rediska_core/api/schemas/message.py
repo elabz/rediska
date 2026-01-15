@@ -80,3 +80,11 @@ class SyncJobStatusResponse(BaseModel):
     job_id: str = Field(..., description="Celery task ID")
     status: str = Field(..., description="Job status (pending, success, failure)")
     result: Optional[dict] = Field(None, description="Job result if completed")
+
+
+class DeleteMessageResponse(BaseModel):
+    """Response schema for message deletion."""
+
+    message: str = Field(..., description="Success message")
+    message_id: int = Field(..., description="ID of deleted message")
+    job_cancelled: bool = Field(..., description="Whether associated job was cancelled")

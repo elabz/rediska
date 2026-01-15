@@ -18,19 +18,19 @@ class Settings(BaseSettings):
 
     # Database
     mysql_url: str = Field(
-        default="mysql+pymysql://rediska:rediska@localhost:3306/rediska",
+        default="mysql+pymysql://rediska:rediska@rediska-mysql:3306/rediska",
         description="MySQL connection URL",
     )
 
     # Redis
-    redis_url: str = Field(default="redis://localhost:6379/0")
+    redis_url: str = Field(default="redis://rediska-redis:6379/0")
 
     # Celery
-    celery_broker_url: str = Field(default="redis://localhost:6379/1")
-    celery_result_backend: str = Field(default="redis://localhost:6379/2")
+    celery_broker_url: str = Field(default="redis://rediska-redis:6379/1")
+    celery_result_backend: str = Field(default="redis://rediska-redis:6379/2")
 
     # Elasticsearch
-    elastic_url: str = Field(default="http://localhost:9200")
+    elastic_url: str = Field(default="http://rediska-elasticsearch:9200")
 
     # Storage paths
     attachments_path: str = Field(default="/var/lib/rediska/attachments")

@@ -1,0 +1,167 @@
+"""Analysis agents for multi-dimensional lead evaluation.
+
+This package contains specialized LLM agents for analyzing different
+dimensions of lead profiles and generating suitability recommendations.
+"""
+
+from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from rediska_core.domain.models import AgentPrompt, AnalysisDimension
+
+# Import AgentConfig - will be available from domain.services.agent
+try:
+    from rediska_core.domain.services.agent import AgentConfig, AgentHarness
+except ImportError:
+    # Fallback if agent module not yet created
+    AgentConfig = None
+    AgentHarness = None
+
+
+class BaseAnalysisAgent(ABC):
+    """Base class for all analysis agents."""
+
+    def __init__(self, inference_client: Any) -> None:
+        """
+        Initialize agent.
+
+        Args:
+            inference_client: LLM inference client
+        """
+        self.inference_client = inference_client
+
+    @abstractmethod
+    async def analyze(
+        self,
+        dimension: str,
+        input_context: dict[str, Any],
+        prompt: AgentPrompt,
+        analysis_id: int,
+        db: Session,
+    ) -> dict[str, Any]:
+        """
+        Run analysis on input context.
+
+        Args:
+            dimension: Agent dimension name
+            input_context: Input data to analyze
+            prompt: Agent prompt configuration
+            analysis_id: Parent analysis ID (for tracking)
+            db: Database session
+
+        Returns:
+            dict: Result with success, output, parsed_output, error, etc.
+        """
+        pass
+
+    async def _run_agent_harness(
+        self,
+        config: AgentConfig,
+        input_prompt: str,
+    ) -> dict[str, Any]:
+        """
+        Run the agent harness with given configuration.
+
+        Args:
+            config: Agent configuration
+            input_prompt: Input prompt for agent
+
+        Returns:
+            dict: Agent result
+        """
+        harness = AgentHarness(
+            config=config,
+            inference_client=self.inference_client,
+        )
+
+        result = await harness.run(input_prompt)
+
+        return {
+            "success": result.success,
+            "output": result.output,
+            "parsed_output": result.parsed_output,
+            "error": result.error,
+            "model_info": result.model_info,
+            "raw_response": result.output,
+        }
+
+    def _build_input_prompt(
+        self,
+        dimension: str,
+        input_context: dict[str, Any],
+    ) -> str:
+        """
+        Build input prompt for agent from context.
+
+        Args:
+            dimension: Agent dimension
+            input_context: Input context data
+
+        Returns:
+            str: Formatted input prompt
+        """
+        # Extract relevant content for analysis
+        lead_body = input_context.get("lead", {}).get("body", "")
+        post_text = input_context.get("profile", {}).get("post_text", "")
+        comment_text = input_context.get("profile", {}).get("comment_text", "")
+        summary = input_context.get("profile", {}).get("summary", "")
+
+        # Combine content
+        content_parts = []
+        if lead_body:
+            content_parts.append(f"Lead post:\n{lead_body}")
+        if summary:
+            content_parts.append(f"Profile summary:\n{summary}")
+        if post_text:
+            content_parts.append(f"Recent posts:\n{post_text}")
+        if comment_text:
+            content_parts.append(f"Comments:\n{comment_text}")
+
+        content = "\n\n".join(content_parts)
+
+        return f"""Analyze this user content:
+
+{content}
+
+Provide your analysis in valid JSON format."""
+
+    async def _store_dimension_result(
+        self,
+        analysis_id: int,
+        dimension: str,
+        prompt_version: int,
+        input_data: dict[str, Any],
+        output_data: dict[str, Any] | None,
+        status: str,
+        error: str | None,
+        db: Session,
+    ) -> None:
+        """
+        Store dimension analysis result in database.
+
+        Args:
+            analysis_id: Parent analysis ID
+            dimension: Dimension name
+            prompt_version: Prompt version used
+            input_data: Input data used
+            output_data: Output data from agent
+            status: Analysis status
+            error: Error message if failed
+            db: Database session
+        """
+        dim_record = AnalysisDimension(
+            analysis_id=analysis_id,
+            dimension=dimension,
+            started_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            status=status,
+            input_data_json=input_data,
+            output_json=output_data,
+            prompt_version=prompt_version,
+            error_detail=error,
+        )
+        db.add(dim_record)
+        db.flush()
