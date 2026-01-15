@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, Suspense } from 'react';
 import Link from 'next/link';
-import { Loader2, MessageSquare, RefreshCw, Search, X } from 'lucide-react';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { Loader2, MessageSquare, Paperclip, RefreshCw, Reply, Search, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -122,7 +123,14 @@ function ConversationItem({ conversation, identity }: { conversation: Conversati
   );
 }
 
-export default function InboxPage() {
+function InboxContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Initialize filters from URL params
+  const initialAttachments = searchParams.get('attachments') === 'true';
+  const initialReplies = searchParams.get('replies') === 'true';
+
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -133,6 +141,35 @@ export default function InboxPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [identityFilter, setIdentityFilter] = useState<number | null>(null);
+  const [hasAttachmentsFilter, setHasAttachmentsFilter] = useState(initialAttachments);
+  const [hasRepliesFilter, setHasRepliesFilter] = useState(initialReplies);
+
+  // Update URL when filters change
+  const updateUrlParams = useCallback((attachments: boolean, replies: boolean) => {
+    const params = new URLSearchParams();
+    if (attachments) params.set('attachments', 'true');
+    if (replies) params.set('replies', 'true');
+    const queryString = params.toString();
+    router.replace(queryString ? `/inbox?${queryString}` : '/inbox', { scroll: false });
+  }, [router]);
+
+  const toggleAttachmentsFilter = useCallback(() => {
+    const newValue = !hasAttachmentsFilter;
+    setHasAttachmentsFilter(newValue);
+    updateUrlParams(newValue, hasRepliesFilter);
+  }, [hasAttachmentsFilter, hasRepliesFilter, updateUrlParams]);
+
+  const toggleRepliesFilter = useCallback(() => {
+    const newValue = !hasRepliesFilter;
+    setHasRepliesFilter(newValue);
+    updateUrlParams(hasAttachmentsFilter, newValue);
+  }, [hasAttachmentsFilter, hasRepliesFilter, updateUrlParams]);
+
+  const clearFilters = useCallback(() => {
+    setHasAttachmentsFilter(false);
+    setHasRepliesFilter(false);
+    updateUrlParams(false, false);
+  }, [updateUrlParams]);
 
   const { identities, loading: identitiesLoading } = useIdentities();
 
@@ -171,7 +208,7 @@ export default function InboxPage() {
     return filtered;
   }, [conversations, searchQuery, identityFilter]);
 
-  const fetchConversations = async (isRefresh = false, cursor?: string) => {
+  const fetchConversations = useCallback(async (isRefresh = false, cursor?: string) => {
     if (cursor) {
       setLoadingMore(true);
     } else if (isRefresh) {
@@ -185,6 +222,12 @@ export default function InboxPage() {
       const params = new URLSearchParams({ limit: '50' });
       if (cursor) {
         params.set('cursor', cursor);
+      }
+      if (hasAttachmentsFilter) {
+        params.set('has_attachments', 'true');
+      }
+      if (hasRepliesFilter) {
+        params.set('has_replies', 'true');
       }
 
       const response = await fetch(`/api/core/conversations?${params.toString()}`, {
@@ -222,17 +265,18 @@ export default function InboxPage() {
       setLoadingMore(false);
       setRefreshing(false);
     }
-  };
+  }, [hasAttachmentsFilter, hasRepliesFilter]);
 
-  const loadMore = () => {
+  const loadMore = useCallback(() => {
     if (nextCursor && !loadingMore) {
       fetchConversations(false, nextCursor);
     }
-  };
+  }, [fetchConversations, nextCursor, loadingMore]);
 
+  // Refetch when filters change
   useEffect(() => {
     fetchConversations();
-  }, []);
+  }, [fetchConversations]);
 
   if (loading) {
     return (
@@ -313,6 +357,28 @@ export default function InboxPage() {
         </div>
       )}
 
+      {/* Message Filters */}
+      <div className="flex gap-2 mb-4">
+        <Button
+          variant={hasAttachmentsFilter ? "default" : "outline"}
+          size="sm"
+          onClick={toggleAttachmentsFilter}
+          className={hasAttachmentsFilter ? "gap-1.5 shadow-sm" : "gap-1.5"}
+        >
+          <Paperclip className="h-3.5 w-3.5" />
+          With Attachments
+        </Button>
+        <Button
+          variant={hasRepliesFilter ? "default" : "outline"}
+          size="sm"
+          onClick={toggleRepliesFilter}
+          className={hasRepliesFilter ? "gap-1.5 shadow-sm" : "gap-1.5"}
+        >
+          <Reply className="h-3.5 w-3.5" />
+          With Replies
+        </Button>
+      </div>
+
       {/* Search Field */}
       <div className="relative mb-4">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -346,6 +412,35 @@ export default function InboxPage() {
               className="mt-2"
             >
               Clear search
+            </Button>
+          </div>
+        </Card>
+      ) : conversations.length === 0 && (hasAttachmentsFilter || hasRepliesFilter) ? (
+        <Card className="p-8">
+          <div className="text-center">
+            {hasAttachmentsFilter && hasRepliesFilter ? (
+              <div className="flex justify-center gap-2 mb-4">
+                <Paperclip className="h-8 w-8 text-muted-foreground" />
+                <Reply className="h-8 w-8 text-muted-foreground" />
+              </div>
+            ) : hasAttachmentsFilter ? (
+              <Paperclip className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            ) : (
+              <Reply className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            )}
+            <p className="text-muted-foreground">
+              No conversations {hasAttachmentsFilter && hasRepliesFilter
+                ? 'with attachments and replies'
+                : hasAttachmentsFilter
+                  ? 'with attachments'
+                  : 'with replies'}
+            </p>
+            <Button
+              variant="link"
+              onClick={clearFilters}
+              className="mt-2"
+            >
+              Clear filters
             </Button>
           </div>
         </Card>
@@ -386,6 +481,15 @@ export default function InboxPage() {
             ) : (
               <>
                 Showing {conversations.length} conversation{conversations.length !== 1 ? 's' : ''}
+                {(hasAttachmentsFilter || hasRepliesFilter) && (
+                  <span className="text-primary">
+                    {' '}(filtered{hasAttachmentsFilter && hasRepliesFilter
+                      ? ': attachments + replies'
+                      : hasAttachmentsFilter
+                        ? ': attachments'
+                        : ': replies'})
+                  </span>
+                )}
                 {hasMore && ' (more available)'}
               </>
             )}
@@ -393,5 +497,29 @@ export default function InboxPage() {
         </>
       )}
     </div>
+  );
+}
+
+// Loading fallback for Suspense
+function InboxLoading() {
+  return (
+    <div className="max-w-2xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold">Inbox</h1>
+      </div>
+      <Card>
+        {[1, 2, 3, 4, 5].map((i) => (
+          <ConversationSkeleton key={i} />
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+export default function InboxPage() {
+  return (
+    <Suspense fallback={<InboxLoading />}>
+      <InboxContent />
+    </Suspense>
   );
 }

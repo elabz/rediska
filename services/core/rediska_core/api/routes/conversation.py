@@ -109,6 +109,8 @@ async def list_conversations(
     cursor: Optional[str] = Query(None, description="Pagination cursor"),
     limit: int = Query(20, ge=1, le=100, description="Number of results per page"),
     include_archived: bool = Query(False, description="Include archived conversations"),
+    has_attachments: Optional[bool] = Query(None, description="Filter to conversations with attachments"),
+    has_replies: Optional[bool] = Query(None, description="Filter to conversations with incoming replies"),
 ):
     """List conversations with cursor-based pagination.
 
@@ -144,6 +146,35 @@ async def list_conversations(
     # Exclude archived unless requested
     if not include_archived:
         query = query.filter(Conversation.archived_at.is_(None))
+
+    # Filter for conversations with attachments
+    if has_attachments is True:
+        # Subquery to find conversation IDs that have at least one attachment
+        conversations_with_attachments = (
+            db.query(Message.conversation_id)
+            .join(Attachment, Attachment.message_id == Message.id)
+            .filter(Message.deleted_at.is_(None))
+            .filter(Attachment.remote_visibility != "removed")
+            .distinct()
+            .subquery()
+        )
+        query = query.filter(Conversation.id.in_(
+            db.query(conversations_with_attachments.c.conversation_id)
+        ))
+
+    # Filter for conversations with incoming replies
+    if has_replies is True:
+        # Subquery to find conversation IDs that have at least one incoming message
+        conversations_with_replies = (
+            db.query(Message.conversation_id)
+            .filter(Message.deleted_at.is_(None))
+            .filter(Message.direction == "in")
+            .distinct()
+            .subquery()
+        )
+        query = query.filter(Conversation.id.in_(
+            db.query(conversations_with_replies.c.conversation_id)
+        ))
 
     # Create a subquery to get the max message sent_at for each conversation
     # This ensures we order by actual last message time, not stale last_activity_at
