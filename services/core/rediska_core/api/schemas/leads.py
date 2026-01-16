@@ -54,6 +54,7 @@ class LeadResponse(BaseModel):
     author_info: Optional[AuthorInfo] = Field(default=None, description="Detailed author info from analysis")
     status: str = Field(..., description="Lead status")
     score: Optional[int] = Field(default=None, description="Lead score")
+    lead_source: Optional[str] = Field(default=None, description="How the lead was created ('manual' or 'scout_watch')")
     post_created_at: Optional[datetime] = Field(default=None, description="When the post was created")
     created_at: datetime = Field(..., description="When the lead was saved")
 

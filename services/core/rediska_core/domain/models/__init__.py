@@ -156,6 +156,30 @@ class StorageBackend(str):
     FS = "fs"
 
 
+class LeadSource(str):
+    """Lead source values."""
+
+    MANUAL = "manual"
+    SCOUT_WATCH = "scout_watch"
+
+
+class ScoutRunStatus(str):
+    """Scout watch run status values."""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ScoutPostStatus(str):
+    """Scout watch post analysis status values."""
+
+    PENDING = "pending"
+    ANALYZED = "analyzed"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
 # =============================================================================
 # MODELS
 # =============================================================================
@@ -550,6 +574,16 @@ class LeadPost(Base):
     )
     analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
 
+    # Lead source tracking (manual vs scout_watch)
+    lead_source: Mapped[str] = mapped_column(
+        Enum("manual", "scout_watch", name="lead_source_enum"),
+        nullable=False,
+        default="manual",
+    )
+    scout_watch_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("scout_watches.id"), nullable=True
+    )
+
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
@@ -564,6 +598,7 @@ class LeadPost(Base):
         Index("idx_author", "author_account_id"),
         Index("idx_status", "status"),
         Index("idx_lead_analysis_recommendation", "analysis_recommendation"),
+        Index("idx_lead_source", "lead_source"),
     )
 
     # Relationships
@@ -576,6 +611,10 @@ class LeadPost(Base):
         foreign_keys=[latest_analysis_id],
         lazy="selectin",
         viewonly=True,
+    )
+    scout_watch: Mapped[Optional["ScoutWatch"]] = relationship(
+        back_populates="lead_posts",
+        foreign_keys=[scout_watch_id],
     )
 
 
@@ -920,6 +959,156 @@ class AnalysisDimension(Base):
     analysis: Mapped["LeadAnalysis"] = relationship(back_populates="dimensions")
 
 
+# =============================================================================
+# Scout Watch Models
+# =============================================================================
+
+
+class ScoutWatch(Base):
+    """Scout watch configurations for automatic subreddit monitoring."""
+
+    __tablename__ = "scout_watches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    # Provider and location
+    provider_id: Mapped[str] = mapped_column(String(32), nullable=False, default="reddit")
+    source_location: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Search criteria
+    search_query: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sort_by: Mapped[str] = mapped_column(String(20), nullable=False, default="new")
+    time_filter: Mapped[str] = mapped_column(String(20), nullable=False, default="day")
+
+    # Identity to use for API calls
+    identity_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("identities.id"), nullable=True
+    )
+
+    # Status
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # Analysis settings
+    auto_analyze: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    min_confidence: Mapped[float] = mapped_column(nullable=False, default=0.7)
+
+    # Stats (denormalized for performance)
+    total_posts_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_matches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_leads_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Timestamps
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_match_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("idx_scout_watch_active", "is_active", "last_run_at"),
+        Index("idx_scout_watch_location", "provider_id", "source_location"),
+    )
+
+    # Relationships
+    identity: Mapped[Optional["Identity"]] = relationship()
+    runs: Mapped[list["ScoutWatchRun"]] = relationship(
+        back_populates="watch",
+        cascade="all, delete-orphan",
+    )
+    posts: Mapped[list["ScoutWatchPost"]] = relationship(
+        back_populates="watch",
+        cascade="all, delete-orphan",
+    )
+    lead_posts: Mapped[list["LeadPost"]] = relationship(
+        back_populates="scout_watch",
+        foreign_keys="LeadPost.scout_watch_id",
+    )
+
+
+class ScoutWatchRun(Base):
+    """Scout watch run history."""
+
+    __tablename__ = "scout_watch_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    watch_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("scout_watches.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Run details
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Results
+    status: Mapped[str] = mapped_column(
+        Enum("running", "completed", "failed", name="scout_run_status_enum"),
+        nullable=False,
+        default="running",
+    )
+    posts_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    posts_new: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    posts_analyzed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    leads_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Error tracking
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_scout_watch_runs", "watch_id", "started_at"),
+    )
+
+    # Relationships
+    watch: Mapped["ScoutWatch"] = relationship(back_populates="runs")
+    posts: Mapped[list["ScoutWatchPost"]] = relationship(back_populates="run")
+
+
+class ScoutWatchPost(Base):
+    """Scout watch post tracking for deduplication."""
+
+    __tablename__ = "scout_watch_posts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    watch_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("scout_watches.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Post identification
+    external_post_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # Tracking
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("scout_watch_runs.id"), nullable=True
+    )
+
+    # Analysis result
+    analysis_status: Mapped[str] = mapped_column(
+        Enum("pending", "analyzed", "skipped", "failed", name="scout_post_status_enum"),
+        nullable=False,
+        default="pending",
+    )
+    analysis_recommendation: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+
+    # Lead creation
+    lead_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("lead_posts.id"), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("watch_id", "external_post_id", name="uq_scout_watch_post"),
+        Index("idx_scout_post_pending", "watch_id", "analysis_status"),
+    )
+
+    # Relationships
+    watch: Mapped["ScoutWatch"] = relationship(back_populates="posts")
+    run: Mapped[Optional["ScoutWatchRun"]] = relationship(back_populates="posts")
+    lead: Mapped[Optional["LeadPost"]] = relationship()
+
+
 # Export all models
 __all__ = [
     "Base",
@@ -941,4 +1130,11 @@ __all__ = [
     "AgentPrompt",
     "LeadAnalysis",
     "AnalysisDimension",
+    "ScoutWatch",
+    "ScoutWatchRun",
+    "ScoutWatchPost",
+    # Enums
+    "LeadSource",
+    "ScoutRunStatus",
+    "ScoutPostStatus",
 ]

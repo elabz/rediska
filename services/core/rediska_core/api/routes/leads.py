@@ -312,6 +312,7 @@ async def list_leads(
     provider_id: str | None = Query(default=None, description="Filter by provider"),
     source_location: str | None = Query(default=None, description="Filter by source location"),
     status: str | None = Query(default=None, description="Filter by status"),
+    lead_source: str | None = Query(default=None, description="Filter by lead source (manual, scout_watch)"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     limit: int = Query(default=20, ge=1, le=100, description="Maximum results"),
 ):
@@ -320,6 +321,7 @@ async def list_leads(
         provider_id=provider_id,
         source_location=source_location,
         status=status,
+        lead_source=lead_source,
         offset=offset,
         limit=limit,
     )

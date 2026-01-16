@@ -188,8 +188,15 @@ class MessageSyncService:
         self,
         message_id: int,
         image_urls: list[str],
+        username: Optional[str] = None,
     ) -> int:
-        """Download images and create attachments. Returns count of images saved."""
+        """Download images and create attachments. Returns count of images saved.
+
+        Args:
+            message_id: ID of the message to link attachments to.
+            image_urls: List of image URLs to download.
+            username: Optional username to organize files by (counterpart username).
+        """
         if not image_urls:
             return 0
 
@@ -221,6 +228,7 @@ class MessageSyncService:
                     filename=url_path,
                     content_type=content_type,
                     message_id=message_id,
+                    username=username,
                 )
                 count += 1
                 logger.debug(f"Stored image attachment {upload_result.attachment_id} for message {message_id}")
@@ -333,8 +341,13 @@ class MessageSyncService:
         sent_at: datetime,
         sender_username: Optional[str] = None,
     ) -> tuple[Message | None, bool]:
-        """Create a message if it doesn't exist. Returns (message, is_new)."""
-        # Check if message already exists
+        """Create a message if it doesn't exist. Returns (message, is_new).
+
+        For outgoing messages, also checks for pending messages that were created
+        locally but haven't been synced yet (to avoid duplicates when sync runs
+        before the send worker completes).
+        """
+        # Check if message already exists by external_message_id
         existing = (
             self.db.query(Message)
             .filter_by(
@@ -346,6 +359,49 @@ class MessageSyncService:
 
         if existing:
             return existing, False
+
+        # For outgoing messages, check if there's a pending local message
+        # that matches (created before sync got the external_id from Reddit)
+        if direction == "out":
+            # Look for a pending outgoing message in the same conversation
+            # with matching body text (normalized) that was sent recently
+            from sqlalchemy import or_
+            pending_message = (
+                self.db.query(Message)
+                .filter(
+                    Message.provider_id == "reddit",
+                    Message.conversation_id == conversation.id,
+                    Message.direction == "out",
+                    Message.remote_visibility == "unknown",  # Pending send
+                    # Not yet synced (NULL or empty string)
+                    or_(
+                        Message.external_message_id.is_(None),
+                        Message.external_message_id == "",
+                    ),
+                    Message.deleted_at.is_(None),  # Not deleted
+                )
+                .order_by(Message.sent_at.desc())
+                .first()
+            )
+
+            if pending_message:
+                # Normalize body text for comparison (strip whitespace)
+                pending_body = (pending_message.body_text or "").strip()
+                sync_body = (body_text or "").strip()
+
+                # Check if body text matches (exact match after stripping)
+                if pending_body == sync_body:
+                    # Found matching pending message - update it instead of creating duplicate
+                    logger.info(
+                        f"Found pending message {pending_message.id} matching synced message {external_message_id}, "
+                        f"updating instead of creating duplicate"
+                    )
+                    pending_message.external_message_id = external_message_id
+                    pending_message.remote_visibility = "visible"
+                    # Use Reddit's timestamp for consistency across Reddit apps
+                    pending_message.sent_at = sent_at
+                    self.db.flush()
+                    return pending_message, False  # Not a new message
 
         # Determine direction based on sender
         if direction == "in":
@@ -475,12 +531,17 @@ class MessageSyncService:
                             all_urls = media_attachments + image_urls
                             all_urls = list(dict.fromkeys(all_urls))
 
-                            # Download
+                            # Download - get username for storage organization
+                            counterpart_username = None
+                            if message.conversation and message.conversation.counterpart_account:
+                                counterpart_username = message.conversation.counterpart_account.external_username
+
                             if all_urls:
                                 logger.debug(f"Backfilling attachments for message {msg_id}: {len(all_urls)} URLs")
                                 images_saved = await self._download_and_store_images(
                                     message_id=message.id,
                                     image_urls=all_urls,
+                                    username=counterpart_username,
                                 )
                                 if images_saved > 0:
                                     my_attachment_count += images_saved
@@ -511,6 +572,169 @@ class MessageSyncService:
                 except Exception as e:
                     result["errors"].append(f"Failed to fetch messages from {endpoint}: {e}")
                     break
+
+        return result
+
+    async def redownload_missing_attachments(
+        self,
+        conversation_id: Optional[int] = None,
+        limit: int = 100,
+    ) -> dict:
+        """Re-download missing attachments from message body text.
+
+        This method scans messages for image URLs and attempts to download
+        any images that are not already stored as attachments. Unlike
+        backfill_attachments_for_existing_messages, this does NOT call the
+        Reddit API - it only extracts URLs from the locally stored body_text.
+
+        Args:
+            conversation_id: Specific conversation, or None for all
+            limit: Maximum new attachments to create
+
+        Returns:
+            Dict with results: {
+                "messages_scanned": int,
+                "urls_found": int,
+                "attachments_created": int,
+                "already_exists": int,
+                "download_failed": int,
+                "errors": []
+            }
+        """
+        from rediska_core.domain.services.attachment import AttachmentService
+
+        result = {
+            "messages_scanned": 0,
+            "urls_found": 0,
+            "attachments_created": 0,
+            "already_exists": 0,
+            "download_failed": 0,
+            "errors": [],
+        }
+
+        attachment_service = AttachmentService(
+            db=self.db,
+            storage_path=self.settings.attachments_path,
+        )
+
+        # Build query for messages
+        query = self.db.query(Message).filter(
+            Message.body_text.isnot(None),
+            Message.body_text != "",
+        )
+
+        if conversation_id:
+            query = query.filter(Message.conversation_id == conversation_id)
+
+        # Order by most recent first
+        query = query.order_by(Message.sent_at.desc())
+
+        # Fetch messages in batches
+        batch_size = 100
+        offset = 0
+        attachments_created = 0
+
+        while attachments_created < limit:
+            messages = query.offset(offset).limit(batch_size).all()
+            if not messages:
+                break
+
+            for message in messages:
+                if attachments_created >= limit:
+                    break
+
+                result["messages_scanned"] += 1
+
+                # Extract image URLs from body text
+                image_urls = self._extract_image_urls(message.body_text or "")
+                if not image_urls:
+                    continue
+
+                result["urls_found"] += len(image_urls)
+
+                # Get counterpart username for storage organization
+                counterpart_username = None
+                if message.conversation and message.conversation.counterpart_account:
+                    counterpart_username = message.conversation.counterpart_account.external_username
+
+                # Get existing attachment SHA256s for this message
+                existing_sha256s = set()
+                for att in message.attachments:
+                    if att.sha256:
+                        existing_sha256s.add(att.sha256)
+
+                # Download and store images
+                for url in image_urls:
+                    if attachments_created >= limit:
+                        break
+
+                    try:
+                        download_result = await self._download_image(url)
+                        if download_result is None:
+                            logger.warning(f"Failed to download image from {url}")
+                            result["download_failed"] += 1
+                            continue
+
+                        data, content_type = download_result
+
+                        # Check if we already have this image (by SHA256)
+                        import hashlib
+                        sha256_hash = hashlib.sha256(data).hexdigest()
+
+                        if sha256_hash in existing_sha256s:
+                            result["already_exists"] += 1
+                            continue
+
+                        # Also check if any attachment with this SHA256 exists for this message
+                        existing_att = (
+                            self.db.query(Attachment)
+                            .filter(
+                                Attachment.message_id == message.id,
+                                Attachment.sha256 == sha256_hash,
+                            )
+                            .first()
+                        )
+                        if existing_att:
+                            existing_sha256s.add(sha256_hash)
+                            result["already_exists"] += 1
+                            continue
+
+                        # Generate filename from URL
+                        url_path = url.split('?')[0].split('/')[-1]
+                        if '.' not in url_path:
+                            ext = content_type.split('/')[-1]
+                            url_path = f"image.{ext}"
+
+                        upload_result = attachment_service.upload(
+                            file_data=data,
+                            filename=url_path,
+                            content_type=content_type,
+                            message_id=message.id,
+                            username=counterpart_username,
+                        )
+
+                        existing_sha256s.add(sha256_hash)
+                        attachments_created += 1
+                        result["attachments_created"] += 1
+                        logger.debug(
+                            f"Re-downloaded attachment {upload_result.attachment_id} "
+                            f"for message {message.id}"
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Error downloading/storing image from {url}: {e}")
+                        result["errors"].append(f"URL {url}: {str(e)}")
+                        result["download_failed"] += 1
+
+            offset += batch_size
+
+            # Commit periodically
+            self.db.commit()
+
+            logger.info(
+                f"Redownload progress: scanned {result['messages_scanned']} messages, "
+                f"created {result['attachments_created']} attachments"
+            )
 
         return result
 
@@ -676,6 +900,7 @@ class MessageSyncService:
                                         images_saved = await self._download_and_store_images(
                                             message_id=message.id,
                                             image_urls=all_urls,
+                                            username=counterpart_username,
                                         )
                                         logger.info(f"Message {msg_id}: extracted {len(all_urls)} URLs, saved {images_saved} images")
                                     else:

@@ -33,16 +33,18 @@ router = APIRouter(prefix="/sources", tags=["sources"])
 @router.get(
     "/{provider_id}/locations/{location:path}/posts",
     response_model=BrowsePostsResponse,
-    summary="Browse posts from location",
-    description="Browse posts from a provider location (e.g., subreddit). "
-                "Supports pagination with cursors and sorting options.",
+    summary="Browse or search posts from location",
+    description="Browse or search posts from a provider location (e.g., subreddit). "
+                "Supports pagination with cursors, sorting options, and Reddit search syntax.",
 )
 async def browse_posts(
     provider_id: str,
     location: str,
     current_user: CurrentUser,
     db: Session = Depends(get_db),
-    sort: str = Query(default="hot", description="Sort order ('hot', 'new', 'top', 'rising')"),
+    query: Optional[str] = Query(default=None, alias="q", description="Search query (supports Reddit syntax: AND, OR, parentheses)"),
+    sort: str = Query(default="hot", description="Sort order ('hot', 'new', 'top', 'rising', 'controversial', 'relevance')"),
+    time_filter: Optional[str] = Query(default=None, alias="t", description="Time filter for 'top', 'controversial', and search ('hour', 'day', 'week', 'month', 'year', 'all')"),
     limit: int = Query(default=25, ge=1, le=100, description="Maximum posts to return"),
     cursor: Optional[str] = Query(default=None, description="Cursor for pagination"),
     identity_id: Optional[int] = Query(default=None, description="Identity to use for API access"),
@@ -124,12 +126,14 @@ async def browse_posts(
             on_token_refresh=on_token_refresh,
         )
 
-        # Fetch posts from Reddit
+        # Fetch posts from Reddit (browse or search)
         result = await adapter.browse_location(
             location=location,
             cursor=cursor,
             limit=limit,
             sort=sort,
+            time_filter=time_filter,
+            query=query,
         )
 
         # Convert to response schema

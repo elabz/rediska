@@ -51,7 +51,9 @@ function AppShellContent({ children }: AppShellProps) {
             }
           }
         `}</style>
-        {children}
+        <div className="p-4 md:p-6 lg:p-8">
+          {children}
+        </div>
       </main>
     </div>
   );

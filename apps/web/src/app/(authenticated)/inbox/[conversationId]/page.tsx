@@ -1,14 +1,15 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ImageIcon, Download, MoreVertical, Trash2, X, Paperclip } from 'lucide-react';
+import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, Download, MoreVertical, Trash2, X, Paperclip, Search, Images } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   DropdownMenu,
@@ -89,9 +90,11 @@ function formatMessageTime(dateString: string): string {
     return `Yesterday ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
   }
 
+  // Include year for all other dates
   return date.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
+    year: 'numeric',
     hour: 'numeric',
     minute: '2-digit'
   });
@@ -285,6 +288,8 @@ export default function ConversationDetailPage() {
   const [messageToDelete, setMessageToDelete] = useState<number | null>(null);
   const [attachmentIds, setAttachmentIds] = useState<number[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [galleryExpanded, setGalleryExpanded] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -292,6 +297,35 @@ export default function ConversationDetailPage() {
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const fastPollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [isFastPolling, setIsFastPolling] = useState(false);
+
+  // Filter messages based on search query
+  const filteredMessages = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return messages;
+    }
+    const query = searchQuery.toLowerCase();
+    return messages.filter(msg =>
+      msg.body_text?.toLowerCase().includes(query)
+    );
+  }, [messages, searchQuery]);
+
+  // Collect all image attachments from all messages for gallery
+  const allImageAttachments = useMemo(() => {
+    const images: Array<{ attachment: Attachment; messageId: number; sentAt: string }> = [];
+    for (const msg of messages) {
+      for (const att of msg.attachments || []) {
+        if (att.mime_type.startsWith('image/')) {
+          images.push({
+            attachment: att,
+            messageId: msg.id,
+            sentAt: msg.sent_at,
+          });
+        }
+      }
+    }
+    // Sort by date, newest first for gallery
+    return images.sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+  }, [messages]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -771,9 +805,84 @@ export default function ConversationDetailPage() {
       </div>
 
       {/* Messages */}
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 min-w-0">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto min-w-0 flex flex-col">
+        {/* Sticky header with gallery and search */}
+        <div className="sticky top-0 z-10 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80 border-b border-border">
+          {/* Collapsible picture gallery */}
+          {allImageAttachments.length > 0 && (
+            <div className="border-b border-border">
+              <button
+                onClick={() => setGalleryExpanded(!galleryExpanded)}
+                className="w-full px-4 py-2 flex items-center justify-between hover:bg-muted/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Images className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm font-medium">
+                    {allImageAttachments.length} image{allImageAttachments.length !== 1 ? 's' : ''}
+                  </span>
+                </div>
+                {galleryExpanded ? (
+                  <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                )}
+              </button>
+              {galleryExpanded && (
+                <div className="px-4 pb-3 max-h-64 overflow-y-auto">
+                  <div className="flex flex-wrap gap-2">
+                    {allImageAttachments.map(({ attachment: att }) => (
+                      <a
+                        key={att.id}
+                        href={`/api/core/attachments/${att.id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block shrink-0"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={`/api/core/attachments/${att.id}`}
+                          alt="Gallery image"
+                          className="h-20 w-20 object-cover rounded-md hover:opacity-80 transition-opacity"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Search box */}
+          <div className="px-4 py-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                type="text"
+                placeholder="Search in conversation..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 pr-8 h-9"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            {searchQuery && (
+              <p className="text-xs text-muted-foreground mt-1">
+                {filteredMessages.length} of {messages.length} messages match
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="p-4 flex-1">
         {/* Load older messages button - only shown when safety limit (5000) was hit */}
-        {hasMore && (
+        {hasMore && !searchQuery && (
           <div className="flex flex-col items-center gap-2 mb-4">
             <p className="text-xs text-muted-foreground">
               {messages.length.toLocaleString()} messages loaded
@@ -799,9 +908,13 @@ export default function ConversationDetailPage() {
           <div className="flex items-center justify-center h-full">
             <p className="text-muted-foreground">No messages yet</p>
           </div>
+        ) : filteredMessages.length === 0 ? (
+          <div className="flex items-center justify-center h-32">
+            <p className="text-muted-foreground">No messages match your search</p>
+          </div>
         ) : (
           <>
-            {messages.map((msg) => (
+            {filteredMessages.map((msg) => (
               <MessageBubble
                 key={msg.id}
                 message={msg}
@@ -813,6 +926,7 @@ export default function ConversationDetailPage() {
             <div ref={messagesEndRef} />
           </>
         )}
+        </div>
       </div>
 
       {/* Compose Box */}

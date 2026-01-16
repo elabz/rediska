@@ -322,8 +322,39 @@ async def retry_job(
                         detail="Cannot retry job: associated message was deleted by user",
                     )
 
+        # Save payload before requeue (requeue may clear some fields)
+        job_payload = job.payload_json
+        job_type = job.job_type
+        queue_name = job.queue_name
+
         job_service.requeue_job(job_id)
         db.commit()
+
+        # Send Celery task to process the job immediately
+        if job_payload and job_type == "send_manual":
+            try:
+                from celery import Celery
+                settings = get_settings()
+                celery_app = Celery(
+                    "rediska",
+                    broker=settings.celery_broker_url,
+                    backend=settings.celery_result_backend,
+                )
+                celery_app.conf.update(
+                    task_serializer="json",
+                    accept_content=["json"],
+                    result_serializer="json",
+                    timezone="UTC",
+                    enable_utc=True,
+                )
+                celery_app.send_task(
+                    "message.send_manual",
+                    kwargs={"payload": job_payload},
+                    queue="messages",
+                )
+            except Exception as e:
+                import logging
+                logging.error(f"Error enqueueing job retry task: {e}", exc_info=True)
 
         # Audit log
         audit_entry = AuditLog(
@@ -530,3 +561,79 @@ async def get_sync_status(
         )
 
     return SyncStatusResponse(identities=result)
+
+
+class RedownloadAttachmentsRequest(BaseModel):
+    """Request to redownload missing attachments."""
+
+    conversation_id: Optional[int] = None
+    limit: int = 100
+
+
+class RedownloadAttachmentsResponse(BaseModel):
+    """Response from attachment redownload operation."""
+
+    job_id: str
+    status: str
+    message: str
+
+
+@router.post(
+    "/redownload/attachments",
+    response_model=RedownloadAttachmentsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Redownload missing attachments",
+    description="Queue a background job to re-download missing images from message bodies. "
+                "This does NOT call the Reddit API - it extracts URLs from locally stored messages.",
+)
+async def trigger_redownload_attachments(
+    request: RedownloadAttachmentsRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Trigger re-download of missing attachments.
+
+    Scans messages for image URLs and downloads any that are not
+    already stored. Uses SHA256 deduplication to avoid duplicates.
+    """
+    celery_app = get_celery_app()
+
+    # Verify conversation exists if specified
+    if request.conversation_id:
+        conversation = db.query(Conversation).filter_by(id=request.conversation_id).first()
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found",
+            )
+
+    # Send the task to the worker
+    task = celery_app.send_task(
+        "ingest.redownload_attachments",
+        kwargs={
+            "conversation_id": request.conversation_id,
+            "limit": request.limit,
+        },
+        queue="ingest",
+    )
+
+    # Audit log
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="redownload_attachments.trigger",
+        result="ok",
+        entity_type="conversation" if request.conversation_id else None,
+        entity_id=request.conversation_id,
+        request_json={"conversation_id": request.conversation_id, "limit": request.limit},
+        response_json={"job_id": task.id},
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    scope = f"conversation {request.conversation_id}" if request.conversation_id else "all conversations"
+    return RedownloadAttachmentsResponse(
+        job_id=task.id,
+        status="queued",
+        message=f"Attachment redownload job queued for {scope}. Max {request.limit} attachments will be downloaded.",
+    )

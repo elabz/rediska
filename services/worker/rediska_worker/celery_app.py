@@ -21,6 +21,7 @@ app = Celery(
         "rediska_worker.tasks.maintenance",
         "rediska_worker.tasks.message",
         "rediska_worker.tasks.multi_agent_analysis",
+        "rediska_worker.tasks.scout",
     ],
 )
 
@@ -50,6 +51,8 @@ app.conf.update(
         "rediska_worker.tasks.maintenance.*": {"queue": "maintenance"},
         "rediska_worker.tasks.message.*": {"queue": "messages"},
         "rediska_worker.tasks.multi_agent_analysis.*": {"queue": "multi_agent_analysis"},
+        "rediska_worker.tasks.scout.*": {"queue": "scout"},
+        "scout.*": {"queue": "scout"},
     },
     # Worker settings
     worker_prefetch_multiplier=1,
@@ -62,6 +65,12 @@ app.conf.beat_schedule = {
     "sync-delta-periodic": {
         "task": "ingest.sync_delta",
         "schedule": 600.0,  # 10 minutes
+        "args": (),
+    },
+    # Scout watches every 5 minutes
+    "scout-watches-periodic": {
+        "task": "scout.run_all_watches",
+        "schedule": 300.0,  # 5 minutes
         "args": (),
     },
     # Daily database backup at 3 AM UTC

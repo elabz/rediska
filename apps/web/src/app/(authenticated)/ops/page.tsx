@@ -21,6 +21,7 @@ import {
   Timer,
   Trash2,
   ExternalLink,
+  ImageDown,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -44,6 +45,12 @@ interface SyncResult {
 }
 
 interface BackfillResult {
+  status: 'idle' | 'running' | 'success' | 'error';
+  message: string;
+  jobId?: string;
+}
+
+interface RedownloadResult {
   status: 'idle' | 'running' | 'success' | 'error';
   message: string;
   jobId?: string;
@@ -506,6 +513,10 @@ export default function OpsPage() {
     status: 'idle',
     message: '',
   });
+  const [redownloadResult, setRedownloadResult] = useState<RedownloadResult>({
+    status: 'idle',
+    message: '',
+  });
 
   const syncMessages = async () => {
     setSyncResult({
@@ -689,6 +700,95 @@ export default function OpsPage() {
     }
   };
 
+  const triggerRedownload = async () => {
+    setRedownloadResult({
+      status: 'running',
+      message: 'Starting attachment redownload...',
+    });
+
+    try {
+      const response = await fetch('/api/core/ops/redownload/attachments', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 500 }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to start redownload');
+      }
+
+      const data = await response.json();
+      const jobId = data.job_id;
+
+      setRedownloadResult({
+        status: 'running',
+        message: 'Re-downloading missing images from messages...',
+        jobId,
+      });
+
+      // Poll for job completion
+      const pollInterval = 2000;
+      const maxPolls = 120;
+      let polls = 0;
+
+      const checkStatus = async (): Promise<void> => {
+        if (polls >= maxPolls) {
+          setRedownloadResult({
+            status: 'running',
+            message: 'Redownload is taking longer than expected. It will continue in the background.',
+            jobId,
+          });
+          return;
+        }
+
+        try {
+          const statusResponse = await fetch(`/api/core/ops/backfill/${jobId}`, {
+            credentials: 'include',
+          });
+
+          if (!statusResponse.ok) {
+            throw new Error('Failed to check redownload status');
+          }
+
+          const statusData = await statusResponse.json();
+
+          if (statusData.status === 'success') {
+            const result = statusData.result;
+            setRedownloadResult({
+              status: 'success',
+              message: `Downloaded ${result?.downloaded || 0} attachments (${result?.skipped || 0} already existed, ${result?.failed || 0} failed)`,
+              jobId,
+            });
+          } else if (statusData.status === 'failure') {
+            setRedownloadResult({
+              status: 'error',
+              message: statusData.result?.error || 'Redownload failed',
+              jobId,
+            });
+          } else {
+            polls++;
+            setTimeout(checkStatus, pollInterval);
+          }
+        } catch {
+          setRedownloadResult({
+            status: 'error',
+            message: 'Failed to check redownload status',
+            jobId,
+          });
+        }
+      };
+
+      setTimeout(checkStatus, pollInterval);
+    } catch (err) {
+      setRedownloadResult({
+        status: 'error',
+        message: err instanceof Error ? err.message : 'Redownload failed',
+      });
+    }
+  };
+
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <div>
@@ -861,6 +961,82 @@ export default function OpsPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Re-download Attachments Card */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-pink-500/10">
+              <ImageDown className="h-5 w-5 text-pink-500" />
+            </div>
+            <div>
+              <CardTitle className="text-lg">Re-download Attachments</CardTitle>
+              <CardDescription>Recover missing images from messages</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Scan all messages for image URLs and download any that are missing locally.
+            This extracts URLs from already-downloaded messages - no Reddit API calls needed.
+          </p>
+
+          <Button
+            onClick={triggerRedownload}
+            disabled={redownloadResult.status === 'running'}
+            className="w-full"
+            size="lg"
+            variant="secondary"
+          >
+            {redownloadResult.status === 'running' ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                Downloading...
+              </>
+            ) : (
+              <>
+                <ImageDown className="h-4 w-4 mr-2" />
+                Re-download Missing Images
+              </>
+            )}
+          </Button>
+
+          {redownloadResult.status !== 'idle' && (
+            <div className={cn(
+              "rounded-lg p-4",
+              redownloadResult.status === 'running'
+                ? 'bg-blue-500/10 border border-blue-500/20'
+                : redownloadResult.status === 'success'
+                  ? 'bg-emerald-500/10 border border-emerald-500/20'
+                  : 'bg-destructive/10 border border-destructive/20'
+            )}>
+              <div className="flex items-start gap-3">
+                {redownloadResult.status === 'running' && (
+                  <Clock className="h-5 w-5 text-blue-500 shrink-0 mt-0.5" />
+                )}
+                {redownloadResult.status === 'success' && (
+                  <CheckCircle className="h-5 w-5 text-emerald-500 shrink-0 mt-0.5" />
+                )}
+                {redownloadResult.status === 'error' && (
+                  <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1 min-w-0">
+                  <p className={cn(
+                    "text-sm font-medium",
+                    redownloadResult.status === 'running'
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : redownloadResult.status === 'success'
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-destructive'
+                  )}>
+                    {redownloadResult.message}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Sync Status Panel */}
       <SyncStatusPanel />

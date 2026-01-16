@@ -268,3 +268,61 @@ def fetch_profile_items(provider_id: str, external_username: str) -> dict:
     """Fetch profile items (posts, comments, images) for a user."""
     # TODO: Implement
     return {"status": "not_implemented", "provider_id": provider_id, "username": external_username}
+
+
+@app.task(name="ingest.redownload_attachments", bind=True)
+def redownload_attachments(
+    self,
+    conversation_id: Optional[int] = None,
+    limit: int = 100,
+) -> dict:
+    """Re-download missing attachments from message body text.
+
+    This task scans messages for image URLs and attempts to download
+    any images that are not already stored as attachments. It does NOT
+    call the Reddit API - it only extracts URLs from locally stored body_text.
+
+    Args:
+        conversation_id: Specific conversation, or None for all conversations.
+        limit: Maximum number of new attachments to create.
+
+    Returns:
+        Dictionary with redownload results.
+    """
+    from rediska_core.infra.db import get_sync_session_factory
+    from rediska_core.domain.services.message_sync import MessageSyncService
+
+    session_factory = get_sync_session_factory()
+    session = session_factory()
+
+    try:
+        sync_service = MessageSyncService(db=session)
+
+        # Run the async redownload function
+        result = asyncio.run(
+            sync_service.redownload_missing_attachments(
+                conversation_id=conversation_id,
+                limit=limit,
+            )
+        )
+
+        return {
+            "status": "success",
+            "conversation_id": conversation_id,
+            "messages_scanned": result.get("messages_scanned", 0),
+            "urls_found": result.get("urls_found", 0),
+            "attachments_created": result.get("attachments_created", 0),
+            "already_exists": result.get("already_exists", 0),
+            "download_failed": result.get("download_failed", 0),
+            "errors": result.get("errors", []),
+        }
+
+    except Exception as e:
+        session.rollback()
+        return {
+            "status": "error",
+            "conversation_id": conversation_id,
+            "error": str(e),
+        }
+    finally:
+        session.close()

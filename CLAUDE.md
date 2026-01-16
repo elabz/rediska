@@ -206,6 +206,33 @@ Provider-specific code lives in `services/core/rediska_core/providers/{provider_
 - `oauth.py` - OAuth flow
 - `mappers.py` - Map provider responses to domain models
 
+### BFF (Backend-for-Frontend) Architecture
+The UI never calls the Python backend directly. All requests go through Next.js proxy routes:
+```
+UI (page.tsx) → Next.js Proxy (api/core/.../route.ts) → FastAPI Backend (routes/*.py)
+```
+
+When adding new API endpoints:
+1. Create backend route in `services/core/rediska_core/api/routes/`
+2. Create Next.js proxy in `apps/web/src/app/api/core/`
+3. Call `/api/core/...` from UI components
+
+### Multi-Agent Analysis System
+The system uses 6 specialized LLM agents for lead analysis:
+- **Demographics Agent** - Age, gender, location analysis
+- **Preferences Agent** - Hobbies, lifestyle, values
+- **Relationship Goals Agent** - Intent, partner criteria
+- **Risk Flags Agent** - Red flags, safety assessment
+- **Sexual Preferences Agent** - Orientation, interests
+- **Meta-Analysis Coordinator** - Final recommendation synthesis
+
+Files:
+- `domain/services/agents/` - Agent implementations
+- `domain/services/multi_agent_analysis.py` - Orchestration service
+- `domain/services/agent_prompt.py` - Prompt versioning
+- `api/routes/agent_prompts.py` - Prompt management API
+- `api/routes/leads.py` - Analysis trigger endpoints
+
 ---
 
 ## Key Database Tables
@@ -215,11 +242,15 @@ Provider-specific code lives in `services/core/rediska_core/providers/{provider_
 | `providers` | Registered providers (reddit, etc.) |
 | `local_users` | Single admin user authentication |
 | `sessions` | Server-side session storage |
+| `identities` | User identities per provider with voice config |
 | `external_accounts` | Counterpart identities on providers |
 | `conversations` | Chat threads |
 | `messages` | Individual messages |
 | `attachments` | Local file references |
 | `lead_posts` | Saved posts from provider locations |
+| `lead_analyses` | Multi-agent analysis results |
+| `analysis_dimensions` | Individual dimension execution tracking |
+| `agent_prompts` | Versioned LLM agent prompts |
 | `profile_snapshots` | LLM-generated profile summaries |
 | `profile_items` | Public content items (posts/comments/images) |
 | `provider_credentials` | Encrypted OAuth tokens |
@@ -289,6 +320,7 @@ PROVIDER_RATE_BURST_FACTOR=1.5
 - `ingest.fetch_post` - Fetch single post
 - `ingest.fetch_profile` - Fetch user profile
 - `ingest.fetch_profile_items` - Fetch user posts/comments/images
+- `ingest.redownload_attachments` - Re-download missing images from message bodies
 
 ### Indexing
 - `index.upsert_content` - Index content to Elasticsearch
@@ -300,6 +332,9 @@ PROVIDER_RATE_BURST_FACTOR=1.5
 - `agent.profile_summary` - Generate profile summary
 - `agent.lead_scoring` - Score lead posts
 - `agent.draft_intro` - Draft introduction message
+
+### Multi-Agent Analysis (NEW)
+- `multi_agent_analysis.analyze_lead` - Run multi-dimensional lead analysis (6 specialized agents)
 
 ### Messaging
 - `message.send_manual` - Send message (manual trigger only)
@@ -373,7 +408,7 @@ Progress is tracked in `prd/Rediska_Task_Breakdown_v0.1.md`. When completing tas
 4. Update audit log if applicable
 
 ### Current Sprint Status
-See `prd/Rediska_Sprint_Plan_v0.1.md` for sprint objectives and acceptance criteria.
+See `prd/Rediska_Sprint_Plan_v0.2.md` for sprint objectives and acceptance criteria.
 
 ---
 

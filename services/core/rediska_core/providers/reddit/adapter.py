@@ -345,29 +345,50 @@ class RedditAdapter(ProviderAdapter):
         cursor: Optional[str] = None,
         limit: int = 25,
         sort: str = "new",
+        time_filter: Optional[str] = None,
+        query: Optional[str] = None,
     ) -> PaginatedResult[ProviderPost]:
-        """Browse posts in a subreddit.
+        """Browse or search posts in a subreddit.
 
         Args:
             location: Subreddit name (with or without r/ prefix).
             cursor: Pagination cursor.
             limit: Maximum posts to return.
-            sort: Sort order - 'new', 'hot', 'top', 'rising'.
+            sort: Sort order - 'new', 'hot', 'top', 'rising', 'controversial', 'relevance'.
+            time_filter: Time period for 'top' and 'controversial' sorts
+                        ('hour', 'day', 'week', 'month', 'year', 'all').
+            query: Search query string (supports Reddit search syntax with AND, OR, etc.).
         """
         # Normalize location
         if not location.startswith("r/"):
             location = f"r/{location}"
 
-        # Validate sort parameter
-        valid_sorts = {"new", "hot", "top", "rising"}
+        # Validate sort parameter - 'relevance' is valid for search
+        valid_sorts = {"new", "hot", "top", "rising", "controversial", "relevance"}
         if sort not in valid_sorts:
-            sort = "new"
+            sort = "relevance" if query else "new"
 
         params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["after"] = cursor
 
-        response = await self._api_request("GET", f"/{location}/{sort}", params)
+        # Add time filter for 'top', 'controversial', and search
+        if time_filter:
+            valid_time_filters = {"hour", "day", "week", "month", "year", "all"}
+            if time_filter in valid_time_filters:
+                params["t"] = time_filter
+
+        # Determine endpoint: search or browse
+        if query:
+            # Use Reddit search API
+            params["q"] = query
+            params["restrict_sr"] = "on"  # Restrict to subreddit
+            params["sort"] = sort
+            endpoint = f"/{location}/search"
+        else:
+            endpoint = f"/{location}/{sort}"
+
+        response = await self._api_request("GET", endpoint, params)
 
         if response.status_code != 200:
             return PaginatedResult(items=[], next_cursor=None, has_more=False)
@@ -559,8 +580,9 @@ class RedditAdapter(ProviderAdapter):
             if things:
                 msg_id = things[0].get("data", {}).get("id", "")
 
+            # Return empty string if no message ID - sync will update with the real one
             return SendMessageResult(
-                external_message_id=msg_id or f"sent_{int(datetime.now().timestamp())}",
+                external_message_id=msg_id or "",
                 sent_at=datetime.now(timezone.utc),
                 success=True,
             )

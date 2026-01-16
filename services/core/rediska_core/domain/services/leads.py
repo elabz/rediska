@@ -240,6 +240,7 @@ class LeadsService:
         provider_id: Optional[str] = None,
         source_location: Optional[str] = None,
         status: Optional[str] = None,
+        lead_source: Optional[str] = None,
         offset: int = 0,
         limit: int = 20,
     ) -> list[LeadPost]:
@@ -249,6 +250,7 @@ class LeadsService:
             provider_id: Filter by provider (optional).
             source_location: Filter by source location (optional).
             status: Filter by status (optional).
+            lead_source: Filter by lead source ('manual', 'scout_watch') (optional).
             offset: Pagination offset.
             limit: Maximum results.
 
@@ -265,6 +267,9 @@ class LeadsService:
 
         if status:
             query = query.filter(LeadPost.status == status)
+
+        if lead_source:
+            query = query.filter(LeadPost.lead_source == lead_source)
 
         # Order by created_at descending (newest first)
         query = query.order_by(LeadPost.created_at.desc())

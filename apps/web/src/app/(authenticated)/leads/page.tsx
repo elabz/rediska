@@ -21,6 +21,8 @@ import {
   Award,
   FileText,
   MessageCircle,
+  Brain,
+  Eye,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -67,6 +69,10 @@ interface Lead {
   status: string;
   score: number | null;
   created_at: string;
+  latest_analysis_id: number | null;
+  analysis_recommendation: string | null;
+  analysis_confidence: number | null;
+  lead_source: string | null;
 }
 
 interface LeadsResponse {
@@ -81,6 +87,12 @@ const STATUS_OPTIONS = [
   { value: 'ignored', label: 'Ignored' },
   { value: 'contact_queued', label: 'Contact Queued' },
   { value: 'contacted', label: 'Contacted' },
+];
+
+const SOURCE_OPTIONS = [
+  { value: 'all', label: 'All sources' },
+  { value: 'manual', label: 'Manual' },
+  { value: 'scout_watch', label: 'Scout Watch' },
 ];
 
 const STATUS_COLORS: Record<string, string> = {
@@ -162,6 +174,22 @@ function LeadCard({
 
   const authorInfo = lead.author_info;
   const hasAnalysis = authorInfo?.analysis_state === 'analyzed';
+  const hasMultiAgentAnalysis = !!lead.latest_analysis_id;
+
+  const RECOMMENDATION_STYLES: Record<string, { bg: string; icon: React.ReactNode }> = {
+    suitable: {
+      bg: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30',
+      icon: <CheckCircle className="h-3 w-3" />,
+    },
+    not_recommended: {
+      bg: 'bg-red-500/10 text-red-600 border-red-500/30',
+      icon: <XCircle className="h-3 w-3" />,
+    },
+    needs_review: {
+      bg: 'bg-amber-500/10 text-amber-600 border-amber-500/30',
+      icon: <AlertCircle className="h-3 w-3" />,
+    },
+  };
 
   return (
     <Card className="p-4">
@@ -183,6 +211,15 @@ function LeadCard({
               {hasAnalysis && (
                 <Badge variant="outline" className="text-xs h-4 px-1 text-emerald-600 border-emerald-500/30 bg-emerald-500/10">
                   Analyzed
+                </Badge>
+              )}
+              {hasMultiAgentAnalysis && lead.analysis_recommendation && (
+                <Badge
+                  variant="outline"
+                  className={`text-xs h-4 px-1 flex items-center gap-1 ${RECOMMENDATION_STYLES[lead.analysis_recommendation]?.bg || ''}`}
+                >
+                  <Brain className="h-3 w-3" />
+                  {lead.analysis_recommendation.replace('_', ' ')}
                 </Badge>
               )}
             </div>
@@ -233,6 +270,16 @@ function LeadCard({
             <Badge variant="secondary" className="text-xs h-5 px-1.5">
               r/{lead.source_location}
             </Badge>
+            {lead.lead_source === 'scout_watch' ? (
+              <Badge variant="outline" className="text-xs h-5 px-1.5 bg-cyan-500/10 text-cyan-600 border-cyan-500/30">
+                <Eye className="h-3 w-3 mr-1" />
+                Scout
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-xs h-5 px-1.5 bg-violet-500/10 text-violet-600 border-violet-500/30">
+                Manual
+              </Badge>
+            )}
             {lead.post_created_at && (
               <>
                 <span>•</span>
@@ -294,6 +341,14 @@ function LeadCard({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* View Details Button */}
+          <Button variant="ghost" size="sm" asChild>
+            <Link href={`/leads/${lead.id}`}>
+              <Eye className="h-4 w-4 mr-1" />
+              View
+            </Link>
+          </Button>
+
           {/* Contact Button */}
           <Button
             variant="outline"
@@ -373,6 +428,7 @@ export default function LeadsPage() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
   const [updatingLeads, setUpdatingLeads] = useState<Set<number>>(new Set());
   const [analyzingLeads, setAnalyzingLeads] = useState<Set<number>>(new Set());
   const [contactingLeads, setContactingLeads] = useState<Set<number>>(new Set());
@@ -390,6 +446,7 @@ export default function LeadsPage() {
         offset: String(newOffset),
       });
       if (statusFilter && statusFilter !== 'all') params.set('status', statusFilter);
+      if (sourceFilter && sourceFilter !== 'all') params.set('lead_source', sourceFilter);
 
       const response = await fetch(`/api/core/leads?${params.toString()}`, {
         credentials: 'include',
@@ -409,7 +466,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, [statusFilter, sourceFilter]);
 
   useEffect(() => {
     fetchLeads();
@@ -577,6 +634,21 @@ export default function LeadsPage() {
               </SelectTrigger>
               <SelectContent>
                 {STATUS_OPTIONS.map(opt => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Source</label>
+            <Select value={sourceFilter} onValueChange={setSourceFilter}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="All sources" />
+              </SelectTrigger>
+              <SelectContent>
+                {SOURCE_OPTIONS.map(opt => (
                   <SelectItem key={opt.value} value={opt.value}>
                     {opt.label}
                   </SelectItem>

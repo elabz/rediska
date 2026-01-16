@@ -203,6 +203,7 @@ class AttachmentService:
         filename: str,
         content_type: str,
         message_id: Optional[int] = None,
+        username: Optional[str] = None,
     ) -> AttachmentUploadResult:
         """Upload a file and create an attachment record.
 
@@ -211,6 +212,7 @@ class AttachmentService:
             filename: Original filename.
             content_type: MIME type of the file.
             message_id: Optional message ID to link attachment to.
+            username: Optional username to organize files by (e.g., conversation counterpart).
 
         Returns:
             AttachmentUploadResult with attachment details.
@@ -245,8 +247,8 @@ class AttachmentService:
         # Compute SHA256 hash
         sha256_hash = hashlib.sha256(file_data).hexdigest()
 
-        # Generate storage key with date-based directory structure
-        storage_key = self._generate_storage_key(filename, content_type)
+        # Generate storage key (by username if provided, otherwise date-based)
+        storage_key = self._generate_storage_key(filename, content_type, username)
 
         # Write file to disk
         file_path = self.storage_path / storage_key
@@ -322,28 +324,46 @@ class AttachmentService:
 
         return str(file_path)
 
-    def _generate_storage_key(self, filename: str, content_type: str) -> str:
-        """Generate a unique storage key with date-based directory structure.
+    def _generate_storage_key(
+        self,
+        filename: str,
+        content_type: str,
+        username: Optional[str] = None,
+    ) -> str:
+        """Generate a unique storage key with directory structure.
 
-        Format: YYYY/MM/DD/uuid.ext
+        Format:
+        - With username: users/{username}/{uuid}.ext
+        - Without username: YYYY/MM/DD/{uuid}.ext (fallback for non-conversation files)
 
         Args:
             filename: Original filename.
             content_type: MIME type.
+            username: Optional username to organize by.
 
         Returns:
             Storage key path.
         """
-        now = datetime.now()
-
         # Get extension from MIME type or filename
         extension = self._get_safe_extension(filename, content_type)
 
         # Generate unique ID
         unique_id = uuid.uuid4().hex[:16]
 
-        # Build path: YYYY/MM/DD/uuid.ext
-        storage_key = f"{now.year:04d}/{now.month:02d}/{now.day:02d}/{unique_id}{extension}"
+        if username:
+            # Sanitize username for filesystem (remove dangerous chars)
+            safe_username = "".join(
+                c for c in username if c.isalnum() or c in "-_"
+            ).lower()
+            if not safe_username:
+                safe_username = "unknown"
+
+            # Build path: users/{username}/{uuid}.ext
+            storage_key = f"users/{safe_username}/{unique_id}{extension}"
+        else:
+            # Fallback: date-based path YYYY/MM/DD/uuid.ext
+            now = datetime.now()
+            storage_key = f"{now.year:04d}/{now.month:02d}/{now.day:02d}/{unique_id}{extension}"
 
         return storage_key
 

@@ -22,6 +22,7 @@ logging.getLogger("uvicorn").setLevel(logging.INFO)
 
 from rediska_core.api.middleware.onboarding import OnboardingGateMiddleware
 from rediska_core.api.routes import accounts as accounts_routes
+from rediska_core.api.routes import agent_prompts as agent_prompts_routes
 from rediska_core.api.routes import attachment as attachment_routes
 from rediska_core.api.routes import audit as audit_routes
 from rediska_core.api.routes import auth as auth_routes
@@ -32,6 +33,7 @@ from rediska_core.api.routes import leads as leads_routes
 from rediska_core.api.routes import metrics as metrics_routes
 from rediska_core.api.routes import ops as ops_routes
 from rediska_core.api.routes import reddit_oauth as reddit_oauth_routes
+from rediska_core.api.routes import scout_watches as scout_watches_routes
 from rediska_core.api.routes import search as search_routes
 from rediska_core.api.routes import setup as setup_routes
 from rediska_core.api.routes import sources as sources_routes
@@ -69,6 +71,7 @@ app.add_middleware(OnboardingGateMiddleware)
 
 # Include API routers
 app.include_router(accounts_routes.router)
+app.include_router(agent_prompts_routes.router)
 app.include_router(attachment_routes.router)
 app.include_router(audit_routes.router)
 app.include_router(auth_routes.router)
@@ -79,6 +82,7 @@ app.include_router(leads_routes.router)
 app.include_router(metrics_routes.router)
 app.include_router(ops_routes.router)
 app.include_router(reddit_oauth_routes.router)
+app.include_router(scout_watches_routes.router)
 app.include_router(search_routes.router)
 app.include_router(setup_routes.router)
 app.include_router(sources_routes.router)

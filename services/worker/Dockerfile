@@ -23,4 +23,4 @@ WORKDIR /app/worker
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-CMD ["celery", "-A", "rediska_worker.celery_app", "worker", "-l", "INFO", "-Q", "celery,ingest,index,embed,agent,maintenance,messages,multi_agent_analysis"]
+CMD ["celery", "-A", "rediska_worker.celery_app", "worker", "-l", "INFO", "-Q", "celery,ingest,index,embed,agent,maintenance,messages,multi_agent_analysis,scout"]

@@ -1,8 +1,9 @@
 # Multi-Agent Lead Analysis Implementation - Task Breakdown
 
-**Status**: Phases 1-4 Complete, Phases 5-7 Ready for Implementation
+**Status**: Phases 1-4 Complete, Phase 5 Epic 5.1-5.3 Complete
 
 **Created**: January 12, 2026
+**Last Updated**: January 16, 2026
 
 ---
 
@@ -135,76 +136,224 @@ GET    /leads/{id}/analysis/history - Get all analyses for lead
 
 ### 📋 Phase 5: UI Components
 
-**Lead Analysis Display** (`/leads/[id]/page.tsx`)
-```
-- LeadAnalysisPanel: Main analysis display
-  - Overall recommendation badge (suitable/not_recommended/needs_review)
-  - Confidence score meter (0.0-1.0)
-  - Re-analyze button
-  - Analysis status indicator
+#### Epic 5.1 - Next.js API Proxy Routes (REQUIRED FIRST) ✅ COMPLETE
 
-- DimensionCard (x5): Per-dimension insights
-  - Demographics: Age, gender, location, confidence scores
-  - Preferences: Hobbies, lifestyle, values, personality traits
-  - Relationship Goals: Intent, partner criteria, compatibility factors
-  - Risk Flags: Red flags, severity levels, safety assessment
-  - Sexual Preferences: Orientation, age preferences, interests
-
-- RecommendationCard: Final recommendation
-  - Recommendation text
-  - Reasoning explanation
-  - Strengths list
-  - Concerns list
-  - Priority level
-  - Suggested approach for contacting
-
-- AnalysisHistory: Previous analyses
-  - List with timestamps
-  - Re-analysis button per entry
-  - Comparison view (optional)
-```
-
-**Admin Prompt Management** (`/settings/agents/page.tsx`)
-```
-- AgentPromptList: All agents
-  - Grid of agent cards
-  - Active version indicator
-  - Last updated timestamp
-  - Edit button per agent
-
-- PromptEditor: Monaco editor for system prompt
-  - Syntax highlighting
-  - Full prompt editing
-  - Save creates new version
-  - Test with sample data button
-
-- VersionHistory: Prompt versions
-  - List with versions
-  - Diffs between versions
-  - Rollback button
-  - View notes for each version
-  - Date created, created_by
-```
-
-**Files to Create:**
-- `apps/web/src/app/(authenticated)/leads/[id]/components/LeadAnalysisPanel.tsx`
-- `apps/web/src/app/(authenticated)/leads/[id]/components/DimensionCard.tsx`
-- `apps/web/src/app/(authenticated)/leads/[id]/components/RecommendationCard.tsx`
-- `apps/web/src/app/(authenticated)/leads/[id]/components/AnalysisHistory.tsx`
-- `apps/web/src/app/(authenticated)/settings/agents/page.tsx`
-- `apps/web/src/app/(authenticated)/settings/agents/components/AgentPromptList.tsx`
-- `apps/web/src/app/(authenticated)/settings/agents/components/PromptEditor.tsx`
-- `apps/web/src/app/(authenticated)/settings/agents/components/VersionHistory.tsx`
+Before any UI can work, we need proxy routes to forward requests to the backend.
 
 **Tasks:**
-- [ ] Create lead analysis display components
-- [ ] Implement dimension card rendering for each agent output
-- [ ] Create recommendation display with visual hierarchy
-- [ ] Build admin prompt management interface
-- [ ] Implement Monaco editor for prompt editing
-- [ ] Create version history viewer with diff display
-- [ ] Add analysis history timeline
-- [ ] Integrate with lead list page (show analysis status badge)
+- [x] **5.1.1** Create agent-prompts proxy routes
+  - [x] `apps/web/src/app/api/core/agent-prompts/route.ts` - GET list all agents
+  - [x] `apps/web/src/app/api/core/agent-prompts/[dimension]/route.ts` - GET/PUT single prompt
+  - [x] `apps/web/src/app/api/core/agent-prompts/[dimension]/versions/route.ts` - GET version history
+  - [x] `apps/web/src/app/api/core/agent-prompts/[dimension]/rollback/route.ts` - POST rollback
+  - AC: All `/api/core/agent-prompts/*` calls reach FastAPI backend ✅
+
+- [x] **5.1.2** Create lead analysis proxy routes
+  - [x] `apps/web/src/app/api/core/leads/[leadId]/analyze-multi/route.ts` - POST trigger analysis
+  - [x] `apps/web/src/app/api/core/leads/[leadId]/analysis/route.ts` - GET latest analysis
+  - [x] `apps/web/src/app/api/core/leads/[leadId]/analysis/history/route.ts` - GET all analyses
+  - AC: All `/api/core/leads/{id}/analysis*` calls reach FastAPI backend ✅
+
+---
+
+#### Epic 5.2 - Lead Detail Page with Analysis Display ✅ COMPLETE
+
+**Files Created:**
+```
+apps/web/src/app/(authenticated)/leads/[id]/
+├── page.tsx                    # Main lead detail page
+└── components/
+    ├── LeadAnalysisPanel.tsx   # Main analysis container
+    ├── DimensionCard.tsx       # Individual dimension display
+    ├── RecommendationCard.tsx  # Final recommendation display
+    └── AnalysisHistory.tsx     # Previous analyses list
+```
+
+**Tasks:**
+- [x] **5.2.1** Create lead detail page structure
+  - [x] Create `apps/web/src/app/(authenticated)/leads/[id]/page.tsx`
+  - [x] Fetch lead data from `/api/core/leads/{id}`
+  - [x] Display lead info (title, body, author, post date, status)
+  - [x] Add "Run Multi-Agent Analysis" button
+  - [x] Add link back to leads list
+  - AC: Can navigate to `/leads/123` and see lead details ✅
+
+- [x] **5.2.2** Create LeadAnalysisPanel component
+  - [x] Fetch analysis from `/api/core/leads/{id}/analysis`
+  - [x] Display overall recommendation badge (suitable/not_recommended/needs_review)
+  - [x] Display confidence score as visual meter (0.0-1.0)
+  - [x] Show analysis status indicator (pending/running/complete/failed)
+  - [x] Add "Re-analyze" button that POSTs to `/api/core/leads/{id}/analyze-multi`
+  - [x] Handle loading and error states
+  - AC: Analysis results display correctly with visual hierarchy ✅
+
+- [x] **5.2.3** Create DimensionCard component
+  - [x] Accept dimension type prop (demographics/preferences/relationship_goals/risk_flags/sexual_preferences)
+  - [x] Display dimension-specific fields based on type:
+    - Demographics: age_estimate, gender, location, confidence scores
+    - Preferences: hobbies, lifestyle, values, personality traits
+    - Relationship Goals: intent, partner criteria, compatibility factors
+    - Risk Flags: flags list with severity levels, safety assessment score
+    - Sexual Preferences: orientation, age preferences, interests
+  - [x] Show execution time and model info
+  - [x] Handle null/missing dimensions gracefully
+  - [x] Collapsible detail view for verbose output
+  - AC: Each dimension renders with appropriate formatting ✅
+
+- [x] **5.2.4** Create RecommendationCard component
+  - [x] Display final recommendation (suitable/not_recommended/needs_review)
+  - [x] Show reasoning text
+  - [x] Display strengths as green-highlighted list
+  - [x] Display concerns as amber/red-highlighted list
+  - [x] Show priority level badge
+  - [x] Display suggested approach for contacting
+  - AC: Recommendation is prominently displayed with clear visual cues ✅
+
+- [x] **5.2.5** Create AnalysisHistory component
+  - [x] Fetch from `/api/core/leads/{id}/analysis/history`
+  - [x] Display list with timestamps and recommendation summaries
+  - [x] Allow expanding to see full analysis details
+  - [x] Show which prompt versions were used
+  - AC: Can view previous analyses for comparison ✅
+
+- [x] **5.2.6** Update leads list page to show analysis status
+  - [x] Add analysis badge to LeadCard component in `/leads/page.tsx`
+  - [x] Show recommendation icon (check/x/question mark)
+  - [x] Add "View" quick action to navigate to lead detail
+  - AC: Lead list shows which leads have been analyzed ✅
+
+---
+
+#### Epic 5.3 - Admin Prompt Management Interface ✅ COMPLETE
+
+**Files Created:**
+```
+apps/web/src/app/(authenticated)/settings/agents/
+├── page.tsx                    # Main agents settings page
+└── components/
+    ├── AgentPromptList.tsx     # Grid of all agents
+    ├── PromptEditor.tsx        # Prompt editing interface
+    └── VersionHistory.tsx      # Version history viewer
+
+apps/web/src/components/ui/
+├── tabs.tsx                    # Tabs component (new)
+├── collapsible.tsx             # Collapsible component (new)
+└── alert-dialog.tsx            # Alert dialog component (new)
+```
+
+**Tasks:**
+- [x] **5.3.1** Create agents settings page
+  - [x] Create `apps/web/src/app/(authenticated)/settings/agents/page.tsx`
+  - [x] Fetch agents from `/api/core/agent-prompts`
+  - [x] Display grid of agent cards
+  - [x] Add navigation link in settings menu
+  - AC: Can navigate to `/settings/agents` and see all agents ✅
+
+- [x] **5.3.2** Create AgentPromptList component
+  - [x] Display card for each agent dimension
+  - [x] Show agent name, description, active version number
+  - [x] Show last updated timestamp
+  - [x] Show prompt character count
+  - [x] Add "Edit" button per agent
+  - [x] Color-code by agent type (dimension vs meta)
+  - AC: All 6 agents displayed with key information ✅
+
+- [x] **5.3.3** Create PromptEditor component
+  - [x] Inline panel for editing (with tabs for Editor/History)
+  - [x] Large textarea for system prompt
+  - [x] Show current prompt content
+  - [x] Temperature and max_tokens configuration
+  - [x] "Update Notes" text field for version notes
+  - [x] Save button creates new version via PUT `/api/core/agent-prompts/{dimension}`
+  - [x] Back button returns to list
+  - [x] Warn about unsaved changes
+  - AC: Can edit and save prompt with version notes ✅
+
+- [x] **5.3.4** Create VersionHistory component
+  - [x] Fetch from `/api/core/agent-prompts/{dimension}/versions`
+  - [x] Display list of versions with:
+    - Version number
+    - Created timestamp
+    - Update notes
+    - Character count
+  - [x] Add "Rollback to this version" button
+  - [x] Rollback calls POST `/api/core/agent-prompts/{dimension}/rollback`
+  - [x] Show confirmation dialog before rollback
+  - [x] Collapsible version details with prompt preview
+  - AC: Can view history and rollback to previous versions ✅
+
+- [ ] **5.3.5** (Optional) Add prompt diff view
+  - [ ] Compare two versions side-by-side
+  - [ ] Highlight additions/deletions
+  - AC: Can see what changed between versions
+
+---
+
+#### Epic 5.4 - Integration and Polish
+
+**Tasks:**
+- [x] **5.4.1** Add settings navigation link
+  - [x] Update Sidebar.tsx to include "Agent Prompts" link
+  - [x] Add Brain icon
+  - [x] Added to expanded sidebar, user dropdown, and collapsed sidebar
+  - AC: Agents settings accessible from settings menu ✅
+
+- [ ] **5.4.2** Add loading states and skeletons
+  - [ ] Skeleton loaders for analysis panel
+  - [ ] Skeleton loaders for prompt list
+  - [ ] Loading spinners for actions
+  - AC: Smooth loading experience
+
+- [ ] **5.4.3** Add error handling
+  - [ ] Error boundaries for components
+  - [ ] Toast notifications for save success/failure
+  - [ ] Retry buttons for failed requests
+  - AC: Graceful error handling throughout
+
+- [ ] **5.4.4** Add empty states
+  - [ ] "No analysis yet" state for leads
+  - [ ] "Run analysis to see insights" CTA
+  - AC: Clear guidance when no data exists
+
+---
+
+**Component Architecture:**
+
+```
+Lead Detail Page (/leads/[id])
+├── LeadHeader (title, author, status)
+├── LeadAnalysisPanel
+│   ├── AnalysisStatus (badge + confidence)
+│   ├── RecommendationCard
+│   ├── DimensionCard (demographics)
+│   ├── DimensionCard (preferences)
+│   ├── DimensionCard (relationship_goals)
+│   ├── DimensionCard (risk_flags)
+│   ├── DimensionCard (sexual_preferences)
+│   └── AnalysisHistory (collapsible)
+└── LeadActions (analyze, contact, status)
+
+Settings Agents Page (/settings/agents)
+├── PageHeader
+├── AgentPromptList
+│   └── AgentCard (x6)
+│       └── onClick → PromptEditor modal
+│           └── VersionHistory tab
+└── SaveIndicator
+```
+
+**API Endpoints Used:**
+```
+GET  /api/core/agent-prompts              → List all agents
+GET  /api/core/agent-prompts/{dim}        → Get active prompt
+PUT  /api/core/agent-prompts/{dim}        → Update prompt (new version)
+GET  /api/core/agent-prompts/{dim}/versions → Version history
+POST /api/core/agent-prompts/{dim}/rollback → Rollback to previous
+
+POST /api/core/leads/{id}/analyze-multi   → Trigger multi-agent analysis
+GET  /api/core/leads/{id}/analysis        → Get latest analysis
+GET  /api/core/leads/{id}/analysis/history → Get all analyses
+```
 
 ### 📋 Phase 6: Background Task Processing
 
@@ -362,11 +511,13 @@ AgentPrompt
 - [x] MultiAgentAnalysisService orchestrates pipeline
 
 ### Phase 5: UI
-- [ ] Admin can edit agent prompts via UI
-- [ ] Lead detail page displays analysis results
-- [ ] Dimension insights are clearly presented
-- [ ] Recommendation is highlighted
-- [ ] Version history accessible
+- [x] **5.1** Next.js API proxy routes created for agent-prompts and analysis endpoints ✅
+- [x] **5.2** Lead detail page (`/leads/[id]`) displays analysis results ✅
+- [x] **5.3** Admin prompt management page (`/settings/agents`) allows editing prompts ✅
+- [x] **5.4** Dimension insights clearly presented with DimensionCard components ✅
+- [x] **5.5** Recommendation highlighted with RecommendationCard ✅
+- [x] **5.6** Version history accessible with rollback capability ✅
+- [x] **5.7** Leads list shows analysis status badges ✅
 
 ### Phase 6: Background Tasks
 - [ ] Analysis can run asynchronously
@@ -427,9 +578,28 @@ AgentPrompt
 - `api/routes/agent_prompts.py` - Prompt endpoints
 - `api/routes/leads.py` - Analysis endpoints (updated)
 
-### Files to Create (Phase 5-7)
-- `apps/web/src/app/(authenticated)/leads/[id]/page.tsx` - Lead detail
+### Files Created (Phase 5)
+- `apps/web/src/app/api/core/agent-prompts/route.ts` - Agent prompts list proxy
+- `apps/web/src/app/api/core/agent-prompts/[dimension]/route.ts` - Single prompt proxy
+- `apps/web/src/app/api/core/agent-prompts/[dimension]/versions/route.ts` - Versions proxy
+- `apps/web/src/app/api/core/agent-prompts/[dimension]/rollback/route.ts` - Rollback proxy
+- `apps/web/src/app/api/core/leads/[leadId]/analyze-multi/route.ts` - Analysis trigger proxy
+- `apps/web/src/app/api/core/leads/[leadId]/analysis/route.ts` - Analysis result proxy
+- `apps/web/src/app/api/core/leads/[leadId]/analysis/history/route.ts` - Analysis history proxy
+- `apps/web/src/app/(authenticated)/leads/[id]/page.tsx` - Lead detail page
+- `apps/web/src/app/(authenticated)/leads/[id]/components/LeadAnalysisPanel.tsx` - Analysis panel
+- `apps/web/src/app/(authenticated)/leads/[id]/components/DimensionCard.tsx` - Dimension display
+- `apps/web/src/app/(authenticated)/leads/[id]/components/RecommendationCard.tsx` - Recommendation
+- `apps/web/src/app/(authenticated)/leads/[id]/components/AnalysisHistory.tsx` - History list
 - `apps/web/src/app/(authenticated)/settings/agents/page.tsx` - Admin prompt editor
+- `apps/web/src/app/(authenticated)/settings/agents/components/AgentPromptList.tsx` - Agent cards
+- `apps/web/src/app/(authenticated)/settings/agents/components/PromptEditor.tsx` - Prompt editor
+- `apps/web/src/app/(authenticated)/settings/agents/components/VersionHistory.tsx` - Version history
+- `apps/web/src/components/ui/tabs.tsx` - Tabs UI component
+- `apps/web/src/components/ui/collapsible.tsx` - Collapsible UI component
+- `apps/web/src/components/ui/alert-dialog.tsx` - Alert dialog UI component
+
+### Files to Create (Phase 6-7)
 - `services/worker/rediska_worker/tasks/multi_agent_analysis.py` - Celery task
 - `tests/` - Comprehensive test suite
 
@@ -539,23 +709,43 @@ services/worker/
         └── multi_agent_analysis.py (TODO)
 
 apps/web/
-└── src/app/(authenticated)/
-    ├── leads/
-    │   ├── [id]/
-    │   │   ├── page.tsx (TODO)
-    │   │   └── components/
-    │   │       ├── LeadAnalysisPanel.tsx (TODO)
-    │   │       ├── DimensionCard.tsx (TODO)
-    │   │       ├── RecommendationCard.tsx (TODO)
-    │   │       └── AnalysisHistory.tsx (TODO)
-    │   └── page.tsx (update)
-    └── settings/
-        └── agents/
-            ├── page.tsx (TODO)
-            └── components/
-                ├── AgentPromptList.tsx (TODO)
-                ├── PromptEditor.tsx (TODO)
-                └── VersionHistory.tsx (TODO)
+└── src/
+    ├── app/
+    │   ├── api/core/
+    │   │   ├── agent-prompts/
+    │   │   │   ├── route.ts ✅
+    │   │   │   └── [dimension]/
+    │   │   │       ├── route.ts ✅
+    │   │   │       ├── versions/route.ts ✅
+    │   │   │       └── rollback/route.ts ✅
+    │   │   └── leads/[leadId]/
+    │   │       ├── analyze-multi/route.ts ✅
+    │   │       └── analysis/
+    │   │           ├── route.ts ✅
+    │   │           └── history/route.ts ✅
+    │   └── (authenticated)/
+    │       ├── leads/
+    │       │   ├── [id]/
+    │       │   │   ├── page.tsx ✅
+    │       │   │   └── components/
+    │       │   │       ├── LeadAnalysisPanel.tsx ✅
+    │       │   │       ├── DimensionCard.tsx ✅
+    │       │   │       ├── RecommendationCard.tsx ✅
+    │       │   │       └── AnalysisHistory.tsx ✅
+    │       │   └── page.tsx (updated) ✅
+    │       └── settings/
+    │           └── agents/
+    │               ├── page.tsx ✅
+    │               └── components/
+    │                   ├── AgentPromptList.tsx ✅
+    │                   ├── PromptEditor.tsx ✅
+    │                   └── VersionHistory.tsx ✅
+    └── components/
+        ├── Sidebar.tsx (updated) ✅
+        └── ui/
+            ├── tabs.tsx ✅
+            ├── collapsible.tsx ✅
+            └── alert-dialog.tsx ✅
 ```
 
 ---
@@ -578,5 +768,5 @@ Before going to production:
 
 ---
 
-**Last Updated**: January 12, 2026
-**Phase Completion**: 1-4 DONE, 5-7 READY
+**Last Updated**: January 16, 2026
+**Phase Completion**: 1-5 DONE, 6-7 READY

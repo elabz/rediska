@@ -501,14 +501,19 @@ async def send_message(
             attachment_ids=request.attachment_ids,
         )
 
-        # Send the actual Celery task
+        # Get the job to retrieve the payload
         from rediska_core.domain.models import Job
         from rediska_core.config import get_settings
 
-        # Get the job to retrieve the payload
         job = db.query(Job).filter(Job.id == result.job_id).first()
+        job_payload = job.payload_json if job else None
 
-        if job and job.payload_json:
+        # IMPORTANT: Commit the message and job BEFORE sending to Celery
+        # This ensures the worker can find the message when it processes the task
+        db.commit()
+
+        # Now send the actual Celery task (after commit)
+        if job_payload:
             try:
                 settings = get_settings()
                 # Create a properly configured Celery app instance matching worker config
@@ -537,7 +542,7 @@ async def send_message(
                 )
                 celery_app.send_task(
                     "message.send_manual",
-                    kwargs={"payload": job.payload_json},
+                    kwargs={"payload": job_payload},
                     queue="messages",
                 )
             except Exception as e:
@@ -657,20 +662,53 @@ async def retry_message(
             detail="Message cannot be retried (not found or already sent)",
         )
 
-    # Send the actual Celery task
+    # Get job payload before committing
     from rediska_core.config import get_settings
     from rediska_core.domain.models import Job
-    settings = get_settings()
-    celery_app = Celery(broker=settings.celery_broker_url, backend=settings.celery_result_backend)
 
     job = db.query(Job).filter(Job.id == result.job_id).first()
+    job_payload = job.payload_json if job else None
 
-    if job and job.payload_json:
-        celery_app.send_task(
-            "message.send_manual",
-            kwargs={"payload": job.payload_json},
-            queue="messages",
-        )
+    # IMPORTANT: Commit the job BEFORE sending to Celery
+    # This ensures the worker can find the message when it processes the task
+    db.commit()
+
+    # Now send the actual Celery task (after commit)
+    if job_payload:
+        try:
+            settings = get_settings()
+            # Create a properly configured Celery app instance matching worker config
+            celery_app = Celery(
+                "rediska",
+                broker=settings.celery_broker_url,
+                backend=settings.celery_result_backend,
+            )
+            # Configure with exact same serialization as worker
+            celery_app.conf.update(
+                task_serializer="json",
+                accept_content=["json"],
+                result_serializer="json",
+                timezone="UTC",
+                enable_utc=True,
+                task_acks_late=True,
+                task_reject_on_worker_lost=True,
+                task_soft_time_limit=300,
+                task_time_limit=600,
+                task_default_retry_delay=60,
+                task_max_retries=10,
+                task_routes={
+                    "message.send_manual": {"queue": "messages"},
+                },
+            )
+            celery_app.send_task(
+                "message.send_manual",
+                kwargs={"payload": job_payload},
+                queue="messages",
+            )
+        except Exception as e:
+            # Log the error but don't fail the request
+            import logging
+            logging.error(f"Error enqueueing message retry task: {e}", exc_info=True)
 
     # Audit log for message retry
     audit_entry = AuditLog(

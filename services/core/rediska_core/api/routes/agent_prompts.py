@@ -3,6 +3,7 @@
 Endpoints for viewing and editing LLM agent prompts with version control.
 """
 
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,8 +18,8 @@ from rediska_core.api.schemas.agent_prompts import (
 )
 from rediska_core.domain.schemas.multi_agent_analysis import AgentPrompt
 from rediska_core.domain.services.agent_prompt import AgentPromptService
-from rediska_core.infra.db import get_db
-from rediska_core.infra.audit import audit_log
+from rediska_core.api.deps import CurrentUser, get_db
+from rediska_core.domain.models import AuditLog
 
 router = APIRouter(prefix="/agent-prompts", tags=["agent-prompts"])
 
@@ -203,8 +204,9 @@ async def update_agent_prompt(
         )
 
         # Audit log
-        audit_log(
-            db=db,
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
             action_type="agent_prompt.update",
             entity_type="agent_prompt",
             entity_id=new_prompt.id,
@@ -216,7 +218,7 @@ async def update_agent_prompt(
             },
             result="ok",
         )
-
+        db.add(audit_entry)
         db.commit()
 
         return AgentPromptResponse(
@@ -276,8 +278,9 @@ async def rollback_agent_prompt(
         )
 
         # Audit log
-        audit_log(
-            db=db,
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
             action_type="agent_prompt.rollback",
             entity_type="agent_prompt",
             entity_id=rollback_prompt.id,
@@ -289,7 +292,7 @@ async def rollback_agent_prompt(
             },
             result="ok",
         )
-
+        db.add(audit_entry)
         db.commit()
 
         return AgentPromptResponse(

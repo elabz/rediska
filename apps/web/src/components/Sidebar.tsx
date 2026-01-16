@@ -16,6 +16,8 @@ import {
   Menu,
   Link2,
   Sparkles,
+  Brain,
+  Eye,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -150,6 +152,30 @@ function SidebarContent({ onLogout, username }: SidebarProps) {
           <Sparkles className="h-4 w-4" />
           Personas
         </Link>
+        <Link
+          href="/settings/agents"
+          className={cn(
+            'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-all duration-200',
+            pathname === '/settings/agents'
+              ? 'bg-primary text-primary-foreground shadow-sm'
+              : 'text-foreground hover:bg-accent hover:text-accent-foreground'
+          )}
+        >
+          <Brain className="h-4 w-4" />
+          Agent Prompts
+        </Link>
+        <Link
+          href="/settings/scout-watches"
+          className={cn(
+            'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-all duration-200',
+            pathname === '/settings/scout-watches'
+              ? 'bg-primary text-primary-foreground shadow-sm'
+              : 'text-foreground hover:bg-accent hover:text-accent-foreground'
+          )}
+        >
+          <Eye className="h-4 w-4" />
+          Scout Watches
+        </Link>
       </div>
 
       <Separator />
@@ -186,6 +212,18 @@ function SidebarContent({ onLogout, username }: SidebarProps) {
               <Link href="/settings/personas" className="cursor-pointer">
                 <Sparkles className="mr-2 h-4 w-4" />
                 Voice Personas
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/settings/agents" className="cursor-pointer">
+                <Brain className="mr-2 h-4 w-4" />
+                Agent Prompts
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/settings/scout-watches" className="cursor-pointer">
+                <Eye className="mr-2 h-4 w-4" />
+                Scout Watches
               </Link>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
@@ -316,6 +354,18 @@ function CollapsedSidebar({ onLogout }: { onLogout?: () => void }) {
             <Link href="/settings/personas" className="cursor-pointer">
               <Sparkles className="mr-2 h-4 w-4" />
               Personas
+            </Link>
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild>
+            <Link href="/settings/agents" className="cursor-pointer">
+              <Brain className="mr-2 h-4 w-4" />
+              Agent Prompts
+            </Link>
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild>
+            <Link href="/settings/scout-watches" className="cursor-pointer">
+              <Eye className="mr-2 h-4 w-4" />
+              Scout Watches
             </Link>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
