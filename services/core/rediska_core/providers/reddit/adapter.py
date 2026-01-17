@@ -388,10 +388,25 @@ class RedditAdapter(ProviderAdapter):
         else:
             endpoint = f"/{location}/{sort}"
 
+        # Build full URL for debugging (API URL)
+        query_string = "&".join(f"{k}={v}" for k, v in params.items())
+        request_url = f"{self.BASE_URL}{endpoint}?{query_string}"
+
+        # Build browser-friendly URL for user viewing (www.reddit.com)
+        browser_url = f"https://www.reddit.com{endpoint}?{query_string}"
+        logger.info(f"Reddit API request: {request_url}")
+        logger.info(f"Reddit browser URL: {browser_url}")
+
         response = await self._api_request("GET", endpoint, params)
 
         if response.status_code != 200:
-            return PaginatedResult(items=[], next_cursor=None, has_more=False)
+            logger.error(f"Reddit API error: status={response.status_code}")
+            return PaginatedResult(
+                items=[],
+                next_cursor=None,
+                has_more=False,
+                metadata={"request_url": request_url, "browser_url": browser_url, "status_code": response.status_code},
+            )
 
         data = response.json()
         children = data.get("data", {}).get("children", [])
@@ -405,10 +420,13 @@ class RedditAdapter(ProviderAdapter):
             post_data = child.get("data", {})
             posts.append(self._map_post(post_data))
 
+        logger.info(f"Reddit API returned {len(posts)} posts")
+
         return PaginatedResult(
             items=posts,
             next_cursor=after,
             has_more=after is not None,
+            metadata={"request_url": request_url, "browser_url": browser_url, "posts_returned": len(posts)},
         )
 
     async def fetch_post(self, post_id: str) -> Optional[ProviderPost]:

@@ -23,7 +23,9 @@ from rediska_core.config import get_settings
 from rediska_core.api.schemas.scout_watch import (
     ScoutWatchCreate,
     ScoutWatchListResponse,
+    ScoutWatchPostResponse,
     ScoutWatchResponse,
+    ScoutWatchRunDetailResponse,
     ScoutWatchRunListResponse,
     ScoutWatchRunResponse,
     ScoutWatchRunTriggerResponse,
@@ -389,6 +391,61 @@ async def get_run_history(
         runs = service.get_run_history(watch_id, limit=limit)
         return ScoutWatchRunListResponse(
             runs=[ScoutWatchRunResponse.model_validate(r) for r in runs]
+        )
+
+    except ScoutWatchNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Watch not found: {watch_id}",
+        )
+
+
+# =============================================================================
+# GET RUN DETAILS WITH POSTS
+# =============================================================================
+
+
+@router.get("/{watch_id}/runs/{run_id}", response_model=ScoutWatchRunDetailResponse)
+async def get_run_detail(
+    watch_id: int,
+    run_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> ScoutWatchRunDetailResponse:
+    """Get detailed run information including all posts.
+
+    Args:
+        watch_id: Watch ID.
+        run_id: Run ID.
+        current_user: Authenticated user.
+        db: Database session.
+
+    Returns:
+        Run details with all posts and their analysis results.
+
+    Raises:
+        HTTPException: If watch or run not found.
+    """
+    service = ScoutWatchService(db)
+
+    try:
+        # Verify watch exists
+        service.get_watch_or_raise(watch_id)
+
+        # Get run
+        run = service.get_run(run_id)
+        if not run or run.watch_id != watch_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Run not found: {run_id}",
+            )
+
+        # Get posts for this run
+        posts = service.get_posts_for_run(run_id)
+
+        return ScoutWatchRunDetailResponse(
+            run=ScoutWatchRunResponse.model_validate(run),
+            posts=[ScoutWatchPostResponse.model_validate(p) for p in posts],
         )
 
     except ScoutWatchNotFoundError:

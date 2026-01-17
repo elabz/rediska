@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 class DemographicsOutput(BaseModel):
     """Demographics analysis output - age, gender, location."""
 
-    age_range: Optional[tuple[int, int]] = Field(
+    age_range: Optional[Any] = Field(
         None,
-        description="Estimated age range (min, max) in years",
+        description="Estimated age range (min, max) in years - can be tuple or list",
     )
     age_confidence: float = Field(
         default=0.5,
@@ -35,9 +35,9 @@ class DemographicsOutput(BaseModel):
         description="Confidence in gender assessment",
     )
 
-    location: Optional[str] = Field(
+    location: Optional[Any] = Field(
         None,
-        description="Geographic location (city, region, country)",
+        description="Geographic location (city, region, country) - can be string or object",
     )
     location_specificity: str = Field(
         default="unknown",
@@ -64,6 +64,8 @@ class DemographicsOutput(BaseModel):
         default_factory=list,
         description="Any concerns or inconsistencies in demographic information",
     )
+
+    model_config = {"extra": "allow"}
 
 
 # ============================================================================
@@ -109,6 +111,8 @@ class PreferencesOutput(BaseModel):
         description="Supporting evidence from content",
     )
 
+    model_config = {"extra": "allow"}
+
 
 # ============================================================================
 # Relationship Goals & Criteria Agent Output Schema
@@ -134,12 +138,12 @@ class RelationshipGoalsOutput(BaseModel):
         description="Urgency/timeline indicators (e.g., 'immediate', 'soon', 'eventually', 'no rush')",
     )
 
-    partner_criteria: dict[str, Any] = Field(
+    partner_criteria: Any = Field(
         default_factory=dict,
-        description="Stated partner requirements and preferences",
+        description="Stated partner requirements and preferences (dict or list)",
     )
 
-    deal_breakers: list[str] = Field(
+    deal_breakers: list[Any] = Field(
         default_factory=list,
         description="Explicitly stated deal-breakers or hard requirements",
     )
@@ -163,6 +167,8 @@ class RelationshipGoalsOutput(BaseModel):
         default_factory=list,
         description="Supporting evidence from content",
     )
+
+    model_config = {"extra": "allow"}
 
 
 # ============================================================================
@@ -205,7 +211,7 @@ class RiskFlagsOutput(BaseModel):
     )
 
     safety_assessment: str = Field(
-        ...,
+        default="unknown",
         description="Overall safety assessment - 'safe', 'caution', or 'unsafe'",
     )
 
@@ -222,9 +228,30 @@ class RiskFlagsOutput(BaseModel):
     )
 
     overall_risk_level: str = Field(
-        ...,
+        default="unknown",
         description="Overall risk assessment - 'low', 'medium', 'high', or 'critical'",
     )
+
+    # Additional fields that LLM may output
+    red_flags: list[str] = Field(
+        default_factory=list,
+        description="Red flags identified",
+        alias="redFlags",
+    )
+
+    safety_concerns: list[Any] = Field(
+        default_factory=list,
+        description="Safety concerns identified - can be strings or objects",
+        alias="safetyConcerns",
+    )
+
+    authenticity_issues: list[Any] = Field(
+        default_factory=list,
+        description="Authenticity issues identified - can be strings or objects",
+        alias="authenticityIssues",
+    )
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
 
 
 # ============================================================================
@@ -256,9 +283,9 @@ class SexualPreferencesOutput(BaseModel):
         description="Expectations around physical intimacy and frequency",
     )
 
-    desired_partner_age_range: Optional[tuple[int, int]] = Field(
+    desired_partner_age_range: Optional[Any] = Field(
         None,
-        description="Preferred partner age range (min, max) in years",
+        description="Preferred partner age range (min, max) in years - can be tuple or list",
     )
     age_preference_confidence: float = Field(
         default=0.5,
@@ -282,6 +309,8 @@ class SexualPreferencesOutput(BaseModel):
         description="Supporting evidence from content",
     )
 
+    model_config = {"extra": "allow"}
+
 
 # ============================================================================
 # Meta-Analysis Coordinator Output Schema
@@ -292,19 +321,19 @@ class MetaAnalysisOutput(BaseModel):
     """Final meta-analysis and suitability recommendation."""
 
     recommendation: str = Field(
-        ...,
+        default="needs_review",
         description="Final suitability recommendation - 'suitable', 'not_recommended', or 'needs_review'",
     )
 
     confidence: float = Field(
-        ...,
+        default=0.5,
         ge=0.0,
         le=1.0,
         description="Overall confidence in the recommendation",
     )
 
     reasoning: str = Field(
-        ...,
+        default="",
         description="Detailed explanation of the recommendation decision",
     )
 
@@ -326,7 +355,7 @@ class MetaAnalysisOutput(BaseModel):
     )
 
     priority_level: str = Field(
-        ...,
+        default="medium",
         description="Recommended contact priority - 'high', 'medium', or 'low'",
     )
 
@@ -335,10 +364,12 @@ class MetaAnalysisOutput(BaseModel):
         description="Suggested approach or messaging strategy if contacting",
     )
 
-    dimension_summary: dict[str, str] = Field(
+    dimension_summary: dict[str, Any] = Field(
         default_factory=dict,
         description="Brief summary of key findings from each dimension",
     )
+
+    model_config = {"extra": "allow"}
 
 
 # ============================================================================

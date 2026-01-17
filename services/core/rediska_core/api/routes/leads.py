@@ -39,6 +39,7 @@ from rediska_core.domain.services.leads import LeadsService, VALID_STATUSES
 from rediska_core.domain.services.multi_agent_analysis import (
     MultiAgentAnalysisService,
 )
+from rediska_core.domain.services.inference import InferenceClient, InferenceConfig
 from rediska_core.infrastructure.crypto import CryptoService
 from rediska_core.providers.base import ProviderAdapter
 from rediska_core.providers.reddit.adapter import RedditAdapter
@@ -233,6 +234,10 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
         score=None,  # TODO: Add lead scoring
         post_created_at=lead.post_created_at,
         created_at=lead.created_at,
+        # Analysis fields
+        latest_analysis_id=lead.latest_analysis_id,
+        analysis_recommendation=lead.analysis_recommendation,
+        analysis_confidence=lead.analysis_confidence,
     )
 
 
@@ -567,8 +572,8 @@ async def analyze_lead(
 @router.post("/{lead_id}/analyze-multi", response_model=MultiAgentAnalysisResponse)
 async def analyze_lead_multi(
     lead_id: int,
-    current_user: Annotated[CurrentUser, Depends()],
-    db: Annotated[Session, Depends(get_db)],
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
 ) -> MultiAgentAnalysisResponse:
     """
     Run multi-agent analysis on a lead.
@@ -622,16 +627,20 @@ async def analyze_lead_multi(
                 detail="Lead's profile has not been analyzed yet. Analyze profile first.",
             )
 
-        # Get inference client (from environment/config)
-        # This should be injected in production; for now create a placeholder
-        # In real implementation, use dependency injection
-        inference_client = None  # TODO: Inject actual inference client
-
-        if not inference_client:
+        # Get inference client from settings
+        settings = get_settings()
+        if not settings.inference_url:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="LLM inference service not configured",
+                detail="LLM inference service not configured (INFERENCE_URL not set)",
             )
+
+        inference_config = InferenceConfig(
+            base_url=settings.inference_url,
+            model_name=settings.inference_model or "default",
+            timeout=settings.inference_timeout,
+        )
+        inference_client = InferenceClient(config=inference_config)
 
         # Run multi-agent analysis
         prompt_service = AgentPromptService(db)
@@ -641,10 +650,7 @@ async def analyze_lead_multi(
             prompt_service=prompt_service,
         )
 
-        # This would be async in a real implementation
-        import asyncio
-
-        analysis = asyncio.run(analysis_service.analyze_lead(lead_id))
+        analysis = await analysis_service.analyze_lead(lead_id)
 
         # Audit log
         audit_entry = AuditLog(
@@ -710,8 +716,8 @@ async def analyze_lead_multi(
 @router.get("/{lead_id}/analysis", response_model=MultiAgentAnalysisResponse)
 async def get_lead_analysis(
     lead_id: int,
-    current_user: Annotated[CurrentUser, Depends()],
-    db: Annotated[Session, Depends(get_db)],
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
 ) -> MultiAgentAnalysisResponse:
     """
     Get the latest multi-agent analysis for a lead.
@@ -776,8 +782,8 @@ async def get_lead_analysis(
 @router.get("/{lead_id}/analysis/history", response_model=list[MultiAgentAnalysisSummary])
 async def get_lead_analysis_history(
     lead_id: int,
-    current_user: Annotated[CurrentUser, Depends()],
-    db: Annotated[Session, Depends(get_db)],
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
 ) -> list[MultiAgentAnalysisSummary]:
     """
     Get all analyses for a lead (for re-analysis tracking).

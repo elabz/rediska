@@ -4,11 +4,14 @@ This package contains specialized LLM agents for analyzing different
 dimensions of lead profiles and generating suitability recommendations.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from rediska_core.domain.models import AgentPrompt, AnalysisDimension
 
@@ -79,6 +82,11 @@ class BaseAnalysisAgent(ABC):
 
         result = await harness.run(input_prompt)
 
+        # Log full agent output for debugging
+        logger.info(f"Agent '{config.name}' raw output:\n{result.output[:2000]}...")
+        logger.info(f"Agent '{config.name}' success={result.success}, error={result.error}")
+        logger.info(f"Agent '{config.name}' parsed_output={result.parsed_output}")
+
         return {
             "success": result.success,
             "output": result.output,
@@ -104,15 +112,18 @@ class BaseAnalysisAgent(ABC):
             str: Formatted input prompt
         """
         # Extract relevant content for analysis
+        lead_title = input_context.get("lead", {}).get("title", "")
         lead_body = input_context.get("lead", {}).get("body", "")
         post_text = input_context.get("profile", {}).get("post_text", "")
         comment_text = input_context.get("profile", {}).get("comment_text", "")
         summary = input_context.get("profile", {}).get("summary", "")
 
-        # Combine content
+        # Build content - title and body first (most important)
         content_parts = []
+        if lead_title:
+            content_parts.append(lead_title)
         if lead_body:
-            content_parts.append(f"Lead post:\n{lead_body}")
+            content_parts.append(lead_body)
         if summary:
             content_parts.append(f"Profile summary:\n{summary}")
         if post_text:

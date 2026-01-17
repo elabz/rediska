@@ -12,10 +12,27 @@ import {
   FileText,
   MoreHorizontal,
   Loader2,
+  History,
+  ExternalLink,
+  CheckCircle,
+  XCircle,
+  AlertCircle,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,6 +52,40 @@ import {
 } from '@/components/ui/alert-dialog';
 import { ScoutWatch } from '../page';
 
+interface ScoutWatchRun {
+  id: number;
+  watch_id: number;
+  started_at: string;
+  completed_at: string | null;
+  status: string;
+  posts_fetched: number;
+  posts_new: number;
+  posts_analyzed: number;
+  leads_created: number;
+  error_message: string | null;
+  search_url: string | null;
+}
+
+interface ScoutWatchPost {
+  id: number;
+  watch_id: number;
+  external_post_id: string;
+  post_title: string | null;
+  post_author: string | null;
+  first_seen_at: string;
+  run_id: number | null;
+  analysis_status: string;
+  analysis_recommendation: string | null;
+  analysis_confidence: number | null;
+  analysis_reasoning: string | null;
+  lead_id: number | null;
+}
+
+interface RunDetailResponse {
+  run: ScoutWatchRun;
+  posts: ScoutWatchPost[];
+}
+
 interface ScoutWatchListProps {
   watches: ScoutWatch[];
   onEditWatch: (watch: ScoutWatch) => void;
@@ -45,6 +96,14 @@ export function ScoutWatchList({ watches, onEditWatch, onRefresh }: ScoutWatchLi
   const [runningWatchId, setRunningWatchId] = useState<number | null>(null);
   const [deletingWatch, setDeletingWatch] = useState<ScoutWatch | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Run history state
+  const [historyWatch, setHistoryWatch] = useState<ScoutWatch | null>(null);
+  const [runs, setRuns] = useState<ScoutWatchRun[]>([]);
+  const [loadingRuns, setLoadingRuns] = useState(false);
+  const [selectedRunDetail, setSelectedRunDetail] = useState<RunDetailResponse | null>(null);
+  const [loadingRunDetail, setLoadingRunDetail] = useState(false);
+  const [expandedPostId, setExpandedPostId] = useState<number | null>(null);
 
   const handleRunWatch = async (watchId: number) => {
     setRunningWatchId(watchId);
@@ -111,6 +170,78 @@ export function ScoutWatchList({ watches, onEditWatch, onRefresh }: ScoutWatchLi
     } finally {
       setIsDeleting(false);
       setDeletingWatch(null);
+    }
+  };
+
+  const handleViewHistory = async (watch: ScoutWatch) => {
+    setHistoryWatch(watch);
+    setRuns([]);
+    setSelectedRunDetail(null);
+    setLoadingRuns(true);
+
+    try {
+      const response = await fetch(`/api/core/scout-watches/${watch.id}/runs?limit=20`, {
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch run history');
+      }
+
+      const data = await response.json();
+      setRuns(data.runs || []);
+    } catch (err) {
+      console.error('Fetch run history error:', err);
+    } finally {
+      setLoadingRuns(false);
+    }
+  };
+
+  const handleViewRunDetail = async (watchId: number, runId: number) => {
+    setLoadingRunDetail(true);
+    setSelectedRunDetail(null);
+
+    try {
+      const response = await fetch(`/api/core/scout-watches/${watchId}/runs/${runId}`, {
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch run details');
+      }
+
+      const data = await response.json();
+      setSelectedRunDetail(data);
+    } catch (err) {
+      console.error('Fetch run detail error:', err);
+    } finally {
+      setLoadingRunDetail(false);
+    }
+  };
+
+  const getRecommendationIcon = (recommendation: string | null) => {
+    switch (recommendation) {
+      case 'suitable':
+        return <CheckCircle className="h-4 w-4 text-green-500" />;
+      case 'not_suitable':
+        return <XCircle className="h-4 w-4 text-red-500" />;
+      case 'needs_review':
+        return <AlertCircle className="h-4 w-4 text-yellow-500" />;
+      default:
+        return <AlertCircle className="h-4 w-4 text-muted-foreground" />;
+    }
+  };
+
+  const getRecommendationLabel = (recommendation: string | null) => {
+    switch (recommendation) {
+      case 'suitable':
+        return 'Suitable';
+      case 'not_suitable':
+        return 'Not Suitable';
+      case 'needs_review':
+        return 'Needs Review';
+      default:
+        return 'Pending';
     }
   };
 
@@ -206,6 +337,11 @@ export function ScoutWatchList({ watches, onEditWatch, onRefresh }: ScoutWatchLi
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => handleViewHistory(watch)}>
+                        <History className="h-4 w-4 mr-2" />
+                        Run History
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={() => onEditWatch(watch)}>
                         <Pencil className="h-4 w-4 mr-2" />
                         Edit
@@ -266,6 +402,164 @@ export function ScoutWatchList({ watches, onEditWatch, onRefresh }: ScoutWatchLi
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Run History Dialog */}
+      <Dialog open={!!historyWatch} onOpenChange={() => {
+        setHistoryWatch(null);
+        setSelectedRunDetail(null);
+      }}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              Run History: {historyWatch?.source_location}
+            </DialogTitle>
+            <DialogDescription>
+              {historyWatch?.search_query && `Search: ${historyWatch.search_query}`}
+            </DialogDescription>
+          </DialogHeader>
+
+          {loadingRuns ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+          ) : runs.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              No runs yet. Click "Run Now" to trigger a watch run.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {runs.map((run) => (
+                <Card key={run.id} className={run.status === 'failed' ? 'border-destructive/50' : ''}>
+                  <CardContent className="p-4">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Badge variant={run.status === 'completed' ? 'default' : run.status === 'failed' ? 'destructive' : 'secondary'}>
+                            {run.status}
+                          </Badge>
+                          <span className="text-sm text-muted-foreground">
+                            {formatDate(run.started_at)}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                          <span>{run.posts_fetched} fetched</span>
+                          <span>{run.posts_new} new</span>
+                          <span>{run.posts_analyzed} analyzed</span>
+                          <span className="font-medium">{run.leads_created} leads</span>
+                        </div>
+
+                        {run.error_message && (
+                          <p className="text-sm text-destructive mt-2 truncate">
+                            {run.error_message}
+                          </p>
+                        )}
+
+                        {run.search_url && (
+                          <div className="mt-2">
+                            <a
+                              href={run.search_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-blue-500 hover:underline flex items-center gap-1"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              View Reddit Search URL
+                            </a>
+                          </div>
+                        )}
+                      </div>
+
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleViewRunDetail(run.watch_id, run.id)}
+                        disabled={loadingRunDetail}
+                      >
+                        {loadingRunDetail && selectedRunDetail?.run.id === run.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          'View Posts'
+                        )}
+                      </Button>
+                    </div>
+
+                    {/* Expanded Run Detail */}
+                    {selectedRunDetail?.run.id === run.id && (
+                      <div className="mt-4 pt-4 border-t">
+                        {selectedRunDetail.posts.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">No posts in this run.</p>
+                        ) : (
+                          <div className="space-y-2">
+                            <h4 className="text-sm font-medium mb-2">
+                              Posts ({selectedRunDetail.posts.length})
+                            </h4>
+                            {selectedRunDetail.posts.map((post) => (
+                              <Collapsible
+                                key={post.id}
+                                open={expandedPostId === post.id}
+                                onOpenChange={(open) => setExpandedPostId(open ? post.id : null)}
+                              >
+                                <div className="border rounded-lg p-3">
+                                  <CollapsibleTrigger asChild>
+                                    <div className="flex items-start gap-3 cursor-pointer">
+                                      {getRecommendationIcon(post.analysis_recommendation)}
+                                      <div className="flex-1 min-w-0">
+                                        <p className="text-sm font-medium truncate">
+                                          {post.post_title || post.external_post_id}
+                                        </p>
+                                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                          {post.post_author && <span>u/{post.post_author}</span>}
+                                          <span>{getRecommendationLabel(post.analysis_recommendation)}</span>
+                                          {post.analysis_confidence !== null && (
+                                            <span>({Math.round(post.analysis_confidence * 100)}% confidence)</span>
+                                          )}
+                                          {post.lead_id && (
+                                            <Badge variant="outline" className="text-xs">
+                                              Lead #{post.lead_id}
+                                            </Badge>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </CollapsibleTrigger>
+                                  <CollapsibleContent>
+                                    {post.analysis_reasoning && (
+                                      <div className="mt-3 pt-3 border-t">
+                                        <h5 className="text-xs font-medium text-muted-foreground mb-1">
+                                          Analysis Reasoning:
+                                        </h5>
+                                        <p className="text-sm whitespace-pre-wrap">
+                                          {post.analysis_reasoning}
+                                        </p>
+                                      </div>
+                                    )}
+                                    <div className="mt-2 flex gap-2">
+                                      <a
+                                        href={`https://reddit.com/comments/${post.external_post_id}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs text-blue-500 hover:underline flex items-center gap-1"
+                                      >
+                                        <ExternalLink className="h-3 w-3" />
+                                        View on Reddit
+                                      </a>
+                                    </div>
+                                  </CollapsibleContent>
+                                </div>
+                              </Collapsible>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

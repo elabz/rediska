@@ -309,11 +309,12 @@ class ScoutWatchService:
     # RUN MANAGEMENT
     # =========================================================================
 
-    def create_run(self, watch_id: int) -> ScoutWatchRun:
+    def create_run(self, watch_id: int, search_url: Optional[str] = None) -> ScoutWatchRun:
         """Create a new run record for a watch.
 
         Args:
             watch_id: The watch ID.
+            search_url: The Reddit search URL used (for debugging).
 
         Returns:
             The created ScoutWatchRun.
@@ -322,10 +323,21 @@ class ScoutWatchService:
             watch_id=watch_id,
             started_at=datetime.now(timezone.utc),
             status="running",
+            search_url=search_url,
         )
         self.db.add(run)
         self.db.flush()
         return run
+
+    def update_run_search_url(self, run: ScoutWatchRun, search_url: str) -> None:
+        """Update the search URL on a run record.
+
+        Args:
+            run: The run to update.
+            search_url: The Reddit search URL.
+        """
+        run.search_url = search_url
+        self.db.flush()
 
     def complete_run(
         self,
@@ -364,7 +376,7 @@ class ScoutWatchService:
         # Update watch stats
         watch = run.watch
         watch.last_run_at = run.completed_at
-        watch.total_posts_seen += posts_fetched
+        watch.total_posts_seen += posts_new  # Only count unique/new posts
         watch.total_matches += posts_new
         watch.total_leads_created += leads_created
 
@@ -393,6 +405,33 @@ class ScoutWatchService:
             .filter(ScoutWatchRun.watch_id == watch_id)
             .order_by(desc(ScoutWatchRun.started_at))
             .limit(limit)
+            .all()
+        )
+
+    def get_run(self, run_id: int) -> Optional[ScoutWatchRun]:
+        """Get a run by ID.
+
+        Args:
+            run_id: The run ID.
+
+        Returns:
+            The ScoutWatchRun or None if not found.
+        """
+        return self.db.query(ScoutWatchRun).filter(ScoutWatchRun.id == run_id).first()
+
+    def get_posts_for_run(self, run_id: int) -> list[ScoutWatchPost]:
+        """Get all posts for a specific run.
+
+        Args:
+            run_id: The run ID.
+
+        Returns:
+            List of ScoutWatchPost objects.
+        """
+        return (
+            self.db.query(ScoutWatchPost)
+            .filter(ScoutWatchPost.run_id == run_id)
+            .order_by(desc(ScoutWatchPost.first_seen_at))
             .all()
         )
 
@@ -425,6 +464,8 @@ class ScoutWatchService:
         watch_id: int,
         run_id: int,
         external_post_id: str,
+        post_title: Optional[str] = None,
+        post_author: Optional[str] = None,
     ) -> ScoutWatchPost:
         """Record a post as seen by this watch.
 
@@ -432,6 +473,8 @@ class ScoutWatchService:
             watch_id: The watch ID.
             run_id: The current run ID.
             external_post_id: The external post ID.
+            post_title: The post title (for audit display).
+            post_author: The post author (for audit display).
 
         Returns:
             The created ScoutWatchPost.
@@ -440,6 +483,8 @@ class ScoutWatchService:
             watch_id=watch_id,
             run_id=run_id,
             external_post_id=external_post_id,
+            post_title=post_title[:500] if post_title else None,  # Truncate to column limit
+            post_author=post_author,
             first_seen_at=datetime.now(timezone.utc),
             analysis_status="pending",
         )
@@ -455,6 +500,7 @@ class ScoutWatchService:
         confidence: Optional[float],
         lead_id: Optional[int] = None,
         status: str = "analyzed",
+        reasoning: Optional[str] = None,
     ) -> Optional[ScoutWatchPost]:
         """Update a post with analysis results.
 
@@ -465,6 +511,7 @@ class ScoutWatchService:
             confidence: The analysis confidence.
             lead_id: The created lead ID (optional).
             status: Analysis status.
+            reasoning: The agent's reasoning for the recommendation.
 
         Returns:
             The updated ScoutWatchPost or None.
@@ -484,6 +531,7 @@ class ScoutWatchService:
         post.analysis_status = status
         post.analysis_recommendation = recommendation
         post.analysis_confidence = confidence
+        post.analysis_reasoning = reasoning
         post.lead_id = lead_id
         self.db.flush()
         return post

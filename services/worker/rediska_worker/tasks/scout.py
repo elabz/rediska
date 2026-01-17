@@ -49,9 +49,12 @@ def _get_reddit_adapter(db: Any, identity_id: Optional[int] = None) -> Any:
     Returns:
         RedditAdapter instance.
     """
-    from rediska_core.domain.models import Identity, ProviderCredential
+    import json
+    from rediska_core.domain.models import Identity
     from rediska_core.providers.reddit.adapter import RedditAdapter
     from rediska_core.config import get_settings
+    from rediska_core.domain.services.credentials import CredentialsService
+    from rediska_core.infrastructure.crypto import CryptoService
 
     settings = get_settings()
 
@@ -67,17 +70,24 @@ def _get_reddit_adapter(db: Any, identity_id: Optional[int] = None) -> Any:
     if not identity:
         raise RuntimeError("No identity found for Reddit")
 
-    # Get credentials
-    creds = db.query(ProviderCredential).filter(
-        ProviderCredential.identity_id == identity.id
-    ).first()
+    # Get decrypted credentials using CredentialsService
+    crypto = CryptoService(settings.encryption_key)
+    creds_service = CredentialsService(db, crypto)
 
-    if not creds:
+    tokens_json = creds_service.get_credential_decrypted(
+        provider_id="reddit",
+        identity_id=identity.id,
+        credential_type="oauth_tokens",
+    )
+
+    if not tokens_json:
         raise RuntimeError(f"No credentials found for identity {identity.id}")
 
+    tokens = json.loads(tokens_json)
+
     return RedditAdapter(
-        access_token=creds.access_token,
-        refresh_token=creds.refresh_token,
+        access_token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
         client_id=settings.provider_reddit_client_id,
         client_secret=settings.provider_reddit_client_secret,
         user_agent=settings.provider_reddit_user_agent,
@@ -243,6 +253,7 @@ def run_single_watch(self, watch_id: int) -> dict:
         posts_analyzed = 0
         leads_created = 0
         errors = []
+        search_url = None
 
         try:
             result = asyncio.run(
@@ -257,7 +268,16 @@ def run_single_watch(self, watch_id: int) -> dict:
 
             posts = result.items
             posts_fetched = len(posts)
-            logger.info(f"Fetched {posts_fetched} posts from {watch.source_location}")
+
+            # Extract and store the browser-friendly search URL for debugging
+            if result.metadata:
+                # Use browser_url (www.reddit.com) instead of request_url (oauth.reddit.com)
+                # so users can click and view the same search in their browser
+                search_url = result.metadata.get("browser_url") or result.metadata.get("request_url")
+                service.update_run_search_url(run, search_url)
+                db.commit()
+
+            logger.info(f"Fetched {posts_fetched} posts from {watch.source_location} (URL: {search_url})")
 
         except Exception as e:
             logger.error(f"Failed to fetch posts: {e}")
@@ -284,6 +304,7 @@ def run_single_watch(self, watch_id: int) -> dict:
             inference_config = InferenceConfig(
                 base_url=settings.inference_url,
                 model_name=settings.inference_model or "default",
+                timeout=settings.inference_timeout,
             )
             inference_client = InferenceClient(config=inference_config)
             analysis_service = QuickAnalysisService(
@@ -301,16 +322,19 @@ def run_single_watch(self, watch_id: int) -> dict:
 
             posts_new += 1
 
-            # Record post
+            # Record post with title and author for audit
             scout_post = service.record_post(
                 watch_id=watch_id,
                 run_id=run.id,
                 external_post_id=external_post_id,
+                post_title=post.title,
+                post_author=post.author_username,
             )
 
             # Analyze post if enabled
             recommendation = None
             confidence = None
+            reasoning = None
 
             if analysis_service:
                 try:
@@ -326,10 +350,11 @@ def run_single_watch(self, watch_id: int) -> dict:
                     posts_analyzed += 1
                     recommendation = analysis_result.recommendation
                     confidence = analysis_result.confidence
+                    reasoning = analysis_result.reasoning
 
                     logger.debug(
                         f"Post {external_post_id}: {recommendation} "
-                        f"(confidence: {confidence:.2f})"
+                        f"(confidence: {confidence:.2f}) - {reasoning}"
                     )
 
                 except Exception as e:
@@ -337,10 +362,12 @@ def run_single_watch(self, watch_id: int) -> dict:
                     errors.append(f"Analysis failed for {external_post_id}: {e}")
                     recommendation = "needs_review"
                     confidence = 0.0
+                    reasoning = f"Analysis failed: {str(e)}"
             else:
                 # No analysis - mark as suitable by default
                 recommendation = "suitable"
                 confidence = 1.0
+                reasoning = "Auto-analyze disabled - passed by default"
 
             # Create lead if suitable and meets confidence threshold
             lead_id = None
@@ -379,6 +406,7 @@ def run_single_watch(self, watch_id: int) -> dict:
                 confidence=confidence,
                 lead_id=lead_id,
                 status="analyzed" if recommendation else "pending",
+                reasoning=reasoning,
             )
 
         # Complete run
@@ -403,6 +431,7 @@ def run_single_watch(self, watch_id: int) -> dict:
             "status": "success",
             "watch_id": watch_id,
             "run_id": run.id,
+            "search_url": search_url,
             "posts_fetched": posts_fetched,
             "posts_new": posts_new,
             "posts_analyzed": posts_analyzed,

@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     inference_url: Optional[str] = None
     inference_model: Optional[str] = None
     inference_api_key: Optional[str] = None
+    inference_timeout: float = Field(default=300.0, description="Inference request timeout in seconds")
     embeddings_url: Optional[str] = None
     embeddings_model: Optional[str] = None
     embeddings_api_key: Optional[str] = None

@@ -55,7 +55,10 @@ interface LeadAnalysisPanelProps {
   hasAnalysis: boolean;
   currentRecommendation: string | null;
   currentConfidence: number | null;
+  currentStatus: string;
   onAnalysisComplete?: () => void;
+  onStatusChange?: (newStatus: string) => void;
+  onInitiateContact?: () => void;
 }
 
 const RECOMMENDATION_STYLES: Record<string, { bg: string; text: string; icon: React.ReactNode }> = {
@@ -81,7 +84,10 @@ export function LeadAnalysisPanel({
   hasAnalysis,
   currentRecommendation,
   currentConfidence,
+  currentStatus,
   onAnalysisComplete,
+  onStatusChange,
+  onInitiateContact,
 }: LeadAnalysisPanelProps) {
   const [analysis, setAnalysis] = useState<MultiAgentAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
@@ -108,7 +114,14 @@ export function LeadAnalysisPanel({
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.detail || 'Failed to fetch analysis');
+        // Handle FastAPI 422 validation errors (detail is an array)
+        let errorMessage = 'Failed to fetch analysis';
+        if (typeof data.detail === 'string') {
+          errorMessage = data.detail;
+        } else if (Array.isArray(data.detail)) {
+          errorMessage = data.detail.map((e: { msg?: string }) => e.msg || 'Validation error').join(', ');
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
@@ -136,7 +149,14 @@ export function LeadAnalysisPanel({
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.detail || 'Failed to run analysis');
+        // Handle FastAPI 422 validation errors (detail is an array)
+        let errorMessage = 'Failed to run analysis';
+        if (typeof data.detail === 'string') {
+          errorMessage = data.detail;
+        } else if (Array.isArray(data.detail)) {
+          errorMessage = data.detail.map((e: { msg?: string }) => e.msg || 'Validation error').join(', ');
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
@@ -294,6 +314,10 @@ export function LeadAnalysisPanel({
           reasoning={analysis.recommendation_reasoning}
           confidence={analysis.confidence_score}
           metaAnalysis={analysis.meta_analysis}
+          leadId={leadId}
+          currentStatus={currentStatus}
+          onStatusChange={onStatusChange}
+          onInitiateContact={onInitiateContact}
         />
       )}
 

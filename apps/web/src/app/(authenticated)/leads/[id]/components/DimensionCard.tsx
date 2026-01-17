@@ -112,317 +112,161 @@ function TagList({ items, color = 'default' }: { items: string[]; color?: 'defau
   );
 }
 
-function DemographicsContent({ output }: { output: Record<string, unknown> }) {
-  const ageRange = output.age_range as [number, number] | null;
-  const gender = output.gender as string | null;
-  const location = output.location as string | null;
+// Helper to format field names for display
+function formatLabel(key: string): string {
+  return key
+    .replace(/_/g, ' ')
+    .replace(/([A-Z])/g, ' $1')
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ')
+    .trim();
+}
+
+// Helper to render any value
+function renderValue(value: unknown): React.ReactNode {
+  if (value === null || value === undefined) return <span className="text-muted-foreground">N/A</span>;
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'number') {
+    // Check if it looks like a confidence score (0-1 range)
+    if (value >= 0 && value <= 1 && value !== Math.floor(value)) {
+      return <ConfidenceMeter value={value} />;
+    }
+    return value.toString();
+  }
+  if (typeof value === 'string') {
+    if (value === '') return <span className="text-muted-foreground">N/A</span>;
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-muted-foreground">None</span>;
+    // Check if it's an array of objects
+    if (typeof value[0] === 'object' && value[0] !== null) {
+      return (
+        <div className="space-y-2 mt-1">
+          {value.map((item, idx) => (
+            <div key={idx} className="text-xs bg-muted/30 p-2 rounded">
+              {Object.entries(item as Record<string, unknown>).map(([k, v]) => (
+                <div key={k}>
+                  <span className="font-medium">{formatLabel(k)}:</span>{' '}
+                  <span className="text-muted-foreground">{String(v)}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      );
+    }
+    // Simple array - render as tags
+    return <TagList items={value.map(String)} />;
+  }
+  if (typeof value === 'object') {
+    return (
+      <div className="space-y-1 mt-1">
+        {Object.entries(value as Record<string, unknown>).map(([k, v]) => (
+          <div key={k} className="text-xs">
+            <span className="font-medium">{formatLabel(k)}:</span>{' '}
+            <span className="text-muted-foreground">{String(v)}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return String(value);
+}
+
+// Generic renderer that shows all fields
+function AllFieldsContent({ output, highlightFields = [] }: { output: Record<string, unknown>; highlightFields?: string[] }) {
+  // Sort fields: highlighted first, then confidence scores, then others
+  const sortedEntries = Object.entries(output).sort(([keyA], [keyB]) => {
+    const aHighlight = highlightFields.includes(keyA);
+    const bHighlight = highlightFields.includes(keyB);
+    if (aHighlight && !bHighlight) return -1;
+    if (!aHighlight && bHighlight) return 1;
+
+    const aConfidence = keyA.includes('confidence');
+    const bConfidence = keyB.includes('confidence');
+    if (aConfidence && !bConfidence) return 1;
+    if (!aConfidence && bConfidence) return -1;
+
+    return keyA.localeCompare(keyB);
+  });
 
   return (
-    <div className="space-y-3">
-      {/* Age */}
-      {ageRange && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Age Range</span>
-          <div className="flex items-center gap-2">
-            <span className="font-medium">{ageRange[0]}-{ageRange[1]}</span>
-            <ConfidenceMeter value={output.age_confidence as number || 0.5} />
-          </div>
-        </div>
-      )}
+    <div className="space-y-2">
+      {sortedEntries.map(([key, value]) => {
+        // Skip empty arrays and null values for cleaner display
+        if (Array.isArray(value) && value.length === 0) return null;
+        if (value === null || value === undefined || value === '') return null;
 
-      {/* Gender */}
-      {gender && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Gender</span>
-          <div className="flex items-center gap-2">
-            <span className="font-medium capitalize">{gender}</span>
-            <ConfidenceMeter value={output.gender_confidence as number || 0.5} />
-          </div>
-        </div>
-      )}
+        const isHighlighted = highlightFields.includes(key);
 
-      {/* Location */}
-      {location && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Location</span>
-          <div className="flex items-center gap-2">
-            <MapPin className="h-3 w-3 text-muted-foreground" />
-            <span className="font-medium">{location}</span>
-            <ConfidenceMeter value={output.location_confidence as number || 0.5} />
+        return (
+          <div
+            key={key}
+            className={cn(
+              "py-1 border-b border-border/30 last:border-0",
+              isHighlighted && "bg-primary/5 -mx-2 px-2 rounded"
+            )}
+          >
+            <div className="flex items-start gap-2">
+              <span className={cn(
+                "text-xs font-medium min-w-[120px] shrink-0",
+                isHighlighted ? "text-primary" : "text-muted-foreground"
+              )}>
+                {formatLabel(key)}:
+              </span>
+              <div className="text-sm flex-1">{renderValue(value)}</div>
+            </div>
           </div>
-        </div>
-      )}
-
-      {/* Ethnicity indicators */}
-      {(output.ethnicity_indicators as string[])?.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground">Cultural indicators</span>
-          <TagList items={output.ethnicity_indicators as string[]} />
-        </div>
-      )}
+        );
+      })}
     </div>
+  );
+}
+
+function DemographicsContent({ output }: { output: Record<string, unknown> }) {
+  return (
+    <AllFieldsContent
+      output={output}
+      highlightFields={['age', 'gender', 'location', 'age_range']}
+    />
   );
 }
 
 function PreferencesContent({ output }: { output: Record<string, unknown> }) {
-  const hobbies = output.hobbies as string[] || [];
-  const values = output.values as string[] || [];
-  const traits = output.personality_traits as string[] || [];
-  const lifestyle = output.lifestyle as string | null;
-  const commStyle = output.communication_style as string | null;
-
   return (
-    <div className="space-y-3">
-      {lifestyle && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Lifestyle</span>
-          <Badge variant="secondary" className="capitalize">{lifestyle}</Badge>
-        </div>
-      )}
-
-      {commStyle && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Communication</span>
-          <Badge variant="secondary" className="capitalize">{commStyle}</Badge>
-        </div>
-      )}
-
-      {hobbies.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Hobbies</span>
-          <TagList items={hobbies} />
-        </div>
-      )}
-
-      {values.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Values</span>
-          <TagList items={values} color="success" />
-        </div>
-      )}
-
-      {traits.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Personality</span>
-          <TagList items={traits} />
-        </div>
-      )}
-    </div>
+    <AllFieldsContent
+      output={output}
+      highlightFields={['hobbies', 'values', 'personality_traits', 'lifestyle', 'preferences']}
+    />
   );
 }
 
 function RelationshipGoalsContent({ output }: { output: Record<string, unknown> }) {
-  const intent = output.relationship_intent as string | null;
-  const timeline = output.relationship_timeline as string | null;
-  const dealBreakers = output.deal_breakers as string[] || [];
-  const compatibility = output.compatibility_factors as string[] || [];
-  const incompatibility = output.incompatibility_factors as string[] || [];
-
   return (
-    <div className="space-y-3">
-      {intent && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Intent</span>
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="capitalize">{intent}</Badge>
-            <ConfidenceMeter value={output.intent_confidence as number || 0.5} />
-          </div>
-        </div>
-      )}
-
-      {timeline && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Timeline</span>
-          <Badge variant="outline" className="capitalize">{timeline}</Badge>
-        </div>
-      )}
-
-      {dealBreakers.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Deal Breakers</span>
-          <TagList items={dealBreakers} color="danger" />
-        </div>
-      )}
-
-      {compatibility.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Compatibility Factors</span>
-          <TagList items={compatibility} color="success" />
-        </div>
-      )}
-
-      {incompatibility.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Incompatibility Factors</span>
-          <TagList items={incompatibility} color="warning" />
-        </div>
-      )}
-    </div>
+    <AllFieldsContent
+      output={output}
+      highlightFields={['goals', 'relationship_intent', 'partner_criteria', 'deal_breakers', 'relationship_intentions']}
+    />
   );
 }
 
 function RiskFlagsContent({ output }: { output: Record<string, unknown> }) {
-  const flags = output.flags as Array<{type: string; severity: string; description: string}> || [];
-  const safetyAssessment = output.safety_assessment as string;
-  const authenticityScore = output.authenticity_score as number;
-  const overallRisk = output.overall_risk_level as string;
-  const manipulationIndicators = output.manipulation_indicators as string[] || [];
-
-  const severityColors: Record<string, string> = {
-    low: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
-    medium: 'bg-amber-500/10 text-amber-600 border-amber-500/20',
-    high: 'bg-orange-500/10 text-orange-600 border-orange-500/20',
-    critical: 'bg-red-500/10 text-red-600 border-red-500/20',
-  };
-
-  const riskColors: Record<string, string> = {
-    low: 'text-emerald-600',
-    medium: 'text-amber-600',
-    high: 'text-orange-600',
-    critical: 'text-red-600',
-  };
-
   return (
-    <div className="space-y-3">
-      {/* Overall Risk Level */}
-      {overallRisk && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Overall Risk</span>
-          <Badge
-            variant="outline"
-            className={cn('capitalize', severityColors[overallRisk])}
-          >
-            {overallRisk}
-          </Badge>
-        </div>
-      )}
-
-      {/* Safety Assessment */}
-      {safetyAssessment && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Safety</span>
-          <div className="flex items-center gap-1">
-            {safetyAssessment === 'safe' ? (
-              <CheckCircle className="h-4 w-4 text-emerald-500" />
-            ) : safetyAssessment === 'caution' ? (
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
-            ) : (
-              <XCircle className="h-4 w-4 text-red-500" />
-            )}
-            <span className={cn('font-medium capitalize', riskColors[safetyAssessment] || '')}>
-              {safetyAssessment}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Authenticity */}
-      {authenticityScore !== undefined && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Authenticity</span>
-          <ConfidenceMeter value={authenticityScore} />
-        </div>
-      )}
-
-      {/* Individual Flags */}
-      {flags.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-2">Risk Flags</span>
-          <div className="space-y-2">
-            {flags.map((flag, idx) => (
-              <div
-                key={idx}
-                className={cn(
-                  'text-xs p-2 rounded border',
-                  severityColors[flag.severity]
-                )}
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-medium capitalize">{flag.type.replace('_', ' ')}</span>
-                  <Badge variant="outline" className={severityColors[flag.severity]}>
-                    {flag.severity}
-                  </Badge>
-                </div>
-                <p className="text-muted-foreground">{flag.description}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Manipulation Indicators */}
-      {manipulationIndicators.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Manipulation Indicators</span>
-          <TagList items={manipulationIndicators} color="danger" />
-        </div>
-      )}
-    </div>
+    <AllFieldsContent
+      output={output}
+      highlightFields={['overall_risk_level', 'safety_assessment', 'safety_concerns', 'red_flags', 'flags', 'authenticity_score']}
+    />
   );
 }
 
 function SexualPreferencesContent({ output }: { output: Record<string, unknown> }) {
-  const orientation = output.sexual_orientation as string | null;
-  const partnerAgeRange = output.desired_partner_age_range as [number, number] | null;
-  const kinks = output.kinks_interests as string[] || [];
-  const intimacyExpectations = output.intimacy_expectations as string | null;
-  const ageConcerns = output.age_gap_concerns as string[] || [];
-  const compatibilityNotes = output.sexual_compatibility_notes as string[] || [];
-
   return (
-    <div className="space-y-3">
-      {orientation && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Orientation</span>
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="capitalize">{orientation}</Badge>
-            <ConfidenceMeter value={output.orientation_confidence as number || 0.5} />
-          </div>
-        </div>
-      )}
-
-      {partnerAgeRange && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Seeks Age</span>
-          <div className="flex items-center gap-2">
-            <span className="font-medium">{partnerAgeRange[0]}-{partnerAgeRange[1]}</span>
-            <ConfidenceMeter value={output.age_preference_confidence as number || 0.5} />
-          </div>
-        </div>
-      )}
-
-      {intimacyExpectations && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Intimacy</span>
-          <Badge variant="outline" className="capitalize">{intimacyExpectations}</Badge>
-        </div>
-      )}
-
-      {kinks.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Interests</span>
-          <TagList items={kinks} />
-        </div>
-      )}
-
-      {ageConcerns.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Age Gap Concerns</span>
-          <TagList items={ageConcerns} color="warning" />
-        </div>
-      )}
-
-      {compatibilityNotes.length > 0 && (
-        <div>
-          <span className="text-xs text-muted-foreground block mb-1">Notes</span>
-          <ul className="text-xs text-muted-foreground space-y-1">
-            {compatibilityNotes.map((note, idx) => (
-              <li key={idx}>• {note}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
+    <AllFieldsContent
+      output={output}
+      highlightFields={['orientation', 'sexual_orientation', 'preferences', 'kinks_interests', 'desired_partner_age_range']}
+    />
   );
 }
 

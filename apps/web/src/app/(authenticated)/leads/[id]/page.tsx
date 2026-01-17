@@ -349,7 +349,15 @@ export default function LeadDetailPage() {
             hasAnalysis={!!lead.latest_analysis_id}
             currentRecommendation={lead.analysis_recommendation}
             currentConfidence={lead.analysis_confidence}
+            currentStatus={lead.status}
             onAnalysisComplete={fetchLead}
+            onStatusChange={(newStatus) => {
+              // Update local state immediately for responsive UI
+              setLead(prev => prev ? { ...prev, status: newStatus } : null);
+              // Optionally re-fetch to get full updated data
+              fetchLead();
+            }}
+            onInitiateContact={handleContact}
           />
         </CardContent>
       </Card>

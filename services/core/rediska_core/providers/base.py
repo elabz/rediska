@@ -206,6 +206,7 @@ class PaginatedResult(Generic[T]):
     next_cursor: Optional[str]
     has_more: bool
     total: Optional[int] = None
+    metadata: Optional[dict] = None  # Additional info like request_url
 
 
 # =============================================================================

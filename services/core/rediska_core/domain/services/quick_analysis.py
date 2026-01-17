@@ -188,9 +188,9 @@ class QuickAnalysisService:
             )
             result = await harness.run(input_prompt)
 
-            # Parse result
-            if result.get("success") and result.get("parsed_output"):
-                output = result["parsed_output"]
+            # Parse result - AgentResult is a dataclass, not a dict
+            if result.success and result.parsed_output:
+                output = result.parsed_output
                 return QuickAnalysisResult(
                     recommendation=output.get("recommendation", "needs_review"),
                     confidence=output.get("confidence", 0.0),
@@ -199,7 +199,7 @@ class QuickAnalysisService:
                     success=True,
                 )
             else:
-                error = result.get("error", "Analysis failed")
+                error = result.error or "Analysis failed"
                 logger.warning(f"Quick analysis failed: {error}")
                 return QuickAnalysisResult.from_error(error)
 

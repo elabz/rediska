@@ -84,6 +84,7 @@ class ScoutWatchRunResponse(BaseModel):
     posts_analyzed: int
     leads_created: int
     error_message: Optional[str]
+    search_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -109,15 +110,25 @@ class ScoutWatchPostResponse(BaseModel):
     id: int
     watch_id: int
     external_post_id: str
+    post_title: Optional[str] = None
+    post_author: Optional[str] = None
     first_seen_at: datetime
     run_id: Optional[int]
     analysis_status: str
     analysis_recommendation: Optional[str]
     analysis_confidence: Optional[float]
+    analysis_reasoning: Optional[str] = None
     lead_id: Optional[int]
 
     class Config:
         from_attributes = True
+
+
+class ScoutWatchRunDetailResponse(BaseModel):
+    """Response schema for detailed scout watch run with posts."""
+
+    run: ScoutWatchRunResponse
+    posts: list[ScoutWatchPostResponse]
 
 
 # =============================================================================
@@ -134,4 +145,5 @@ __all__ = [
     "ScoutWatchRunListResponse",
     "ScoutWatchRunTriggerResponse",
     "ScoutWatchPostResponse",
+    "ScoutWatchRunDetailResponse",
 ]

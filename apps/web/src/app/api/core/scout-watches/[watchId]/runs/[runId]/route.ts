@@ -3,38 +3,26 @@ import { cookies } from 'next/headers';
 
 const CORE_API_URL = process.env.CORE_API_URL || 'http://localhost:8000';
 
-// Extend timeout for long-running multi-agent analysis
-export const maxDuration = 600; // 10 minutes
-
-export async function POST(
+export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ leadId: string }> }
+  { params }: { params: Promise<{ watchId: string; runId: string }> }
 ) {
   const cookieStore = await cookies();
   const sessionCookie = cookieStore.get('session');
+  const { watchId, runId } = await params;
 
   if (!sessionCookie) {
     return NextResponse.json({ detail: 'Unauthorized' }, { status: 401 });
   }
 
-  const { leadId } = await params;
-  const url = `${CORE_API_URL}/leads/${leadId}/analyze-multi`;
+  const url = `${CORE_API_URL}/scout-watches/${watchId}/runs/${runId}`;
 
   try {
-    // Long timeout for multi-agent analysis (10 minutes)
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 600000);
-
     const response = await fetch(url, {
-      method: 'POST',
       headers: {
         Cookie: `session=${sessionCookie.value}`,
-        'Content-Type': 'application/json',
       },
-      signal: controller.signal,
     });
-
-    clearTimeout(timeoutId);
 
     const data = await response.json();
 
@@ -44,9 +32,9 @@ export async function POST(
 
     return NextResponse.json(data);
   } catch (error) {
-    console.error('Multi-agent analysis error:', error);
+    console.error('Get scout watch run detail error:', error);
     return NextResponse.json(
-      { detail: 'Failed to run multi-agent analysis' },
+      { detail: 'Failed to fetch scout watch run details' },
       { status: 500 }
     );
   }

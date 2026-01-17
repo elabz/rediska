@@ -1056,6 +1056,9 @@ class ScoutWatchRun(Base):
     # Error tracking
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Debug/audit info
+    search_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     __table_args__ = (
         Index("idx_scout_watch_runs", "watch_id", "started_at"),
     )
@@ -1078,6 +1081,10 @@ class ScoutWatchPost(Base):
     # Post identification
     external_post_id: Mapped[str] = mapped_column(String(100), nullable=False)
 
+    # Post details for audit display
+    post_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    post_author: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
     # Tracking
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     run_id: Mapped[Optional[int]] = mapped_column(
@@ -1092,6 +1099,7 @@ class ScoutWatchPost(Base):
     )
     analysis_recommendation: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+    analysis_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Lead creation
     lead_id: Mapped[Optional[int]] = mapped_column(

@@ -74,7 +74,7 @@ class InferenceConfig:
     base_url: str
     model_name: str = "default"
     timeout: float = 60.0
-    max_tokens: int = 2048
+    max_tokens: int = 8192  # Increased for reasoning models like qwq that use <think> tags
     temperature: float = 0.7
 
 
@@ -201,6 +201,25 @@ class InferenceClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        # Log full prompts for debugging
+        import logging
+        import json as json_module
+        logger = logging.getLogger(__name__)
+        logger.info(f"=== LLM REQUEST to {self.config.base_url} ===")
+        logger.info(f"Model: {self.config.model_name}, temp: {temperature}, max_tokens: {max_tokens}")
+        logger.info(f"Messages count: {len(messages)}")
+        for i, msg in enumerate(messages):
+            role = msg.get('role', 'unknown') if isinstance(msg, dict) else getattr(msg, 'role', 'unknown')
+            content = msg.get('content', '') if isinstance(msg, dict) else getattr(msg, 'content', '')
+            logger.info(f"--- MESSAGE {i} ({role.upper()}) ---")
+            # Log content in chunks to avoid truncation
+            if content:
+                for j in range(0, len(content), 2000):
+                    logger.info(content[j:j+2000])
+            else:
+                logger.info("(empty content)")
+        logger.info("=== END LLM REQUEST ===")
 
         try:
             response = await client.post("/v1/chat/completions", json=payload)

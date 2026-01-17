@@ -139,23 +139,23 @@ class MultiAgentAnalysisService:
                 analysis.id, dimension_results
             )
 
-            # Update analysis record with results
+            # Update analysis record with results (use parsed_output for JSON fields)
             analysis.demographics_json = dimension_results.get(
                 "demographics", {}
-            ).get("output")
+            ).get("parsed_output")
             analysis.preferences_json = dimension_results.get(
                 "preferences", {}
-            ).get("output")
+            ).get("parsed_output")
             analysis.relationship_goals_json = dimension_results.get(
                 "relationship_goals", {}
-            ).get("output")
+            ).get("parsed_output")
             analysis.risk_flags_json = dimension_results.get(
                 "risk_flags", {}
-            ).get("output")
+            ).get("parsed_output")
             analysis.sexual_preferences_json = dimension_results.get(
                 "sexual_preferences", {}
-            ).get("output")
-            analysis.meta_analysis_json = meta_result.get("output")
+            ).get("parsed_output")
+            analysis.meta_analysis_json = meta_result.get("parsed_output")
 
             if meta_result.get("success"):
                 meta_output = meta_result.get("parsed_output", {})
@@ -217,14 +217,10 @@ class MultiAgentAnalysisService:
         from rediska_core.domain.services.agents.demographics import (
             DemographicsAgent,
         )
-        from rediska_core.domain.services.agents.preferences import (
+        from rediska_core.domain.services.agents.agent_implementations import (
             PreferencesAgent,
-        )
-        from rediska_core.domain.services.agents.relationship_goals import (
             RelationshipGoalsAgent,
-        )
-        from rediska_core.domain.services.agents.risk_flags import RiskFlagsAgent
-        from rediska_core.domain.services.agents.sexual_preferences import (
+            RiskFlagsAgent,
             SexualPreferencesAgent,
         )
 
@@ -287,7 +283,7 @@ class MultiAgentAnalysisService:
         Returns:
             dict: Meta-analysis result with recommendation
         """
-        from rediska_core.domain.services.agents.meta_analysis import (
+        from rediska_core.domain.services.agents.agent_implementations import (
             MetaAnalysisAgent,
         )
 

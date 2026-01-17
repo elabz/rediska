@@ -320,6 +320,33 @@ class AgentHarness:
         except Exception as e:
             return ToolResult(success=False, output=None, error=str(e))
 
+    def _extract_json_from_response(self, content: str) -> str:
+        """Extract JSON from LLM response that may contain thinking tags.
+
+        Handles models like qwq that output <think>...</think> before JSON.
+
+        Args:
+            content: Raw LLM response
+
+        Returns:
+            Extracted JSON string
+        """
+        import re
+
+        # Remove <think>...</think> blocks (including multiline)
+        cleaned = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+
+        # Try to find JSON object in the remaining content
+        # Look for content between first { and last }
+        first_brace = cleaned.find('{')
+        last_brace = cleaned.rfind('}')
+
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            return cleaned[first_brace:last_brace + 1].strip()
+
+        # If no braces found, return cleaned content and let JSON parser fail with clear error
+        return cleaned.strip()
+
     def _parse_structured_output(self, content: str) -> tuple[bool, Optional[dict], Optional[str]]:
         """Parse and validate structured output.
 
@@ -333,16 +360,24 @@ class AgentHarness:
             return True, None, None
 
         try:
+            # Extract JSON from response (handles <think> tags)
+            json_str = self._extract_json_from_response(content)
+
             # Try to parse JSON
-            data = json.loads(content)
+            data = json.loads(json_str)
 
             # Validate against schema
             validated = self.config.output_schema.model_validate(data)
             return True, validated.model_dump(), None
 
         except json.JSONDecodeError as e:
+            import logging
+            logging.getLogger(__name__).error(f"JSON parse error. Extracted: {json_str[:500]}")
             return False, None, f"Invalid JSON: {e}"
         except ValidationError as e:
+            import logging
+            logging.getLogger(__name__).error(f"Validation error for data: {data}")
+            logging.getLogger(__name__).error(f"Validation details: {e.errors()}")
             return False, None, f"Validation error: {e}"
 
     async def run(self, user_input: str) -> AgentResult:
