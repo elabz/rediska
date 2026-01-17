@@ -57,7 +57,7 @@ class AgentPromptService:
         system_prompt: str,
         output_schema_json: dict[str, Any],
         temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         notes: str | None = None,
         created_by: str = "system",
     ) -> AgentPrompt:

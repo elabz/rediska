@@ -157,8 +157,8 @@ class MultiAgentAnalysisService:
             ).get("parsed_output")
             analysis.meta_analysis_json = meta_result.get("parsed_output")
 
-            if meta_result.get("success"):
-                meta_output = meta_result.get("parsed_output", {})
+            meta_output = meta_result.get("parsed_output")
+            if meta_result.get("success") and meta_output:
                 analysis.final_recommendation = meta_output.get("recommendation")
                 analysis.recommendation_reasoning = meta_output.get("reasoning")
                 analysis.confidence_score = meta_output.get("confidence")

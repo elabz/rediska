@@ -246,41 +246,43 @@ Output as JSON:
 # Prompt Registry
 # ============================================================================
 
+# Note: max_tokens increased to 8192 to accommodate reasoning models like qwq
+# that use <think>...</think> tags which can be very long
 AGENT_PROMPTS = {
     "demographics": {
         "system_prompt": DEMOGRAPHICS_PROMPT,
         "temperature": 0.7,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "description": "Demographics extraction - age, gender, location",
     },
     "preferences": {
         "system_prompt": PREFERENCES_PROMPT,
         "temperature": 0.7,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "description": "Preferences & interests - hobbies, values, lifestyle",
     },
     "relationship_goals": {
         "system_prompt": RELATIONSHIP_GOALS_PROMPT,
         "temperature": 0.7,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "description": "Relationship goals & criteria - intent, partner requirements",
     },
     "risk_flags": {
         "system_prompt": RISK_FLAGS_PROMPT,
         "temperature": 0.7,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "description": "Risk assessment - red flags, safety, authenticity",
     },
     "sexual_preferences": {
         "system_prompt": SEXUAL_PREFERENCES_PROMPT,
         "temperature": 0.7,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "description": "Sexual preferences - orientation, interests, age preferences",
     },
     "meta_analysis": {
         "system_prompt": META_ANALYSIS_PROMPT,
         "temperature": 0.7,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "description": "Meta-analysis coordinator - final suitability recommendation",
     },
 }

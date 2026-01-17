@@ -566,10 +566,7 @@ class LeadPost(Base):
         BigInteger, ForeignKey("lead_analyses.id", ondelete="SET NULL"), nullable=True
     )
     analysis_recommendation: Mapped[Optional[str]] = mapped_column(
-        Enum(
-            "suitable", "not_recommended", "needs_review",
-            name="lead_recommendation_enum"
-        ),
+        Text,
         nullable=True,
     )
     analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
@@ -597,7 +594,6 @@ class LeadPost(Base):
         Index("idx_source", "provider_id", "source_location"),
         Index("idx_author", "author_account_id"),
         Index("idx_status", "status"),
-        Index("idx_lead_analysis_recommendation", "analysis_recommendation"),
         Index("idx_lead_source", "lead_source"),
     )
 
@@ -829,7 +825,7 @@ class AgentPrompt(Base):
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     output_schema_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     temperature: Mapped[float] = mapped_column(nullable=False, default=0.7)
-    max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=2048)
+    max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=8192)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow

@@ -332,9 +332,33 @@ class AgentHarness:
             Extracted JSON string
         """
         import re
+        import logging
+
+        logger = logging.getLogger(__name__)
+        original_len = len(content)
 
         # Remove <think>...</think> blocks (including multiline)
         cleaned = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+
+        # If <think> tag exists but </think> is missing (truncated or malformed),
+        # remove everything from <think> to the end
+        if '<think>' in cleaned:
+            think_start = cleaned.find('<think>')
+            logger.warning(
+                f"Found unclosed <think> tag at position {think_start}. "
+                f"Content length: {original_len}. Removing from <think> to end."
+            )
+            cleaned = cleaned[:think_start]
+
+        # Also handle lowercase or variations
+        cleaned = re.sub(r'<Think>.*?</Think>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+
+        # Remove any remaining partial think tags
+        cleaned = re.sub(r'<think>.*$', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<\/think>', '', cleaned, flags=re.IGNORECASE)
+
+        # Log what we're working with
+        logger.debug(f"After removing think tags: {len(cleaned)} chars (was {original_len})")
 
         # Try to find JSON object in the remaining content
         # Look for content between first { and last }
@@ -342,9 +366,15 @@ class AgentHarness:
         last_brace = cleaned.rfind('}')
 
         if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            return cleaned[first_brace:last_brace + 1].strip()
+            json_str = cleaned[first_brace:last_brace + 1].strip()
+            logger.debug(f"Extracted JSON: {len(json_str)} chars from positions {first_brace}-{last_brace}")
+            return json_str
 
-        # If no braces found, return cleaned content and let JSON parser fail with clear error
+        # If no braces found, log warning and return cleaned content
+        logger.warning(
+            f"No JSON braces found in response. "
+            f"Cleaned content preview: {cleaned[:500]}..."
+        )
         return cleaned.strip()
 
     def _parse_structured_output(self, content: str) -> tuple[bool, Optional[dict], Optional[str]]:
@@ -356,12 +386,26 @@ class AgentHarness:
         Returns:
             Tuple of (success, parsed_dict, error_message)
         """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         if not self.config.output_schema:
             return True, None, None
+
+        json_str = ""
+        data = None
 
         try:
             # Extract JSON from response (handles <think> tags)
             json_str = self._extract_json_from_response(content)
+
+            if not json_str:
+                logger.error(
+                    f"Empty JSON string extracted from content of length {len(content)}. "
+                    f"Content preview: {content[:1000]}..."
+                )
+                return False, None, "No JSON content found in response"
 
             # Try to parse JSON
             data = json.loads(json_str)
@@ -371,14 +415,23 @@ class AgentHarness:
             return True, validated.model_dump(), None
 
         except json.JSONDecodeError as e:
-            import logging
-            logging.getLogger(__name__).error(f"JSON parse error. Extracted: {json_str[:500]}")
+            logger.error(
+                f"JSON parse error: {e}. "
+                f"Extracted string ({len(json_str)} chars): {json_str[:1000]}..."
+            )
+            # Log more context about where the error occurred
+            if e.pos:
+                start = max(0, e.pos - 50)
+                end = min(len(json_str), e.pos + 50)
+                logger.error(f"Context around error position {e.pos}: ...{json_str[start:end]}...")
             return False, None, f"Invalid JSON: {e}"
         except ValidationError as e:
-            import logging
-            logging.getLogger(__name__).error(f"Validation error for data: {data}")
-            logging.getLogger(__name__).error(f"Validation details: {e.errors()}")
+            logger.error(f"Pydantic validation error for data: {data}")
+            logger.error(f"Validation details: {e.errors()}")
             return False, None, f"Validation error: {e}"
+        except Exception as e:
+            logger.exception(f"Unexpected error parsing structured output: {e}")
+            return False, None, f"Parse error: {e}"
 
     async def run(self, user_input: str) -> AgentResult:
         """Run the agent with user input.
