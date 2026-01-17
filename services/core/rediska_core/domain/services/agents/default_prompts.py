@@ -246,43 +246,45 @@ Output as JSON:
 # Prompt Registry
 # ============================================================================
 
-# Note: max_tokens increased to 8192 to accommodate reasoning models like qwq
-# that use <think>...</think> tags which can be very long
+# Default inference parameters for each agent.
+# These are sensible defaults for non-thinking models (e.g., Lumimaid, Llama 3).
+# For reasoning models with <think> tags (e.g., Qwen-QwQ), increase max_tokens to 8192
+# and set INFERENCE_CHAT_TEMPLATE=qwen_thinking in your .env file.
 AGENT_PROMPTS = {
     "demographics": {
         "system_prompt": DEMOGRAPHICS_PROMPT,
-        "temperature": 0.7,
-        "max_tokens": 8192,
+        "temperature": 0.6,
+        "max_tokens": 2048,
         "description": "Demographics extraction - age, gender, location",
     },
     "preferences": {
         "system_prompt": PREFERENCES_PROMPT,
-        "temperature": 0.7,
-        "max_tokens": 8192,
+        "temperature": 0.6,
+        "max_tokens": 2048,
         "description": "Preferences & interests - hobbies, values, lifestyle",
     },
     "relationship_goals": {
         "system_prompt": RELATIONSHIP_GOALS_PROMPT,
-        "temperature": 0.7,
-        "max_tokens": 8192,
+        "temperature": 0.6,
+        "max_tokens": 2048,
         "description": "Relationship goals & criteria - intent, partner requirements",
     },
     "risk_flags": {
         "system_prompt": RISK_FLAGS_PROMPT,
-        "temperature": 0.7,
-        "max_tokens": 8192,
+        "temperature": 0.6,
+        "max_tokens": 2048,
         "description": "Risk assessment - red flags, safety, authenticity",
     },
     "sexual_preferences": {
         "system_prompt": SEXUAL_PREFERENCES_PROMPT,
-        "temperature": 0.7,
-        "max_tokens": 8192,
+        "temperature": 0.6,
+        "max_tokens": 2048,
         "description": "Sexual preferences - orientation, interests, age preferences",
     },
     "meta_analysis": {
         "system_prompt": META_ANALYSIS_PROMPT,
-        "temperature": 0.7,
-        "max_tokens": 8192,
+        "temperature": 0.6,
+        "max_tokens": 2048,
         "description": "Meta-analysis coordinator - final suitability recommendation",
     },
 }

@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
+from rediska_core.config import get_settings
 from rediska_core.domain.models import (
     AgentPrompt,
     AnalysisDimension,
@@ -43,6 +44,7 @@ class MultiAgentAnalysisService:
         db: Session,
         inference_client: Any,  # InferenceClient
         prompt_service: AgentPromptService | None = None,
+        chat_template: str | None = None,
     ) -> None:
         """
         Initialize analysis service.
@@ -51,10 +53,14 @@ class MultiAgentAnalysisService:
             db: Database session
             inference_client: LLM inference client
             prompt_service: Agent prompt service (creates if None)
+            chat_template: Chat template override (default: from settings)
         """
         self.db = db
         self.inference_client = inference_client
         self.prompt_service = prompt_service or AgentPromptService(db)
+        # Get chat template from settings if not provided
+        settings = get_settings()
+        self.chat_template = chat_template or settings.inference_chat_template
 
     async def analyze_lead(
         self,
@@ -236,7 +242,10 @@ class MultiAgentAnalysisService:
         for dimension in dimensions:
             if dimension in agent_classes:
                 agent_class = agent_classes[dimension]
-                agent = agent_class(self.inference_client)
+                agent = agent_class(
+                    self.inference_client,
+                    chat_template=self.chat_template,
+                )
                 prompt = self.prompt_service.get_active_prompt(dimension)
 
                 task = agent.analyze(
@@ -287,7 +296,10 @@ class MultiAgentAnalysisService:
             MetaAnalysisAgent,
         )
 
-        agent = MetaAnalysisAgent(self.inference_client)
+        agent = MetaAnalysisAgent(
+            self.inference_client,
+            chat_template=self.chat_template,
+        )
         prompt = self.prompt_service.get_active_prompt(self.META_ANALYSIS_DIMENSION)
 
         result = await agent.analyze(

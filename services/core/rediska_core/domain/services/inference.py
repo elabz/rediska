@@ -18,11 +18,14 @@ Usage:
 """
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -69,13 +72,15 @@ class InferenceConfig:
         timeout: Request timeout in seconds
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature (0.0 = deterministic, 1.0 = creative)
+        api_key: Optional API key for authentication
     """
 
     base_url: str
     model_name: str = "default"
     timeout: float = 60.0
-    max_tokens: int = 8192  # Increased for reasoning models like qwq that use <think> tags
-    temperature: float = 0.7
+    max_tokens: int = 2048  # Default for standard models; increase for reasoning models with <think> tags
+    temperature: float = 0.6  # Lower temperature for more consistent JSON output
+    api_key: Optional[str] = None
 
 
 @dataclass
@@ -162,9 +167,13 @@ class InferenceClient:
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
         if self._http_client is None:
+            headers = {}
+            if self.config.api_key:
+                headers["Authorization"] = f"Bearer {self.config.api_key}"
             self._http_client = httpx.AsyncClient(
                 base_url=self.config.base_url,
                 timeout=self.config.timeout,
+                headers=headers,
             )
         return self._http_client
 
@@ -203,9 +212,6 @@ class InferenceClient:
         }
 
         # Log full prompts for debugging
-        import logging
-        import json as json_module
-        logger = logging.getLogger(__name__)
         logger.info(f"=== LLM REQUEST to {self.config.base_url} ===")
         logger.info(f"Model: {self.config.model_name}, temp: {temperature}, max_tokens: {max_tokens}")
         logger.info(f"Messages count: {len(messages)}")
@@ -309,10 +315,21 @@ class InferenceClient:
 
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
+        # Check for error response from LLM server
+        if "error" in response_data:
+            error_info = response_data["error"]
+            if isinstance(error_info, dict):
+                error_msg = error_info.get("message", str(error_info))
+            else:
+                error_msg = str(error_info)
+            logger.error(f"LLM server returned error: {error_msg}")
+            raise ResponseInferenceError(f"LLM server error: {error_msg}")
+
         # Parse response
         try:
             choices = response_data.get("choices", [])
             if not choices:
+                logger.error(f"Invalid LLM response - no choices. Response: {response_data}")
                 raise ResponseInferenceError("Invalid response: no choices")
 
             choice = choices[0]
@@ -380,10 +397,21 @@ class InferenceClient:
 
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
+        # Check for error response from LLM server
+        if "error" in response_data:
+            error_info = response_data["error"]
+            if isinstance(error_info, dict):
+                error_msg = error_info.get("message", str(error_info))
+            else:
+                error_msg = str(error_info)
+            logger.error(f"LLM server returned error: {error_msg}")
+            raise ResponseInferenceError(f"LLM server error: {error_msg}")
+
         # Parse response
         try:
             choices = response_data.get("choices", [])
             if not choices:
+                logger.error(f"Invalid LLM response - no choices. Response: {response_data}")
                 raise ResponseInferenceError("Invalid response: no choices")
 
             choice = choices[0]

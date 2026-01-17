@@ -27,14 +27,20 @@ except ImportError:
 class BaseAnalysisAgent(ABC):
     """Base class for all analysis agents."""
 
-    def __init__(self, inference_client: Any) -> None:
+    def __init__(
+        self,
+        inference_client: Any,
+        chat_template: str | None = None,
+    ) -> None:
         """
         Initialize agent.
 
         Args:
             inference_client: LLM inference client
+            chat_template: Chat template name for response parsing (llama3, qwen_thinking, etc.)
         """
         self.inference_client = inference_client
+        self.chat_template = chat_template
 
     @abstractmethod
     async def analyze(
@@ -75,6 +81,10 @@ class BaseAnalysisAgent(ABC):
         Returns:
             dict: Agent result
         """
+        # Inject chat_template from self if not set in config
+        if self.chat_template and not config.chat_template:
+            config.chat_template = self.chat_template
+
         harness = AgentHarness(
             config=config,
             inference_client=self.inference_client,

@@ -28,17 +28,24 @@ Usage:
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Type
 
 from pydantic import BaseModel, ValidationError
 
+from rediska_core.domain.services.chat_templates import (
+    BaseChatTemplate,
+    get_chat_template,
+)
 from rediska_core.domain.services.inference import (
     ChatMessage,
     ChatResponse,
     InferenceClient,
     ModelInfo,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -113,6 +120,7 @@ class AgentConfig:
         output_schema: Pydantic model for structured output validation
         temperature: Override inference temperature
         max_tokens: Override inference max_tokens
+        chat_template: Chat template name for response parsing (llama3, qwen_thinking, etc.)
     """
 
     name: str
@@ -122,6 +130,7 @@ class AgentConfig:
     output_schema: Optional[Type[BaseModel]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    chat_template: Optional[str] = None
 
 
 @dataclass
@@ -247,6 +256,8 @@ class AgentHarness:
         self.inference_client = inference_client
         self.tools = tools or []
         self.voice_config = voice_config
+        # Initialize chat template for response parsing
+        self._chat_template: BaseChatTemplate = get_chat_template(config.chat_template)
 
     def get_allowed_tools(self) -> list[AgentTool]:
         """Get tools filtered by allowlist.
@@ -323,6 +334,10 @@ class AgentHarness:
     def _extract_json_from_response(self, content: str) -> str:
         """Extract JSON from LLM response that may contain thinking tags.
 
+        DEPRECATED: This method is kept for backward compatibility.
+        Use self._chat_template.extract_json() instead, which handles
+        different model formats via configurable templates.
+
         Handles models like qwq that output <think>...</think> before JSON.
 
         Args:
@@ -332,9 +347,7 @@ class AgentHarness:
             Extracted JSON string
         """
         import re
-        import logging
 
-        logger = logging.getLogger(__name__)
         original_len = len(content)
 
         # Remove <think>...</think> blocks (including multiline)
@@ -380,16 +393,14 @@ class AgentHarness:
     def _parse_structured_output(self, content: str) -> tuple[bool, Optional[dict], Optional[str]]:
         """Parse and validate structured output.
 
+        Uses the configured chat template to extract JSON from the response.
+
         Args:
             content: Raw content string
 
         Returns:
             Tuple of (success, parsed_dict, error_message)
         """
-        import logging
-
-        logger = logging.getLogger(__name__)
-
         if not self.config.output_schema:
             return True, None, None
 
@@ -397,13 +408,13 @@ class AgentHarness:
         data = None
 
         try:
-            # Extract JSON from response (handles <think> tags)
-            json_str = self._extract_json_from_response(content)
+            # Extract JSON from response using the chat template
+            json_str = self._chat_template.extract_json(content)
 
             if not json_str:
                 logger.error(
-                    f"Empty JSON string extracted from content of length {len(content)}. "
-                    f"Content preview: {content[:1000]}..."
+                    f"[{self._chat_template.name}] Empty JSON string extracted from "
+                    f"content of length {len(content)}. Content preview: {content[:1000]}..."
                 )
                 return False, None, "No JSON content found in response"
 
@@ -416,7 +427,7 @@ class AgentHarness:
 
         except json.JSONDecodeError as e:
             logger.error(
-                f"JSON parse error: {e}. "
+                f"[{self._chat_template.name}] JSON parse error: {e}. "
                 f"Extracted string ({len(json_str)} chars): {json_str[:1000]}..."
             )
             # Log more context about where the error occurred
@@ -426,11 +437,11 @@ class AgentHarness:
                 logger.error(f"Context around error position {e.pos}: ...{json_str[start:end]}...")
             return False, None, f"Invalid JSON: {e}"
         except ValidationError as e:
-            logger.error(f"Pydantic validation error for data: {data}")
+            logger.error(f"[{self._chat_template.name}] Pydantic validation error for data: {data}")
             logger.error(f"Validation details: {e.errors()}")
             return False, None, f"Validation error: {e}"
         except Exception as e:
-            logger.exception(f"Unexpected error parsing structured output: {e}")
+            logger.exception(f"[{self._chat_template.name}] Unexpected error parsing structured output: {e}")
             return False, None, f"Parse error: {e}"
 
     async def run(self, user_input: str) -> AgentResult:

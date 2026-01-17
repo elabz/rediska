@@ -639,6 +639,7 @@ async def analyze_lead_multi(
             base_url=settings.inference_url,
             model_name=settings.inference_model or "default",
             timeout=settings.inference_timeout,
+            api_key=settings.inference_api_key,
         )
         inference_client = InferenceClient(config=inference_config)
 
