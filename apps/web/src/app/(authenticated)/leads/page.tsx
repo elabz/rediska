@@ -201,7 +201,14 @@ function LeadCard({
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <span className="font-semibold text-sm">u/{lead.author_username}</span>
+              <a
+                href={`https://www.reddit.com/user/${lead.author_username}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-semibold text-sm text-primary hover:underline"
+              >
+                u/{lead.author_username}
+              </a>
               {authorInfo?.is_verified && (
                 <Badge variant="secondary" className="text-xs h-4 px-1">Verified</Badge>
               )}
