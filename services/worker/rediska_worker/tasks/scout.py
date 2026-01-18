@@ -401,6 +401,19 @@ def run_single_watch(self, watch_id: int) -> dict:
                         f"Created lead {lead_id} from post {external_post_id}"
                     )
 
+                    # Queue profile analysis and multi-agent analysis for the new lead
+                    try:
+                        from rediska_worker.tasks.ingest import analyze_lead_profile
+                        analyze_task = analyze_lead_profile.delay(
+                            lead_id=lead_id,
+                            run_multi_agent=True,  # Also run multi-agent after profile fetch
+                        )
+                        logger.info(
+                            f"Queued profile analysis for lead {lead_id}: task_id={analyze_task.id}"
+                        )
+                    except Exception as task_err:
+                        logger.error(f"Failed to queue profile analysis for lead {lead_id}: {task_err}")
+
                 except Exception as e:
                     logger.error(f"Failed to create lead for {external_post_id}: {e}")
                     errors.append(f"Lead creation failed for {external_post_id}: {e}")

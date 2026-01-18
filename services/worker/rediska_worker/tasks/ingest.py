@@ -259,15 +259,156 @@ def fetch_post(provider_id: str, external_post_id: str) -> dict:
 @app.task(name="ingest.fetch_profile")
 def fetch_profile(provider_id: str, external_username: str) -> dict:
     """Fetch a user profile from a provider."""
-    # TODO: Implement
+    # TODO: Implement standalone profile fetch
     return {"status": "not_implemented", "provider_id": provider_id, "username": external_username}
 
 
 @app.task(name="ingest.fetch_profile_items")
 def fetch_profile_items(provider_id: str, external_username: str) -> dict:
     """Fetch profile items (posts, comments, images) for a user."""
-    # TODO: Implement
+    # TODO: Implement standalone profile items fetch
     return {"status": "not_implemented", "provider_id": provider_id, "username": external_username}
+
+
+@app.task(name="ingest.analyze_lead_profile", bind=True)
+def analyze_lead_profile(
+    self,
+    lead_id: int,
+    run_multi_agent: bool = False,
+) -> dict:
+    """Analyze a lead's author profile.
+
+    Fetches the author's profile and content from the provider,
+    stores profile data locally, indexes for search, and generates embeddings.
+    Optionally triggers multi-agent analysis after profile is ready.
+
+    Args:
+        lead_id: ID of the lead to analyze.
+        run_multi_agent: Whether to trigger multi-agent analysis after profile fetch.
+
+    Returns:
+        Dictionary with analysis results.
+    """
+    import logging
+    from rediska_core.infra.db import get_sync_session_factory
+    from rediska_core.domain.services.leads import LeadsService
+    from rediska_core.domain.services.analysis import AnalysisService, AnalysisError
+    from rediska_core.providers.reddit.client import RedditAdapter
+    from rediska_core.domain.services.indexing import IndexingService
+    from rediska_core.domain.services.embedding import EmbeddingService
+    from rediska_core.domain.models import Identity
+
+    logger = logging.getLogger(__name__)
+    logger.info(f"Analyzing profile for lead {lead_id}")
+
+    session_factory = get_sync_session_factory()
+    session = session_factory()
+
+    try:
+        # Get the lead
+        leads_service = LeadsService(db=session)
+        lead = leads_service.get_lead(lead_id)
+
+        if not lead:
+            return {
+                "status": "error",
+                "lead_id": lead_id,
+                "error": f"Lead {lead_id} not found",
+            }
+
+        if not lead.author_account_id:
+            return {
+                "status": "error",
+                "lead_id": lead_id,
+                "error": "Lead has no author - cannot analyze",
+            }
+
+        # Get provider adapter (currently only Reddit supported)
+        if lead.provider_id != "reddit":
+            return {
+                "status": "error",
+                "lead_id": lead_id,
+                "error": f"Provider '{lead.provider_id}' not supported",
+            }
+
+        # Get default identity for Reddit
+        identity = (
+            session.query(Identity)
+            .filter(Identity.provider_id == "reddit", Identity.is_default == True)
+            .first()
+        )
+
+        if not identity:
+            return {
+                "status": "error",
+                "lead_id": lead_id,
+                "error": "No default Reddit identity configured",
+            }
+
+        # Create services
+        provider_adapter = RedditAdapter(db=session, identity_id=identity.id)
+        indexing_service = IndexingService(db=session)
+        embedding_service = EmbeddingService(db=session)
+
+        analysis_service = AnalysisService(
+            db=session,
+            provider_adapter=provider_adapter,
+            indexing_service=indexing_service,
+            embedding_service=embedding_service,
+        )
+
+        # Run analysis
+        result = asyncio.run(analysis_service.analyze_lead(lead_id))
+
+        if not result.success:
+            logger.error(f"Profile analysis failed for lead {lead_id}: {result.error}")
+            return {
+                "status": "error",
+                "lead_id": lead_id,
+                "error": result.error,
+            }
+
+        logger.info(
+            f"Profile analysis complete for lead {lead_id}: "
+            f"snapshot_id={result.profile_snapshot_id}, items={result.profile_items_count}"
+        )
+
+        # Optionally trigger multi-agent analysis
+        multi_agent_task_id = None
+        if run_multi_agent:
+            from rediska_worker.tasks.multi_agent_analysis import analyze_lead as analyze_lead_multi
+            multi_agent_task = analyze_lead_multi.delay(lead_id)
+            multi_agent_task_id = multi_agent_task.id
+            logger.info(f"Queued multi-agent analysis for lead {lead_id}: task_id={multi_agent_task_id}")
+
+        session.commit()
+
+        return {
+            "status": "success",
+            "lead_id": lead_id,
+            "profile_snapshot_id": result.profile_snapshot_id,
+            "profile_items_count": result.profile_items_count,
+            "indexed_count": result.indexed_count,
+            "embedded_count": result.embedded_count,
+            "multi_agent_task_id": multi_agent_task_id,
+        }
+
+    except AnalysisError as e:
+        logger.error(f"Analysis error for lead {lead_id}: {e}")
+        return {
+            "status": "error",
+            "lead_id": lead_id,
+            "error": str(e),
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error analyzing lead {lead_id}")
+        return {
+            "status": "error",
+            "lead_id": lead_id,
+            "error": str(e),
+        }
+    finally:
+        session.close()
 
 
 @app.task(name="ingest.redownload_attachments", bind=True)
