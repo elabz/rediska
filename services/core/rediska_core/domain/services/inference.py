@@ -443,6 +443,45 @@ class InferenceClient:
 
 
 # =============================================================================
+# FACTORY FUNCTION
+# =============================================================================
+
+
+def get_inference_client() -> InferenceClient:
+    """Create a properly configured InferenceClient from settings.
+
+    This is the recommended way to get an InferenceClient instance.
+    It ensures all parts of the system use the same configuration
+    and API credentials.
+
+    Returns:
+        InferenceClient: Configured client ready for LLM requests.
+
+    Raises:
+        RuntimeError: If inference_url is not configured.
+
+    Example:
+        client = get_inference_client()
+        response = await client.chat(messages)
+    """
+    from rediska_core.config import get_settings
+
+    settings = get_settings()
+
+    if not settings.inference_url:
+        raise RuntimeError("INFERENCE_URL not configured")
+
+    config = InferenceConfig(
+        base_url=settings.inference_url,
+        model_name=settings.inference_model or "default",
+        timeout=settings.inference_timeout,
+        api_key=settings.inference_api_key,
+    )
+
+    return InferenceClient(config=config)
+
+
+# =============================================================================
 # EXPORTS
 # =============================================================================
 
@@ -457,4 +496,5 @@ __all__ = [
     "ConnectionInferenceError",
     "TimeoutInferenceError",
     "ResponseInferenceError",
+    "get_inference_client",
 ]

@@ -134,8 +134,7 @@ def analyze_lead_task(self, lead_id: int) -> dict:
         from rediska_core.domain.services.multi_agent_analysis import (
             MultiAgentAnalysisService,
         )
-        from rediska_core.domain.services.inference import InferenceClient
-        from rediska_core.config import get_settings
+        from rediska_core.domain.services.inference import get_inference_client
 
         # Verify lead exists
         lead = db.query(LeadPost).filter(LeadPost.id == lead_id).first()
@@ -145,13 +144,8 @@ def analyze_lead_task(self, lead_id: int) -> dict:
             logger.error(error_msg)
             return {"status": "error", "error": error_msg, "job_id": job.id}
 
-        # Get inference client
-        settings = get_settings()
-        inference_client = InferenceClient(
-            url=settings.inference_url,
-            model_name=settings.inference_model,
-            api_key=settings.inference_api_key,
-        )
+        # Get inference client using shared factory
+        inference_client = get_inference_client()
 
         # Create services
         prompt_service = AgentPromptService(db)

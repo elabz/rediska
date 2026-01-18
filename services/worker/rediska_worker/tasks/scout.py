@@ -193,8 +193,7 @@ def run_single_watch(self, watch_id: int) -> dict:
             ScoutWatchNotFoundError,
         )
         from rediska_core.domain.services.quick_analysis import QuickAnalysisService
-        from rediska_core.domain.services.inference import InferenceClient, InferenceConfig
-        from rediska_core.config import get_settings
+        from rediska_core.domain.services.inference import get_inference_client
 
         service = ScoutWatchService(db)
 
@@ -299,16 +298,11 @@ def run_single_watch(self, watch_id: int) -> dict:
 
         # Process posts
         if watch.auto_analyze:
-            # Set up analysis service
-            settings = get_settings()
-            inference_config = InferenceConfig(
-                base_url=settings.inference_url,
-                model_name=settings.inference_model or "default",
-                timeout=settings.inference_timeout,
-            )
-            inference_client = InferenceClient(config=inference_config)
+            # Set up analysis service using shared factory
+            inference_client = get_inference_client()
             analysis_service = QuickAnalysisService(
                 inference_client=inference_client,
+                db=db,  # Pass DB for prompt lookup
             )
         else:
             analysis_service = None

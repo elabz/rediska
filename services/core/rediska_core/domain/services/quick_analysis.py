@@ -5,7 +5,7 @@ agent without fetching full profile data. Used by Scout Watch for
 initial post screening.
 
 Usage:
-    service = QuickAnalysisService(inference_client=client)
+    service = QuickAnalysisService(inference_client=client, db=db)
 
     result = await service.analyze_post(
         title="Post title",
@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from rediska_core.domain.services.agent import AgentConfig, AgentHarness
 from rediska_core.domain.services.inference import InferenceClient
@@ -111,6 +112,9 @@ Be somewhat permissive in initial screening - it's better to include borderline 
 
 Respond in JSON format matching the output schema."""
 
+# Dimension name for DB-backed prompts
+SCOUT_QUICK_ANALYSIS_DIMENSION = "scout_quick_analysis"
+
 
 # =============================================================================
 # SERVICE
@@ -122,11 +126,16 @@ class QuickAnalysisService:
 
     Runs a fast single-agent analysis on post content without
     fetching full profile data.
+
+    Supports DB-backed prompts: if a db session is provided, it will look up
+    the active prompt for the "scout_quick_analysis" dimension. If no DB prompt
+    is found, it falls back to the default hardcoded prompt.
     """
 
     def __init__(
         self,
         inference_client: InferenceClient,
+        db: Optional[Session] = None,
         system_prompt: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
@@ -135,14 +144,64 @@ class QuickAnalysisService:
 
         Args:
             inference_client: Client for LLM inference.
-            system_prompt: Custom system prompt (optional).
-            temperature: LLM temperature setting.
-            max_tokens: Maximum tokens for response.
+            db: Database session for prompt lookup (optional).
+            system_prompt: Custom system prompt (optional, overrides DB lookup).
+            temperature: LLM temperature setting (overridden by DB prompt if found).
+            max_tokens: Maximum tokens for response (overridden by DB prompt if found).
         """
         self.inference_client = inference_client
-        self.system_prompt = system_prompt or QUICK_ANALYSIS_SYSTEM_PROMPT
-        self.temperature = temperature
-        self.max_tokens = max_tokens
+
+        # Try to load prompt from DB if session is provided
+        if db and not system_prompt:
+            self._load_prompt_from_db(db, temperature, max_tokens)
+        else:
+            self.system_prompt = system_prompt or QUICK_ANALYSIS_SYSTEM_PROMPT
+            self.temperature = temperature
+            self.max_tokens = max_tokens
+
+    def _load_prompt_from_db(
+        self,
+        db: Session,
+        default_temperature: float,
+        default_max_tokens: int,
+    ) -> None:
+        """Load prompt configuration from database.
+
+        Falls back to defaults if no active prompt is found.
+
+        Args:
+            db: Database session.
+            default_temperature: Default temperature to use if not in DB.
+            default_max_tokens: Default max_tokens to use if not in DB.
+        """
+        try:
+            from rediska_core.domain.services.agent_prompt import AgentPromptService
+
+            prompt_service = AgentPromptService(db)
+            prompt = prompt_service.get_active_prompt(SCOUT_QUICK_ANALYSIS_DIMENSION)
+
+            self.system_prompt = prompt.system_prompt
+            self.temperature = prompt.temperature
+            self.max_tokens = prompt.max_tokens
+            logger.info(
+                f"Loaded scout prompt from DB: dimension={SCOUT_QUICK_ANALYSIS_DIMENSION}, "
+                f"version={prompt.version}"
+            )
+        except ValueError:
+            # No active prompt found, use defaults
+            logger.debug(
+                f"No DB prompt found for {SCOUT_QUICK_ANALYSIS_DIMENSION}, using default"
+            )
+            self.system_prompt = QUICK_ANALYSIS_SYSTEM_PROMPT
+            self.temperature = default_temperature
+            self.max_tokens = default_max_tokens
+        except Exception as e:
+            logger.warning(
+                f"Error loading prompt from DB: {e}, using default"
+            )
+            self.system_prompt = QUICK_ANALYSIS_SYSTEM_PROMPT
+            self.temperature = default_temperature
+            self.max_tokens = default_max_tokens
 
     async def analyze_post(
         self,
@@ -257,4 +316,5 @@ __all__ = [
     "QuickAnalysisResult",
     "QuickAnalysisOutput",
     "QUICK_ANALYSIS_SYSTEM_PROMPT",
+    "SCOUT_QUICK_ANALYSIS_DIMENSION",
 ]

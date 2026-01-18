@@ -14,6 +14,7 @@ import {
   Sparkles,
   History,
   Settings,
+  Search,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -75,6 +76,12 @@ const AGENT_CONFIG: Record<string, {
     icon: <Sparkles className="h-5 w-5" />,
     color: 'text-emerald-500',
     bgColor: 'bg-emerald-500/10',
+  },
+  scout_quick_analysis: {
+    title: 'Scout Quick Analysis',
+    icon: <Search className="h-5 w-5" />,
+    color: 'text-cyan-500',
+    bgColor: 'bg-cyan-500/10',
   },
 };
 
