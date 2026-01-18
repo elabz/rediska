@@ -193,53 +193,60 @@ Output as JSON:
 # Meta-Analysis Coordinator Prompt
 # ============================================================================
 
-META_ANALYSIS_PROMPT = """You are a decision-making expert synthesizing multiple analysis dimensions to provide a final suitability recommendation for lead contact.
+META_ANALYSIS_PROMPT = """You are a decision-making expert synthesizing multiple analysis dimensions to provide a final suitability recommendation.
 
-You have received analysis results from 5 specialized dimensions:
+You will receive analysis results from 5 dimensions:
 1. Demographics (age, gender, location)
 2. Preferences & Interests (hobbies, values, lifestyle)
-3. Relationship Goals (relationship intent, partner criteria)
+3. Relationship Goals (intent, partner criteria)
 4. Risk Flags (safety concerns, red flags)
-5. Sexual Preferences (orientation, age preferences)
+5. Sexual Preferences (orientation, interests)
 
-Your task is to synthesize these results into a final recommendation: SUITABLE, NOT RECOMMENDED, or NEEDS_REVIEW.
+IMPORTANT CONTEXT:
+- This is for adult dating/relationship matching
+- Explicit sexual content and kinks are EXPECTED and should NOT cause a failure
+- The goal is to identify genuinely compatible people, not to filter out adult content
 
-Instructions for decision-making:
-1. SUITABLE: Low risk, compatible goals, clear alignment. Safe to contact.
-2. NOT_RECOMMENDED: Major red flags, incompatible goals, safety concerns. Should not contact.
-3. NEEDS_REVIEW: Unclear information, mixed signals, requires human judgment.
+YOUR TASK: Output a clear recommendation using EXACTLY these values:
+- "suitable" = PASS - Good match, safe to contact
+- "not_recommended" = FAIL - Red flags, incompatible, or unsafe
+- "needs_review" = UNCLEAR - Requires human judgment
 
-Weighting guidance:
-- Safety/Risk: 40% (critical - any critical risks should lead to NOT_RECOMMENDED)
-- Compatibility: 35% (relationship goals, preferences alignment)
-- Demographics: 15% (age, location, lifestyle fit)
-- Authenticity: 10% (profile authenticity confidence)
+DECISION RULES (in priority order):
+1. FAIL if: scam indicators, manipulation, dishonesty, or critical safety concerns
+2. FAIL if: clear incompatibility in relationship goals (e.g., they want casual, you want serious)
+3. FAIL if: age preferences don't match or suspicious age gaps
+4. PASS if: compatible goals, genuine profile, no major red flags
+5. NEEDS_REVIEW if: insufficient information or mixed signals
 
-Priority rules:
-1. If overall_risk_level is "critical": NOT_RECOMMENDED
-2. If authenticity_score < 0.3: NEEDS_REVIEW or NOT_RECOMMENDED
-3. If multiple major incompatibilities: NOT_RECOMMENDED
-4. If high compatibility + low risk: SUITABLE
-5. If unclear or mixed signals: NEEDS_REVIEW
+DO NOT fail based on:
+- Explicit sexual content or kinks (these are expected)
+- Adult themes or NSFW posts
+- Neutral authenticity scores (only fail if clearly fake)
 
-Output as JSON:
+You MUST output valid JSON with these EXACT field names:
+
 {
-  "recommendation": "suitable" | "not_recommended" | "needs_review",
-  "confidence": 0.0-1.0,
-  "reasoning": "Detailed explanation of the recommendation",
-  "strengths": ["positive_factor1", "positive_factor2"],
+  "recommendation": "suitable",
+  "confidence": 0.85,
+  "reasoning": "Clear explanation of why this recommendation was made",
+  "strengths": ["strength1", "strength2"],
   "concerns": ["concern1", "concern2"],
-  "compatibility_score": 0.0-1.0,
-  "priority_level": "high" | "medium" | "low",
-  "suggested_approach": "messaging strategy if contacting" or null,
+  "compatibility_score": 0.8,
+  "priority_level": "high",
+  "suggested_approach": "Suggested messaging approach or null",
   "dimension_summary": {
-    "demographics": "summary",
-    "preferences": "summary",
-    "relationship_goals": "summary",
-    "risk_flags": "summary",
-    "sexual_preferences": "summary"
+    "demographics": "Brief summary",
+    "preferences": "Brief summary",
+    "relationship_goals": "Brief summary",
+    "risk_flags": "Brief summary",
+    "sexual_preferences": "Brief summary"
   }
-}"""
+}
+
+CRITICAL: The "recommendation" field MUST be exactly one of: "suitable", "not_recommended", or "needs_review"
+CRITICAL: The "confidence" field MUST be a number between 0.0 and 1.0
+CRITICAL: Output ONLY the JSON object, no other text"""
 
 
 # ============================================================================
