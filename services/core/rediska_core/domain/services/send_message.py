@@ -309,19 +309,23 @@ class SendMessageService:
         """Mark a message as successfully sent.
 
         Updates the message visibility to 'visible' and records
-        the external message ID from the provider.
+        the external message ID from the provider (if available).
 
         Also marks the associated job as 'done'.
 
         Args:
             message_id: The local message ID.
-            external_message_id: The provider's message ID.
+            external_message_id: The provider's message ID (may be empty if provider
+                doesn't return it; sync will pick it up later).
         """
+        # Build update dict - only include external_message_id if we have one
+        # to avoid unique constraint violations with empty strings
+        update_values = {Message.remote_visibility: "visible"}
+        if external_message_id:
+            update_values[Message.external_message_id] = external_message_id
+
         self.db.query(Message).filter(Message.id == message_id).update(
-            {
-                Message.external_message_id: external_message_id,
-                Message.remote_visibility: "visible",
-            },
+            update_values,
             synchronize_session=False,
         )
 
