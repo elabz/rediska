@@ -296,69 +296,82 @@ def run_single_watch(self, watch_id: int) -> dict:
                 "run_id": run.id,
             }
 
-        # Process posts
-        if watch.auto_analyze:
-            # Set up analysis service using shared factory
-            inference_client = get_inference_client()
-            analysis_service = QuickAnalysisService(
-                inference_client=inference_client,
-                db=db,  # Pass DB for prompt lookup
-            )
-        else:
-            analysis_service = None
-
+        # Filter to new posts only
+        new_posts = []
         for post in posts:
             external_post_id = post.external_id
+            if not service.is_post_seen(watch_id, external_post_id):
+                new_posts.append(post)
+                posts_new += 1
 
-            # Check if post already seen
-            if service.is_post_seen(watch_id, external_post_id):
-                continue
+                # Record post with title and author for audit
+                service.record_post(
+                    watch_id=watch_id,
+                    run_id=run.id,
+                    external_post_id=external_post_id,
+                    post_title=post.title,
+                    post_author=post.author_username,
+                )
 
-            posts_new += 1
-
-            # Record post with title and author for audit
-            scout_post = service.record_post(
-                watch_id=watch_id,
-                run_id=run.id,
-                external_post_id=external_post_id,
-                post_title=post.title,
-                post_author=post.author_username,
-            )
-
-            # Analyze post if enabled
-            recommendation = None
-            confidence = None
-            reasoning = None
-
-            if analysis_service:
-                try:
-                    analysis_result = asyncio.run(
-                        analysis_service.analyze_post(
+        # Analyze all new posts in a single async context to avoid event loop issues
+        analysis_results = {}
+        if watch.auto_analyze and new_posts:
+            async def analyze_all_posts():
+                """Run all post analyses in a single event loop."""
+                inference_client = get_inference_client()
+                analysis_service = QuickAnalysisService(
+                    inference_client=inference_client,
+                    db=db,
+                )
+                results = {}
+                for post in new_posts:
+                    try:
+                        result = await analysis_service.analyze_post(
                             title=post.title or "",
                             body=post.body_text or "",
                             author_username=post.author_username or "",
                             source_location=watch.source_location,
                         )
-                    )
+                        results[post.external_id] = {
+                            "recommendation": result.recommendation,
+                            "confidence": result.confidence,
+                            "reasoning": result.reasoning,
+                            "success": True,
+                        }
+                    except Exception as e:
+                        logger.error(f"Failed to analyze post {post.external_id}: {e}")
+                        results[post.external_id] = {
+                            "recommendation": "needs_review",
+                            "confidence": 0.0,
+                            "reasoning": f"Analysis failed: {str(e)}",
+                            "success": False,
+                            "error": str(e),
+                        }
+                # Clean up the HTTP client
+                await inference_client.close()
+                return results
 
-                    posts_analyzed += 1
-                    recommendation = analysis_result.recommendation
-                    confidence = analysis_result.confidence
-                    reasoning = analysis_result.reasoning
+            try:
+                analysis_results = asyncio.run(analyze_all_posts())
+                posts_analyzed = sum(1 for r in analysis_results.values() if r.get("success", False))
+            except Exception as e:
+                logger.error(f"Batch analysis failed: {e}")
+                errors.append(f"Batch analysis failed: {e}")
 
-                    logger.debug(
-                        f"Post {external_post_id}: {recommendation} "
-                        f"(confidence: {confidence:.2f}) - {reasoning}"
-                    )
+        # Process results and create leads
+        for post in new_posts:
+            external_post_id = post.external_id
 
-                except Exception as e:
-                    logger.error(f"Failed to analyze post {external_post_id}: {e}")
-                    errors.append(f"Analysis failed for {external_post_id}: {e}")
-                    recommendation = "needs_review"
-                    confidence = 0.0
-                    reasoning = f"Analysis failed: {str(e)}"
+            # Get analysis result or use defaults
+            if external_post_id in analysis_results:
+                result = analysis_results[external_post_id]
+                recommendation = result["recommendation"]
+                confidence = result["confidence"]
+                reasoning = result["reasoning"]
+                if not result.get("success", True):
+                    errors.append(f"Analysis failed for {external_post_id}: {result.get('error', 'Unknown error')}")
             else:
-                # No analysis - mark as suitable by default
+                # No analysis result - either auto_analyze is disabled or batch failed
                 recommendation = "suitable"
                 confidence = 1.0
                 reasoning = "Auto-analyze disabled - passed by default"
