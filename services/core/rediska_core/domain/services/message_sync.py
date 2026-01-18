@@ -63,6 +63,9 @@ class MessageSyncService:
         # Reddit hosted images
         r'https?://i\.redd\.it/[^\s\)]+',
         r'https?://preview\.redd\.it/[^\s\)]+',
+        # Reddit Matrix media (new format used in private messages)
+        # e.g., https://matrix.redditspace.com/_matrix/media/v3/download/reddit.com/abc123
+        r'https?://matrix\.redditspace\.com/_matrix/media/[^\s\)]+',
         # Imgur
         r'https?://(?:i\.)?imgur\.com/[^\s\)]+\.(?:jpg|jpeg|png|gif|webp)',
         # Generic image URLs
