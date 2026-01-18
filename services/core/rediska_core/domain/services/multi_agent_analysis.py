@@ -6,8 +6,11 @@ into a final suitability recommendation.
 
 import asyncio
 import json
+import logging
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
@@ -61,6 +64,135 @@ class MultiAgentAnalysisService:
         # Get chat template from settings if not provided
         settings = get_settings()
         self.chat_template = chat_template or settings.inference_chat_template
+
+    def _normalize_meta_output(self, meta_output: dict[str, Any]) -> dict[str, Any]:
+        """Normalize meta-analysis output to expected schema fields.
+
+        Handles variations in LLM output field names and values:
+        - Maps suitability_recommendation → recommendation
+        - Maps PASS/FAIL → suitable/not_recommended
+        - Extracts confidence from various field names
+        - Normalizes reasoning to string format
+
+        Args:
+            meta_output: Raw parsed output from meta-analysis agent
+
+        Returns:
+            Normalized output with expected field names and values
+        """
+        normalized = dict(meta_output)
+
+        # Map recommendation field names
+        rec = None
+        for field in ["recommendation", "suitability_recommendation", "final_recommendation"]:
+            if field in meta_output and meta_output[field]:
+                rec = meta_output[field]
+                break
+
+        # Also check nested structures
+        if not rec and "suitability_recommendation" in meta_output:
+            nested = meta_output["suitability_recommendation"]
+            if isinstance(nested, dict):
+                rec = nested.get("overall_suitability") or nested.get("recommendation")
+                # If no explicit recommendation, infer from score
+                if not rec and "overall_suitability_score" in nested:
+                    score = nested.get("overall_suitability_score", 0.5)
+                    try:
+                        score = float(score)
+                        if score >= 0.7:
+                            rec = "PASS"
+                        elif score <= 0.3:
+                            rec = "FAIL"
+                        else:
+                            rec = "NEEDS_REVIEW"
+                    except (ValueError, TypeError):
+                        pass
+            else:
+                rec = nested
+        if not rec and "final_recommendation" in meta_output:
+            nested = meta_output["final_recommendation"]
+            if isinstance(nested, dict):
+                rec = nested.get("suitable_for_leads")
+                if rec is True:
+                    rec = "PASS"
+                elif rec is False:
+                    rec = "FAIL"
+            else:
+                rec = nested
+
+        # Normalize recommendation values
+        if rec:
+            rec_upper = str(rec).upper()
+            if rec_upper in ["PASS", "SUITABLE", "YES", "TRUE"]:
+                normalized["recommendation"] = "suitable"
+            elif rec_upper in ["FAIL", "NOT_RECOMMENDED", "NO", "FALSE"]:
+                normalized["recommendation"] = "not_recommended"
+            elif rec_upper in ["NEEDS_REVIEW", "REVIEW", "MAYBE", "UNCLEAR"]:
+                normalized["recommendation"] = "needs_review"
+            else:
+                normalized["recommendation"] = rec.lower() if isinstance(rec, str) else "needs_review"
+        else:
+            normalized["recommendation"] = meta_output.get("recommendation", "needs_review")
+
+        # Map confidence field names
+        conf = None
+        for field in ["confidence", "confidence_score", "overall_confidence", "overall_suitability_score"]:
+            if field in meta_output and meta_output[field] is not None:
+                conf = meta_output[field]
+                break
+
+        # Also check nested structures
+        if conf is None and "suitability_recommendation" in meta_output:
+            nested = meta_output["suitability_recommendation"]
+            if isinstance(nested, dict):
+                conf = (
+                    nested.get("confidence")
+                    or nested.get("overall_suitability_score")
+                    or nested.get("suitability_score")
+                )
+
+        if conf is not None:
+            try:
+                normalized["confidence"] = float(conf)
+            except (ValueError, TypeError):
+                normalized["confidence"] = 0.5
+        else:
+            # Default confidence based on recommendation
+            if normalized["recommendation"] == "suitable":
+                normalized["confidence"] = 0.7
+            elif normalized["recommendation"] == "not_recommended":
+                normalized["confidence"] = 0.7
+            else:
+                normalized["confidence"] = 0.5
+
+        # Normalize reasoning to string
+        reasoning = meta_output.get("reasoning")
+        if reasoning is None:
+            # Try to extract from nested structures
+            if "suitability_recommendation" in meta_output:
+                nested = meta_output["suitability_recommendation"]
+                if isinstance(nested, dict):
+                    reasoning = nested.get("reasoning") or nested.get("notes")
+            if not reasoning and "final_recommendation" in meta_output:
+                nested = meta_output["final_recommendation"]
+                if isinstance(nested, dict):
+                    reasoning = nested.get("notes") or nested.get("reasoning")
+
+        if isinstance(reasoning, list):
+            normalized["reasoning"] = " ".join(str(r) for r in reasoning)
+        elif isinstance(reasoning, dict):
+            normalized["reasoning"] = json.dumps(reasoning)
+        elif reasoning:
+            normalized["reasoning"] = str(reasoning)
+        else:
+            normalized["reasoning"] = ""
+
+        logger.info(
+            f"Normalized meta output: recommendation={normalized['recommendation']}, "
+            f"confidence={normalized['confidence']}"
+        )
+
+        return normalized
 
     async def analyze_lead(
         self,
@@ -165,9 +297,11 @@ class MultiAgentAnalysisService:
 
             meta_output = meta_result.get("parsed_output")
             if meta_result.get("success") and meta_output:
-                analysis.final_recommendation = meta_output.get("recommendation")
-                analysis.recommendation_reasoning = meta_output.get("reasoning")
-                analysis.confidence_score = meta_output.get("confidence")
+                # Normalize the output to handle different field names/values from LLM
+                normalized = self._normalize_meta_output(meta_output)
+                analysis.final_recommendation = normalized.get("recommendation")
+                analysis.recommendation_reasoning = normalized.get("reasoning")
+                analysis.confidence_score = normalized.get("confidence")
             else:
                 analysis.final_recommendation = "needs_review"
                 analysis.recommendation_reasoning = (

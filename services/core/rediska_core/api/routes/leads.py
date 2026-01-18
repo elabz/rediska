@@ -643,15 +643,19 @@ async def analyze_lead_multi(
         )
         inference_client = InferenceClient(config=inference_config)
 
-        # Run multi-agent analysis
-        prompt_service = AgentPromptService(db)
-        analysis_service = MultiAgentAnalysisService(
-            db=db,
-            inference_client=inference_client,
-            prompt_service=prompt_service,
-        )
+        try:
+            # Run multi-agent analysis
+            prompt_service = AgentPromptService(db)
+            analysis_service = MultiAgentAnalysisService(
+                db=db,
+                inference_client=inference_client,
+                prompt_service=prompt_service,
+            )
 
-        analysis = await analysis_service.analyze_lead(lead_id)
+            analysis = await analysis_service.analyze_lead(lead_id)
+        finally:
+            # Ensure HTTP client is properly closed
+            await inference_client.close()
 
         # Audit log
         audit_entry = AuditLog(
