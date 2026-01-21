@@ -232,6 +232,7 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
         author_info=author_info,
         status=lead.status,
         score=None,  # TODO: Add lead scoring
+        lead_source=lead.lead_source,
         post_created_at=lead.post_created_at,
         created_at=lead.created_at,
         # Analysis fields
@@ -308,7 +309,7 @@ async def save_lead(
     "",
     response_model=ListLeadsResponse,
     summary="List leads",
-    description="List saved leads with optional filters.",
+    description="List saved leads with optional filters and search.",
 )
 async def list_leads(
     current_user: CurrentUser,
@@ -318,22 +319,32 @@ async def list_leads(
     source_location: str | None = Query(default=None, description="Filter by source location"),
     status: str | None = Query(default=None, description="Filter by status"),
     lead_source: str | None = Query(default=None, description="Filter by lead source (manual, scout_watch)"),
+    search: str | None = Query(default=None, description="Search in title, body, author, subreddit"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     limit: int = Query(default=20, ge=1, le=100, description="Maximum results"),
 ):
-    """List leads with optional filters."""
+    """List leads with optional filters and search."""
     leads = leads_service.list_leads(
         provider_id=provider_id,
         source_location=source_location,
         status=status,
         lead_source=lead_source,
+        search=search,
         offset=offset,
         limit=limit,
     )
 
+    total = leads_service.count_leads(
+        provider_id=provider_id,
+        source_location=source_location,
+        status=status,
+        lead_source=lead_source,
+        search=search,
+    )
+
     return ListLeadsResponse(
         leads=[build_lead_response(lead, db) for lead in leads],
-        total=len(leads),  # TODO: Add proper count query for pagination
+        total=total,
     )
 
 
@@ -573,6 +584,10 @@ async def analyze_lead(
 async def analyze_lead_multi(
     lead_id: int,
     current_user: CurrentUser,
+    regenerate_summaries: bool = Query(
+        default=False,
+        description="If true, regenerate user interest and character summaries even if they exist"
+    ),
     db: Session = Depends(get_db),
 ) -> MultiAgentAnalysisResponse:
     """
@@ -584,15 +599,17 @@ async def analyze_lead_multi(
     This endpoint:
     1. Validates the lead exists
     2. Ensures profile data has been analyzed
-    3. Runs dimension agents (demographics, preferences, relationship goals, risk flags, sexual preferences)
-    4. Runs meta-analysis coordinator
-    5. Returns comprehensive analysis with suitability recommendation
+    3. Generates or reuses user summaries (based on regenerate_summaries flag)
+    4. Runs dimension agents (demographics, preferences, relationship goals, risk flags, sexual preferences)
+    5. Runs meta-analysis coordinator
+    6. Returns comprehensive analysis with suitability recommendation
 
     Manual trigger only (no autosend).
 
     Args:
         lead_id: ID of lead to analyze
         current_user: Current authenticated user
+        regenerate_summaries: If true, regenerate summaries even if they exist
         db: Database session
 
     Returns:
@@ -652,7 +669,10 @@ async def analyze_lead_multi(
                 prompt_service=prompt_service,
             )
 
-            analysis = await analysis_service.analyze_lead(lead_id)
+            analysis = await analysis_service.analyze_lead(
+                lead_id,
+                regenerate_summaries=regenerate_summaries,
+            )
         finally:
             # Ensure HTTP client is properly closed
             await inference_client.close()
@@ -666,7 +686,7 @@ async def analyze_lead_multi(
             provider_id=lead.provider_id,
             entity_type="lead_post",
             entity_id=lead_id,
-            request_json={"lead_id": lead_id},
+            request_json={"lead_id": lead_id, "regenerate_summaries": regenerate_summaries},
             response_json={
                 "analysis_id": analysis.id,
                 "recommendation": analysis.final_recommendation,

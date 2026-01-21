@@ -23,10 +23,13 @@ import {
   MessageCircle,
   Brain,
   Eye,
+  Search,
+  X,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import {
   Select,
   SelectContent,
@@ -287,11 +290,15 @@ function LeadCard({
                 Manual
               </Badge>
             )}
-            {lead.post_created_at && (
-              <>
-                <span>•</span>
-                <span>{formatDate(lead.post_created_at)}</span>
-              </>
+            <span>•</span>
+            {lead.post_created_at ? (
+              <span title={`Posted: ${new Date(lead.post_created_at).toLocaleString()}`}>
+                Posted {formatDate(lead.post_created_at)}
+              </span>
+            ) : (
+              <span className="text-muted-foreground/70" title={`Saved: ${new Date(lead.created_at).toLocaleString()}`}>
+                Saved {formatDate(lead.created_at)}
+              </span>
             )}
           </div>
         </div>
@@ -436,6 +443,8 @@ export default function LeadsPage() {
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchInput, setSearchInput] = useState('');
   const [updatingLeads, setUpdatingLeads] = useState<Set<number>>(new Set());
   const [analyzingLeads, setAnalyzingLeads] = useState<Set<number>>(new Set());
   const [contactingLeads, setContactingLeads] = useState<Set<number>>(new Set());
@@ -454,6 +463,7 @@ export default function LeadsPage() {
       });
       if (statusFilter && statusFilter !== 'all') params.set('status', statusFilter);
       if (sourceFilter && sourceFilter !== 'all') params.set('lead_source', sourceFilter);
+      if (searchQuery) params.set('search', searchQuery);
 
       const response = await fetch(`/api/core/leads?${params.toString()}`, {
         credentials: 'include',
@@ -473,11 +483,29 @@ export default function LeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, sourceFilter]);
+  }, [statusFilter, sourceFilter, searchQuery]);
 
   useEffect(() => {
     fetchLeads();
   }, [fetchLeads]);
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (searchInput !== searchQuery) {
+        setSearchQuery(searchInput);
+        setOffset(0); // Reset to first page on new search
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchInput, searchQuery]);
+
+  const handleSearchClear = useCallback(() => {
+    setSearchInput('');
+    setSearchQuery('');
+    setOffset(0);
+  }, []);
 
   const updateLeadStatus = useCallback(async (leadId: number, status: string) => {
     setUpdatingLeads(prev => {
@@ -626,8 +654,34 @@ export default function LeadsPage() {
         </Button>
       </div>
 
-      {/* Filters */}
+      {/* Search and Filters */}
       <Card className="p-4">
+        {/* Search Input */}
+        <div className="mb-4">
+          <label className="text-xs text-muted-foreground mb-1 block">Search</label>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              type="text"
+              placeholder="Search by title, author, subreddit, or content..."
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="pl-9 pr-9 h-9"
+            />
+            {searchInput && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleSearchClear}
+                className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Filters */}
         <div className="flex items-center gap-2 mb-3">
           <Filter className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-medium">Filters</span>
@@ -696,9 +750,12 @@ export default function LeadsPage() {
         <EmptyState
           icon="🎯"
           title="No leads found"
-          description={statusFilter && statusFilter !== 'all'
-            ? `No leads with status "${statusFilter}". Try a different filter or browse for new leads.`
-            : "You haven't saved any leads yet. Browse subreddits to find and save potential leads."
+          description={
+            searchQuery
+              ? `No leads matching "${searchQuery}". Try a different search term.`
+              : statusFilter && statusFilter !== 'all'
+              ? `No leads with status "${statusFilter}". Try a different filter or browse for new leads.`
+              : "You haven't saved any leads yet. Browse subreddits to find and save potential leads."
           }
         />
       ) : (

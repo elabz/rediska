@@ -235,28 +235,28 @@ class LeadsService:
     # LIST LEADS
     # =========================================================================
 
-    def list_leads(
+    def _build_leads_query(
         self,
         provider_id: Optional[str] = None,
         source_location: Optional[str] = None,
         status: Optional[str] = None,
         lead_source: Optional[str] = None,
-        offset: int = 0,
-        limit: int = 20,
-    ) -> list[LeadPost]:
-        """List leads with optional filters.
+        search: Optional[str] = None,
+    ):
+        """Build a query for leads with filters.
 
         Args:
             provider_id: Filter by provider (optional).
             source_location: Filter by source location (optional).
             status: Filter by status (optional).
             lead_source: Filter by lead source ('manual', 'scout_watch') (optional).
-            offset: Pagination offset.
-            limit: Maximum results.
+            search: Search term for title, body, source_location (optional).
 
         Returns:
-            List of LeadPost objects.
+            SQLAlchemy query object.
         """
+        from sqlalchemy import or_
+
         query = self.db.query(LeadPost)
 
         if provider_id:
@@ -271,10 +271,90 @@ class LeadsService:
         if lead_source:
             query = query.filter(LeadPost.lead_source == lead_source)
 
+        if search:
+            search_term = f"%{search}%"
+            # Join with ExternalAccount to search by author username
+            query = query.outerjoin(
+                ExternalAccount,
+                LeadPost.author_account_id == ExternalAccount.id,
+            )
+            query = query.filter(
+                or_(
+                    LeadPost.title.ilike(search_term),
+                    LeadPost.body_text.ilike(search_term),
+                    LeadPost.source_location.ilike(search_term),
+                    ExternalAccount.external_username.ilike(search_term),
+                )
+            )
+
+        return query
+
+    def list_leads(
+        self,
+        provider_id: Optional[str] = None,
+        source_location: Optional[str] = None,
+        status: Optional[str] = None,
+        lead_source: Optional[str] = None,
+        search: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> list[LeadPost]:
+        """List leads with optional filters.
+
+        Args:
+            provider_id: Filter by provider (optional).
+            source_location: Filter by source location (optional).
+            status: Filter by status (optional).
+            lead_source: Filter by lead source ('manual', 'scout_watch') (optional).
+            search: Search term for title, body, author, source_location (optional).
+            offset: Pagination offset.
+            limit: Maximum results.
+
+        Returns:
+            List of LeadPost objects.
+        """
+        query = self._build_leads_query(
+            provider_id=provider_id,
+            source_location=source_location,
+            status=status,
+            lead_source=lead_source,
+            search=search,
+        )
+
         # Order by created_at descending (newest first)
         query = query.order_by(LeadPost.created_at.desc())
 
         return query.offset(offset).limit(limit).all()
+
+    def count_leads(
+        self,
+        provider_id: Optional[str] = None,
+        source_location: Optional[str] = None,
+        status: Optional[str] = None,
+        lead_source: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> int:
+        """Count leads with optional filters.
+
+        Args:
+            provider_id: Filter by provider (optional).
+            source_location: Filter by source location (optional).
+            status: Filter by status (optional).
+            lead_source: Filter by lead source ('manual', 'scout_watch') (optional).
+            search: Search term for title, body, author, source_location (optional).
+
+        Returns:
+            Total count of matching leads.
+        """
+        query = self._build_leads_query(
+            provider_id=provider_id,
+            source_location=source_location,
+            status=status,
+            lead_source=lead_source,
+            search=search,
+        )
+
+        return query.count()
 
     # =========================================================================
     # UPDATE STATUS
