@@ -18,7 +18,18 @@ export async function POST(
   }
 
   const { leadId } = await params;
-  const url = `${CORE_API_URL}/leads/${leadId}/analyze-multi`;
+
+  // Parse request body for options
+  let regenerateSummaries = false;
+  try {
+    const body = await request.json();
+    regenerateSummaries = body.regenerate_summaries ?? false;
+  } catch {
+    // Empty body is OK, use defaults
+  }
+
+  // Build URL with query parameter
+  const url = `${CORE_API_URL}/leads/${leadId}/analyze-multi?regenerate_summaries=${regenerateSummaries}`;
 
   try {
     // Long timeout for multi-agent analysis (10 minutes)

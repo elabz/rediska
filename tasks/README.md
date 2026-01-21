@@ -38,6 +38,11 @@ This folder contains discrete task files for implementing remaining features.
 |------|-------|----------|--------|
 | 009 | [Identity-Aware UI Features](./009-identity-aware-ui-features.md) | LOW | **Complete** |
 
+### Scout Watch & Analysis
+| Task | Title | Priority | Status |
+|------|-------|----------|--------|
+| 010 | [Scout Watch Integrated Analysis Pipeline](./010-scout-watch-integrated-analysis-pipeline.md) | HIGH | Pending |
+
 ## Recommended Implementation Order
 
 ### Phase 1: Prerequisites & Bug Fixes
@@ -54,6 +59,16 @@ This folder contains discrete task files for implementing remaining features.
 ### Phase 3: Operations & Enhancements
 8. **005** - Enhanced Ops page
 9. **009** - Identity-aware UI features
+
+### Phase 4: Scout Watch Integration
+10. **010** - Scout Watch Integrated Analysis Pipeline (requires multi-agent analysis)
+
+## Design Documents
+
+| Document | Description |
+|----------|-------------|
+| [SCOUT_WATCH_DESIGN.md](./SCOUT_WATCH_DESIGN.md) | Scout Watch system architecture and auto-analyze pipeline |
+| [MULTI_AGENT_ANALYSIS_IMPLEMENTATION.md](./MULTI_AGENT_ANALYSIS_IMPLEMENTATION.md) | 6-agent multi-dimensional lead analysis system |
 
 ## Implementation Notes
 

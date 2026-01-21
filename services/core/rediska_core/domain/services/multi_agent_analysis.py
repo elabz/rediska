@@ -198,6 +198,7 @@ class MultiAgentAnalysisService:
         self,
         lead_id: int,
         include_dimensions: list[str] | None = None,
+        regenerate_summaries: bool = False,
     ) -> LeadAnalysis:
         """
         Run full multi-agent analysis on a lead.
@@ -205,14 +206,17 @@ class MultiAgentAnalysisService:
         Orchestrates the analysis pipeline:
         1. Create analysis record
         2. Fetch lead data and profile snapshot
-        3. Run dimension agents in parallel
-        4. Run meta-analysis coordinator
-        5. Update analysis record with results
-        6. Update lead_posts.latest_analysis_id
+        3. Generate or reuse user summaries
+        4. Run dimension agents in parallel
+        5. Run meta-analysis coordinator
+        6. Update analysis record with results
+        7. Update lead_posts.latest_analysis_id
 
         Args:
             lead_id: ID of lead to analyze
             include_dimensions: Specific dimensions to analyze (defaults to all)
+            regenerate_summaries: If True, regenerate user interest/character summaries
+                                  even if they already exist on the lead. Default False.
 
         Returns:
             LeadAnalysis: Completed analysis with results
@@ -245,6 +249,51 @@ class MultiAgentAnalysisService:
             ProfileItem.account_id == lead.author_account_id
         ).all()
 
+        # Generate or reuse user summaries
+        user_interests_summary = lead.user_interests_summary or ""
+        user_character_summary = lead.user_character_summary or ""
+
+        if regenerate_summaries or (not user_interests_summary and not user_character_summary):
+            # Generate new summaries from profile items
+            try:
+                from rediska_core.domain.services.interests_summary import InterestsSummaryService
+                from rediska_core.domain.services.character_summary import CharacterSummaryService
+
+                # Generate interests summary from posts
+                posts = [item for item in profile_items if item.item_type == "post"]
+                if posts:
+                    interests_service = InterestsSummaryService(
+                        inference_client=self.inference_client,
+                        db=self.db,
+                    )
+                    interests_result = await interests_service.summarize(posts)
+                    if interests_result.success:
+                        user_interests_summary = interests_result.summary
+                        logger.info(f"Generated interests summary for lead {lead_id}")
+
+                # Generate character summary from comments
+                comments = [item for item in profile_items if item.item_type == "comment"]
+                if comments:
+                    character_service = CharacterSummaryService(
+                        inference_client=self.inference_client,
+                        db=self.db,
+                    )
+                    character_result = await character_service.summarize(comments)
+                    if character_result.success:
+                        user_character_summary = character_result.summary
+                        logger.info(f"Generated character summary for lead {lead_id}")
+
+                # Update lead with new summaries
+                if user_interests_summary:
+                    lead.user_interests_summary = user_interests_summary
+                if user_character_summary:
+                    lead.user_character_summary = user_character_summary
+                self.db.flush()
+
+            except Exception as e:
+                logger.warning(f"Failed to generate summaries for lead {lead_id}: {e}")
+                # Continue without summaries - they're helpful but not required
+
         # Create analysis record
         analysis = LeadAnalysis(
             lead_id=lead_id,
@@ -259,7 +308,9 @@ class MultiAgentAnalysisService:
         try:
             # Build input context
             input_context = self._build_input_context(
-                lead, profile_snapshot, profile_items
+                lead, profile_snapshot, profile_items,
+                user_interests_summary=user_interests_summary,
+                user_character_summary=user_character_summary,
             )
 
             # Determine which dimensions to analyze
@@ -451,17 +502,21 @@ class MultiAgentAnalysisService:
         lead: LeadPost,
         profile_snapshot: ProfileSnapshot,
         profile_items: list[ProfileItem],
+        user_interests_summary: str = "",
+        user_character_summary: str = "",
     ) -> dict[str, Any]:
         """
         Build unified input context for all agents.
 
-        Combines lead data, profile snapshot, and profile items into
-        a single context dictionary for agent analysis.
+        Combines lead data, profile snapshot, profile items, and summaries
+        into a single context dictionary for agent analysis.
 
         Args:
             lead: Lead post data
             profile_snapshot: Profile snapshot with summary
             profile_items: List of profile items (posts, comments, images)
+            user_interests_summary: Summary of user interests from posts
+            user_character_summary: Summary of user character from comments
 
         Returns:
             dict: Unified input context
@@ -508,6 +563,10 @@ class MultiAgentAnalysisService:
                     ]
                 ),
                 "summary": profile_snapshot.summary_text or "",
+            },
+            "summaries": {
+                "user_interests": user_interests_summary,
+                "user_character": user_character_summary,
             },
             "items_by_type": items_by_type,
         }

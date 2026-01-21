@@ -7,6 +7,18 @@ import {
   Eye,
   Plus,
   RefreshCw,
+  HelpCircle,
+  ChevronDown,
+  ChevronUp,
+  Search,
+  FileText,
+  Brain,
+  Users,
+  Heart,
+  AlertTriangle,
+  Sparkles,
+  CheckCircle2,
+  ArrowRight,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -45,6 +57,7 @@ export default function ScoutWatchesSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [editingWatch, setEditingWatch] = useState<ScoutWatch | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
 
   const fetchWatches = useCallback(async () => {
     setLoading(true);
@@ -137,19 +150,146 @@ export default function ScoutWatchesSettingsPage() {
         </div>
       </div>
 
-      {/* Description Card */}
+      {/* How It Works - Collapsible Help Section */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">About Scout Watches</CardTitle>
+          <button
+            onClick={() => setShowHelp(!showHelp)}
+            className="flex items-center justify-between w-full text-left"
+          >
+            <div className="flex items-center gap-2">
+              <HelpCircle className="h-5 w-5 text-blue-500" />
+              <CardTitle className="text-base">How Scout Watch Works</CardTitle>
+            </div>
+            {showHelp ? (
+              <ChevronUp className="h-4 w-4 text-muted-foreground" />
+            ) : (
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            )}
+          </button>
         </CardHeader>
-        <CardContent>
-          <CardDescription className="text-sm">
-            Scout watches automatically monitor subreddits for new posts matching your criteria.
-            Every 5 minutes, new posts are fetched, analyzed using the Meta-Analysis agent,
-            and matching posts are automatically added to your Leads. Configure search queries,
-            sort order, and confidence thresholds for each watch.
-          </CardDescription>
-        </CardContent>
+        {showHelp && (
+          <CardContent className="pt-0 space-y-6">
+            {/* Overview */}
+            <div className="text-sm text-muted-foreground">
+              Scout Watch automatically monitors subreddits for potential leads using AI-powered
+              multi-agent analysis. When a post meets your criteria, it becomes a Lead with a
+              full analysis already completed.
+            </div>
+
+            {/* Pipeline Steps */}
+            <div className="space-y-4">
+              <h4 className="font-medium text-sm">Analysis Pipeline</h4>
+
+              {/* Step 1 */}
+              <div className="flex items-start gap-3 pl-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-500/10">
+                  <Search className="h-4 w-4 text-blue-500" />
+                </div>
+                <div>
+                  <p className="font-medium text-sm">1. Monitor Subreddit</p>
+                  <p className="text-sm text-muted-foreground">
+                    Every 5 minutes, Scout fetches new posts from configured subreddits.
+                    Posts with empty bodies (hidden by users) are automatically skipped.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 2 */}
+              <div className="flex items-start gap-3 pl-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-purple-500/10">
+                  <FileText className="h-4 w-4 text-purple-500" />
+                </div>
+                <div>
+                  <p className="font-medium text-sm">2. Generate User Summaries</p>
+                  <p className="text-sm text-muted-foreground">
+                    For each post author, Scout fetches their recent posts and comments, then generates
+                    two AI summaries: <strong>Interests Summary</strong> (hobbies, lifestyle, values) and{' '}
+                    <strong>Character Summary</strong> (personality, communication style). These are
+                    cached for reuse in future analyses.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 3 */}
+              <div className="flex items-start gap-3 pl-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-500/10">
+                  <Brain className="h-4 w-4 text-amber-500" />
+                </div>
+                <div>
+                  <p className="font-medium text-sm">3. Multi-Agent Analysis</p>
+                  <p className="text-sm text-muted-foreground">
+                    Six specialized AI agents analyze the post and user profile in parallel:
+                  </p>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                    <div className="flex items-center gap-1.5">
+                      <Users className="h-3 w-3 text-muted-foreground" />
+                      <span>Demographics</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Sparkles className="h-3 w-3 text-muted-foreground" />
+                      <span>Preferences</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Heart className="h-3 w-3 text-muted-foreground" />
+                      <span>Relationship Goals</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <AlertTriangle className="h-3 w-3 text-muted-foreground" />
+                      <span>Risk Flags</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 col-span-2">
+                      <span className="text-muted-foreground">+ Sexual Preferences</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 4 */}
+              <div className="flex items-start gap-3 pl-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                </div>
+                <div>
+                  <p className="font-medium text-sm">4. Meta-Analysis Decision</p>
+                  <p className="text-sm text-muted-foreground">
+                    A coordinator agent synthesizes all dimension results into a final recommendation:
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium"> Suitable</span>,
+                    <span className="text-amber-600 dark:text-amber-400 font-medium"> Needs Review</span>, or
+                    <span className="text-red-600 dark:text-red-400 font-medium"> Not Recommended</span>.
+                    Posts meeting your configured confidence threshold become Leads.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 5 */}
+              <div className="flex items-start gap-3 pl-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-green-500/10">
+                  <ArrowRight className="h-4 w-4 text-green-500" />
+                </div>
+                <div>
+                  <p className="font-medium text-sm">5. Lead Creation</p>
+                  <p className="text-sm text-muted-foreground">
+                    Matching posts are saved as Leads with the full analysis already attached.
+                    Visit the Leads page to review recommendations, read the reasoning, and
+                    initiate contact when ready. You can also re-run analysis with updated prompts.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Configuration Tips */}
+            <div className="rounded-lg bg-muted/50 p-4 space-y-2">
+              <h4 className="font-medium text-sm">Configuration Tips</h4>
+              <ul className="text-sm text-muted-foreground space-y-1 list-disc list-inside">
+                <li><strong>Search Query:</strong> Use Reddit search syntax (AND, OR, NOT) to filter posts</li>
+                <li><strong>Min Confidence:</strong> Higher values (0.7+) = fewer but better-matched leads</li>
+                <li><strong>Identity:</strong> Link to a persona for context-aware analysis</li>
+                <li><strong>Auto-Analyze:</strong> Enable to process posts immediately as they&apos;re found</li>
+              </ul>
+            </div>
+          </CardContent>
+        )}
       </Card>
 
       {/* Watch List or Editor */}

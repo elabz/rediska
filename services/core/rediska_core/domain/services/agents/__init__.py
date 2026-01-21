@@ -151,28 +151,34 @@ Provide your analysis in valid JSON format."""
 
     async def _store_dimension_result(
         self,
-        analysis_id: int,
+        analysis_id: int | None,
         dimension: str,
         prompt_version: int,
         input_data: dict[str, Any],
         output_data: dict[str, Any] | None,
         status: str,
         error: str | None,
-        db: Session,
+        db: Session | None,
     ) -> None:
         """
         Store dimension analysis result in database.
 
         Args:
-            analysis_id: Parent analysis ID
+            analysis_id: Parent analysis ID (if None, skips DB storage)
             dimension: Dimension name
             prompt_version: Prompt version used
             input_data: Input data used
             output_data: Output data from agent
             status: Analysis status
             error: Error message if failed
-            db: Database session
+            db: Database session (if None, skips DB storage)
         """
+        # Skip DB storage if no analysis_id or db session
+        # This allows scout pipeline to run agents without persisting dimension records
+        if analysis_id is None or db is None:
+            logger.debug(f"Skipping dimension storage for {dimension} (no analysis_id)")
+            return
+
         dim_record = AnalysisDimension(
             analysis_id=analysis_id,
             dimension=dimension,

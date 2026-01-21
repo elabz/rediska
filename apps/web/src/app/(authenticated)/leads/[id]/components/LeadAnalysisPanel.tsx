@@ -13,6 +13,8 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 
 import { DimensionCard } from './DimensionCard';
@@ -94,6 +96,7 @@ export function LeadAnalysisPanel({
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [regenerateSummaries, setRegenerateSummaries] = useState(false);
 
   const fetchAnalysis = useCallback(async () => {
     if (!hasAnalysis) return;
@@ -145,6 +148,10 @@ export function LeadAnalysisPanel({
       const response = await fetch(`/api/core/leads/${leadId}/analyze-multi`, {
         method: 'POST',
         credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ regenerate_summaries: regenerateSummaries }),
       });
 
       if (!response.ok) {
@@ -189,6 +196,19 @@ export function LeadAnalysisPanel({
         <p className="text-sm text-muted-foreground mb-4">
           Run multi-agent analysis to get AI-powered insights about this lead.
         </p>
+        <div className="flex items-center space-x-2 mb-4">
+          <Checkbox
+            id="regenerate-summaries-initial"
+            checked={regenerateSummaries}
+            onCheckedChange={(checked) => setRegenerateSummaries(checked === true)}
+          />
+          <Label
+            htmlFor="regenerate-summaries-initial"
+            className="text-sm text-muted-foreground cursor-pointer"
+          >
+            Regenerate user summaries
+          </Label>
+        </div>
         <Button onClick={runAnalysis} disabled={analyzing}>
           {analyzing ? (
             <>
@@ -265,7 +285,7 @@ export function LeadAnalysisPanel({
   return (
     <div className="space-y-6">
       {/* Status Bar */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           {recommendation && (
             <div className={cn(
@@ -284,21 +304,36 @@ export function LeadAnalysisPanel({
             </Badge>
           )}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={runAnalysis}
-          disabled={analyzing}
-        >
-          {analyzing ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <>
-              <RefreshCw className="h-4 w-4 mr-1" />
-              Re-analyze
-            </>
-          )}
-        </Button>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center space-x-2">
+            <Checkbox
+              id="regenerate-summaries-rerun"
+              checked={regenerateSummaries}
+              onCheckedChange={(checked) => setRegenerateSummaries(checked === true)}
+            />
+            <Label
+              htmlFor="regenerate-summaries-rerun"
+              className="text-xs text-muted-foreground cursor-pointer"
+            >
+              Regenerate summaries
+            </Label>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={runAnalysis}
+            disabled={analyzing}
+          >
+            {analyzing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <>
+                <RefreshCw className="h-4 w-4 mr-1" />
+                Re-analyze
+              </>
+            )}
+          </Button>
+        </div>
       </div>
 
       {error && (

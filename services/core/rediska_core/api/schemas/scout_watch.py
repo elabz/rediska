@@ -114,11 +114,21 @@ class ScoutWatchPostResponse(BaseModel):
     post_author: Optional[str] = None
     first_seen_at: datetime
     run_id: Optional[int]
+
+    # Profile data (from analysis pipeline)
+    profile_fetched_at: Optional[datetime] = None
+    user_interests: Optional[str] = None
+    user_character: Optional[str] = None
+
+    # Analysis result
     analysis_status: str
-    analysis_recommendation: Optional[str]
-    analysis_confidence: Optional[float]
+    analysis_id: Optional[int] = None
+    analysis_recommendation: Optional[str] = None
+    analysis_confidence: Optional[float] = None
     analysis_reasoning: Optional[str] = None
-    lead_id: Optional[int]
+
+    # Lead creation
+    lead_id: Optional[int] = None
 
     class Config:
         from_attributes = True

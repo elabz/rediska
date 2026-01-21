@@ -544,12 +544,16 @@ class ScoutWatchService:
         self,
         watch: ScoutWatch,
         post_data: dict[str, Any],
+        user_interests_summary: Optional[str] = None,
+        user_character_summary: Optional[str] = None,
     ) -> LeadPost:
         """Save a post as a lead from a scout watch.
 
         Args:
             watch: The scout watch.
             post_data: Normalized post data.
+            user_interests_summary: Summary of user interests from their posts.
+            user_character_summary: Summary of user character from their comments.
 
         Returns:
             The created LeadPost.
@@ -565,6 +569,12 @@ class ScoutWatchService:
         )
 
         if existing:
+            # Update summaries if they're provided and not already set
+            if user_interests_summary and not existing.user_interests_summary:
+                existing.user_interests_summary = user_interests_summary
+            if user_character_summary and not existing.user_character_summary:
+                existing.user_character_summary = user_character_summary
+            self.db.flush()
             return existing
 
         # Parse post_created_at if it's a string
@@ -585,6 +595,8 @@ class ScoutWatchService:
             remote_visibility="unknown",
             lead_source="scout_watch",
             scout_watch_id=watch.id,
+            user_interests_summary=user_interests_summary,
+            user_character_summary=user_character_summary,
         )
 
         # Handle author account

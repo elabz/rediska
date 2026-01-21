@@ -571,6 +571,14 @@ class LeadPost(Base):
     )
     analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
 
+    # User summaries (persisted for reuse in subsequent analysis runs)
+    user_interests_summary: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Summary of user interests from their posts"
+    )
+    user_character_summary: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Summary of user character from their comments"
+    )
+
     # Lead source tracking (manual vs scout_watch)
     lead_source: Mapped[str] = mapped_column(
         Enum("manual", "scout_watch", name="lead_source_enum"),
@@ -1087,11 +1095,28 @@ class ScoutWatchPost(Base):
         BigInteger, ForeignKey("scout_watch_runs.id"), nullable=True
     )
 
+    # Profile data (fetched for analysis pipeline)
+    profile_fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    user_interests: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="LLM-summarized interests from poster posts"
+    )
+    user_character: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="LLM-summarized character traits from comments"
+    )
+
     # Analysis result
     analysis_status: Mapped[str] = mapped_column(
-        Enum("pending", "analyzed", "skipped", "failed", name="scout_post_status_enum"),
+        Enum(
+            "pending", "fetching_profile", "summarizing", "analyzing",
+            "analyzed", "skipped", "failed",
+            name="scout_post_status_enum"
+        ),
         nullable=False,
         default="pending",
+    )
+    analysis_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("lead_analyses.id", ondelete="SET NULL"), nullable=True,
+        comment="Link to full multi-agent analysis result"
     )
     analysis_recommendation: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
@@ -1111,6 +1136,7 @@ class ScoutWatchPost(Base):
     watch: Mapped["ScoutWatch"] = relationship(back_populates="posts")
     run: Mapped[Optional["ScoutWatchRun"]] = relationship(back_populates="posts")
     lead: Mapped[Optional["LeadPost"]] = relationship()
+    analysis: Mapped[Optional["LeadAnalysis"]] = relationship()
 
 
 # Export all models

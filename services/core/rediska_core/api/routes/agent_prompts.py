@@ -31,7 +31,6 @@ VALID_DIMENSIONS = [
     "risk_flags",
     "sexual_preferences",
     "meta_analysis",
-    "scout_quick_analysis",  # Scout watch post screening prompt
 ]
 
 

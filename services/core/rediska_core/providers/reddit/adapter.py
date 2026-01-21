@@ -40,6 +40,15 @@ from rediska_core.providers.base import (
 )
 
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+# Default limits for profile item fetching (used by Scout Watch pipeline)
+MAX_PROFILE_POSTS = 20
+MAX_PROFILE_COMMENTS = 100
+
+
 class RedditAPIError(Exception):
     """Raised when Reddit API call fails."""
 
@@ -532,6 +541,133 @@ class RedditAdapter(ProviderAdapter):
             next_cursor=after,
             has_more=after is not None,
         )
+
+    async def fetch_user_posts(
+        self,
+        user_id: str,
+        limit: int = MAX_PROFILE_POSTS,
+    ) -> list[ProviderProfileItem]:
+        """Fetch a user's posts with automatic pagination up to a limit.
+
+        This is a convenience method for the Scout Watch pipeline that
+        fetches posts with pagination and respects a hard limit.
+
+        Args:
+            user_id: Username.
+            limit: Maximum number of posts to fetch (default: 20).
+
+        Returns:
+            List of ProviderProfileItem objects (posts only).
+        """
+        all_items: list[ProviderProfileItem] = []
+        cursor: Optional[str] = None
+        per_page = min(limit, 100)  # Reddit max is 100 per page
+
+        while len(all_items) < limit:
+            remaining = limit - len(all_items)
+            fetch_count = min(remaining, per_page)
+
+            result = await self.fetch_profile_items(
+                user_id=user_id,
+                item_type=ProfileItemType.POST,
+                cursor=cursor,
+                limit=fetch_count,
+            )
+
+            all_items.extend(result.items)
+
+            if not result.has_more or not result.next_cursor:
+                break
+
+            cursor = result.next_cursor
+
+        logger.info(f"Fetched {len(all_items)} posts for user {user_id} (limit: {limit})")
+        return all_items[:limit]  # Ensure we don't exceed limit
+
+    async def fetch_user_comments(
+        self,
+        user_id: str,
+        limit: int = MAX_PROFILE_COMMENTS,
+    ) -> list[ProviderProfileItem]:
+        """Fetch a user's comments with automatic pagination up to a limit.
+
+        This is a convenience method for the Scout Watch pipeline that
+        fetches comments with pagination and respects a hard limit.
+
+        Args:
+            user_id: Username.
+            limit: Maximum number of comments to fetch (default: 100).
+
+        Returns:
+            List of ProviderProfileItem objects (comments only).
+        """
+        all_items: list[ProviderProfileItem] = []
+        cursor: Optional[str] = None
+        per_page = min(limit, 100)  # Reddit max is 100 per page
+
+        while len(all_items) < limit:
+            remaining = limit - len(all_items)
+            fetch_count = min(remaining, per_page)
+
+            result = await self.fetch_profile_items(
+                user_id=user_id,
+                item_type=ProfileItemType.COMMENT,
+                cursor=cursor,
+                limit=fetch_count,
+            )
+
+            all_items.extend(result.items)
+
+            if not result.has_more or not result.next_cursor:
+                break
+
+            cursor = result.next_cursor
+
+        logger.info(f"Fetched {len(all_items)} comments for user {user_id} (limit: {limit})")
+        return all_items[:limit]  # Ensure we don't exceed limit
+
+    async def fetch_profile_items_with_limit(
+        self,
+        user_id: str,
+        item_type: Optional[ProfileItemType] = None,
+        max_items: int = 100,
+    ) -> list[ProviderProfileItem]:
+        """Fetch profile items with automatic pagination up to a hard limit.
+
+        Unlike fetch_profile_items which returns a single page, this method
+        continues fetching pages until the limit is reached or no more items.
+
+        Args:
+            user_id: Username.
+            item_type: Filter by type (POST, COMMENT, or None for all).
+            max_items: Maximum total items to fetch.
+
+        Returns:
+            List of ProviderProfileItem objects.
+        """
+        all_items: list[ProviderProfileItem] = []
+        cursor: Optional[str] = None
+        per_page = min(max_items, 100)
+
+        while len(all_items) < max_items:
+            remaining = max_items - len(all_items)
+            fetch_count = min(remaining, per_page)
+
+            result = await self.fetch_profile_items(
+                user_id=user_id,
+                item_type=item_type,
+                cursor=cursor,
+                limit=fetch_count,
+            )
+
+            all_items.extend(result.items)
+
+            if not result.has_more or not result.next_cursor:
+                break
+
+            cursor = result.next_cursor
+
+        return all_items[:max_items]
 
     async def send_message(
         self,
