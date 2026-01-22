@@ -125,21 +125,13 @@ function formatDate(dateString: string): string {
   // Show days for < 7 days
   if (diffDays < 7) return `${diffDays}d ago`;
 
-  // For older dates, show in America/New_York timezone
-  const options: Intl.DateTimeFormatOptions = {
+  // For older dates, always show year in America/New_York timezone
+  return date.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
+    year: 'numeric',
     timeZone: TIMEZONE,
-  };
-
-  // Include year if not current year
-  const nowInTz = new Date(now.toLocaleString('en-US', { timeZone: TIMEZONE }));
-  const dateInTz = new Date(date.toLocaleString('en-US', { timeZone: TIMEZONE }));
-  if (dateInTz.getFullYear() !== nowInTz.getFullYear()) {
-    options.year = 'numeric';
-  }
-
-  return date.toLocaleDateString('en-US', options);
+  });
 }
 
 function formatAccountAge(dateString: string): string {
