@@ -160,6 +160,16 @@ LeadsServiceDep = Annotated[LeadsService, Depends(get_leads_service)]
 # =============================================================================
 
 
+def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Ensure datetime has UTC timezone for proper JSON serialization."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # Naive datetime from MySQL - assume UTC
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def build_lead_response(lead, db: Session) -> LeadResponse:
     """Build a LeadResponse with author info if available.
 
@@ -233,8 +243,8 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
         status=lead.status,
         score=None,  # TODO: Add lead scoring
         lead_source=lead.lead_source,
-        post_created_at=lead.post_created_at,
-        created_at=lead.created_at,
+        post_created_at=_ensure_utc(lead.post_created_at),
+        created_at=_ensure_utc(lead.created_at),
         # Analysis fields
         latest_analysis_id=lead.latest_analysis_id,
         analysis_recommendation=lead.analysis_recommendation,
