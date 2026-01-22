@@ -106,23 +106,40 @@ const STATUS_COLORS: Record<string, string> = {
   contacted: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
 };
 
+const TIMEZONE = 'America/New_York';
+
 function formatDate(dateString: string): string {
   const date = new Date(dateString);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
+  const diffMinutes = Math.floor(diffMs / 60000);
   const diffHours = Math.floor(diffMs / 3600000);
   const diffDays = Math.floor(diffMs / 86400000);
 
-  if (diffHours < 1) return 'Just now';
+  // Show "just now" only for < 1 minute
+  if (diffMinutes < 1) return 'just now';
+  // Show minutes for < 1 hour
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  // Show hours for < 24 hours
   if (diffHours < 24) return `${diffHours}h ago`;
+  // Show days for < 7 days
   if (diffDays < 7) return `${diffDays}d ago`;
 
+  // For older dates, show in America/New_York timezone
+  const options: Intl.DateTimeFormatOptions = {
+    month: 'short',
+    day: 'numeric',
+    timeZone: TIMEZONE,
+  };
+
   // Include year if not current year
-  const isCurrentYear = date.getFullYear() === now.getFullYear();
-  if (isCurrentYear) {
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const nowInTz = new Date(now.toLocaleString('en-US', { timeZone: TIMEZONE }));
+  const dateInTz = new Date(date.toLocaleString('en-US', { timeZone: TIMEZONE }));
+  if (dateInTz.getFullYear() !== nowInTz.getFullYear()) {
+    options.year = 'numeric';
   }
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+  return date.toLocaleDateString('en-US', options);
 }
 
 function formatAccountAge(dateString: string): string {
@@ -292,11 +309,11 @@ function LeadCard({
             )}
             <span>•</span>
             {lead.post_created_at ? (
-              <span title={`Posted: ${new Date(lead.post_created_at).toLocaleString()}`}>
+              <span title={`Posted: ${new Date(lead.post_created_at).toLocaleString('en-US', { timeZone: TIMEZONE, dateStyle: 'medium', timeStyle: 'short' })}`}>
                 Posted {formatDate(lead.post_created_at)}
               </span>
             ) : (
-              <span className="text-muted-foreground/70" title={`Saved: ${new Date(lead.created_at).toLocaleString()}`}>
+              <span className="text-muted-foreground/70" title={`Saved: ${new Date(lead.created_at).toLocaleString('en-US', { timeZone: TIMEZONE, dateStyle: 'medium', timeStyle: 'short' })}`}>
                 Saved {formatDate(lead.created_at)}
               </span>
             )}
