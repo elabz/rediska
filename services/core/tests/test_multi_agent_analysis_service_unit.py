@@ -273,36 +273,37 @@ def test_analyze_lead_dimension_failure_resilience(
 def test_demographics_output_schema_valid():
     """Test demographics output schema validation."""
     output = DemographicsOutput(
-        age_range=(25, 35),
-        age_confidence=0.9,
-        gender="male",
-        gender_confidence=0.8,
-        location="New York",
-        location_specificity="city",
-        location_confidence=0.7,
-        ethnicity_indicators=["caucasian"],
-        evidence=["mentioned in bio"],
+        age=32,
+        age_confidence=0.95,
+        gender="female",
+        gender_confidence=0.95,
+        location="PA",
+        location_near=True,
+        location_confidence=0.9,
+        evidence=["32[F4M] #PA"],
         flags=[],
     )
 
-    assert output.age_range == (25, 35)
-    assert output.age_confidence == 0.9
+    assert output.age == 32
+    assert output.gender == "female"
+    assert output.location_near is True
 
 
 def test_preferences_output_schema_valid():
     """Test preferences output schema validation."""
     output = PreferencesOutput(
-        hobbies=["hiking", "reading"],
+        hobbies=["hiking", "reading", "cooking"],
+        preferred_hobbies_found=["hiking", "reading"],
+        kinks=["rope", "spanking", "blindfolds"],
+        preferred_kinks_found=["rope", "spanking"],
         lifestyle="active",
-        values=["honesty", "kindness"],
-        interests={"sports": 0.8, "arts": 0.6},
-        personality_traits=["introverted", "thoughtful"],
-        communication_style="friendly",
-        evidence=["in bio"],
+        compatibility_score=0.9,
+        evidence=["loves hiking and reading", "into rope play"],
     )
 
     assert "hiking" in output.hobbies
-    assert output.lifestyle == "active"
+    assert "rope" in output.preferred_kinks_found
+    assert output.compatibility_score == 0.9
 
 
 def test_relationship_goals_output_schema_valid():
@@ -311,7 +312,9 @@ def test_relationship_goals_output_schema_valid():
         relationship_intent="serious",
         intent_confidence=0.85,
         relationship_timeline="within 6 months",
-        partner_criteria={"age_range": [23, 35], "height": "5'8+"},
+        relationship_goals=["find long-term partner", "build family"],
+        partner_max_age="35",
+        partner_criteria={"height": "5'8+"},
         deal_breakers=["smoking", "no commitment"],
         relationship_history=["3 year relationship"],
         compatibility_factors=["similar values"],
@@ -321,46 +324,37 @@ def test_relationship_goals_output_schema_valid():
 
     assert output.relationship_intent == "serious"
     assert output.intent_confidence == 0.85
+    assert output.partner_max_age == "35"
 
 
 def test_risk_flags_output_schema_valid():
     """Test risk flags output schema validation."""
     output = RiskFlagsOutput(
-        flags=[
-            {
-                "type": "age_gap",
-                "severity": "medium",
-                "description": "Seeking much younger partner",
-                "evidence": ["bio mentions"],
-            }
-        ],
-        behavioral_concerns=[],
-        safety_assessment="caution",
-        authenticity_score=0.8,
-        manipulation_indicators=[],
-        overall_risk_level="medium",
+        is_authentic=False,
+        red_flags=["OF mention in bio", "asks for generous partner"],
+        scam_indicators=["promotes Telegram"],
+        assessment="likely_scam",
+        evidence=["check out my OF for more"],
     )
 
-    assert len(output.flags) == 1
-    assert output.safety_assessment == "caution"
+    assert output.is_authentic is False
+    assert output.assessment == "likely_scam"
+    assert len(output.red_flags) == 2
 
 
 def test_sexual_preferences_output_schema_valid():
     """Test sexual preferences output schema validation."""
     output = SexualPreferencesOutput(
-        sexual_orientation="straight",
-        orientation_confidence=0.9,
+        ds_orientation="submissive",
+        ds_orientation_confidence=0.9,
         kinks_interests=["none mentioned"],
         intimacy_expectations="traditional",
-        desired_partner_age_range=(23, 35),
-        age_preference_confidence=0.85,
-        age_gap_concerns=[],
         sexual_compatibility_notes=["standard expectations"],
         evidence=["inferred from bio"],
     )
 
-    assert output.sexual_orientation == "straight"
-    assert output.desired_partner_age_range == (23, 35)
+    assert output.ds_orientation == "submissive"
+    assert output.ds_orientation_confidence == 0.9
 
 
 def test_meta_analysis_output_schema_valid():
@@ -368,15 +362,16 @@ def test_meta_analysis_output_schema_valid():
     output = MetaAnalysisOutput(
         recommendation="suitable",
         confidence=0.85,
-        reasoning="Meets most criteria with good compatibility",
-        strengths=["genuine interest", "clear intentions"],
-        concerns=["age gap consideration"],
-        compatibility_score=0.78,
+        reasoning="All rules passed - female, nearby, submissive, accepts 45+",
+        failed_rule=None,
+        strengths=["submissive orientation", "local", "compatible kinks"],
+        concerns=[],
+        compatibility_score=0.9,
         priority_level="high",
-        suggested_approach="Standard approach appropriate",
     )
 
     assert output.recommendation == "suitable"
+    assert output.failed_rule is None
     assert output.confidence == 0.85
 
 

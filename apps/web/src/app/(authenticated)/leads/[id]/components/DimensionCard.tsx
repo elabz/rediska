@@ -229,7 +229,7 @@ function DemographicsContent({ output }: { output: Record<string, unknown> }) {
   return (
     <AllFieldsContent
       output={output}
-      highlightFields={['age', 'gender', 'location', 'age_range']}
+      highlightFields={['age', 'gender', 'location', 'location_near']}
     />
   );
 }
@@ -238,7 +238,7 @@ function PreferencesContent({ output }: { output: Record<string, unknown> }) {
   return (
     <AllFieldsContent
       output={output}
-      highlightFields={['hobbies', 'values', 'personality_traits', 'lifestyle', 'preferences']}
+      highlightFields={['compatibility_score', 'preferred_kinks_found', 'preferred_hobbies_found', 'kinks', 'hobbies']}
     />
   );
 }
@@ -247,7 +247,7 @@ function RelationshipGoalsContent({ output }: { output: Record<string, unknown> 
   return (
     <AllFieldsContent
       output={output}
-      highlightFields={['goals', 'relationship_intent', 'partner_criteria', 'deal_breakers', 'relationship_intentions']}
+      highlightFields={['relationship_intent', 'relationship_goals', 'partner_max_age', 'deal_breakers', 'partner_criteria']}
     />
   );
 }
@@ -256,7 +256,7 @@ function RiskFlagsContent({ output }: { output: Record<string, unknown> }) {
   return (
     <AllFieldsContent
       output={output}
-      highlightFields={['overall_risk_level', 'safety_assessment', 'safety_concerns', 'red_flags', 'flags', 'authenticity_score']}
+      highlightFields={['is_authentic', 'assessment', 'red_flags', 'scam_indicators']}
     />
   );
 }
@@ -265,7 +265,7 @@ function SexualPreferencesContent({ output }: { output: Record<string, unknown> 
   return (
     <AllFieldsContent
       output={output}
-      highlightFields={['orientation', 'sexual_orientation', 'preferences', 'kinks_interests', 'desired_partner_age_range']}
+      highlightFields={['ds_orientation', 'kinks_interests', 'intimacy_expectations', 'sexual_compatibility_notes']}
     />
   );
 }

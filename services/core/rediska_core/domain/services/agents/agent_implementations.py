@@ -285,6 +285,60 @@ class SexualPreferencesAgent(BaseAnalysisAgent):
 class MetaAnalysisAgent(BaseAnalysisAgent):
     """Meta-analysis coordinator - synthesizes results into final recommendation."""
 
+    def _format_dimension_results(self, dimension_results: dict[str, Any]) -> str:
+        """Format dimension results with clear labels for the LLM."""
+        sections = []
+
+        # Demographics
+        if "demographics" in dimension_results:
+            demo = dimension_results["demographics"].get("parsed_output", {})
+            sections.append(f"""<demographics>
+POST_AUTHOR_AGE: {demo.get('age', 'unknown')}
+POST_AUTHOR_GENDER: {demo.get('gender', 'unknown')}
+POST_AUTHOR_LOCATION: {demo.get('location', 'unknown')}
+POST_AUTHOR_LOCATION_NEAR: {demo.get('location_near', False)}
+</demographics>""")
+
+        # Preferences
+        if "preferences" in dimension_results:
+            prefs = dimension_results["preferences"].get("parsed_output", {})
+            sections.append(f"""<preferences>
+HOBBIES: {prefs.get('hobbies', [])}
+PREFERRED_HOBBIES_FOUND: {prefs.get('preferred_hobbies_found', [])}
+KINKS: {prefs.get('kinks', [])}
+PREFERRED_KINKS_FOUND: {prefs.get('preferred_kinks_found', [])}
+COMPATIBILITY_SCORE: {prefs.get('compatibility_score', 0)}
+</preferences>""")
+
+        # Relationship Goals
+        if "relationship_goals" in dimension_results:
+            goals = dimension_results["relationship_goals"].get("parsed_output", {})
+            sections.append(f"""<relationship_goals>
+RELATIONSHIP_INTENT: {goals.get('relationship_intent', 'unknown')}
+PARTNER_MAX_AGE: {goals.get('partner_max_age', 'no_max_age')}
+DEAL_BREAKERS: {goals.get('deal_breakers', [])}
+</relationship_goals>""")
+
+        # Risk Assessment
+        if "risk_flags" in dimension_results:
+            risk = dimension_results["risk_flags"].get("parsed_output", {})
+            sections.append(f"""<risk_assessment>
+IS_AUTHENTIC: {risk.get('is_authentic', True)}
+ASSESSMENT: {risk.get('assessment', 'unknown')}
+RED_FLAGS: {risk.get('red_flags', [])}
+SCAM_INDICATORS: {risk.get('scam_indicators', [])}
+</risk_assessment>""")
+
+        # Intimacy & Compatibility
+        if "sexual_preferences" in dimension_results:
+            intimate = dimension_results["sexual_preferences"].get("parsed_output", {})
+            sections.append(f"""<intimacy>
+POST_AUTHOR_DS_ORIENTATION: {intimate.get('ds_orientation', 'unknown')}
+KINKS_INTERESTS: {intimate.get('kinks_interests', [])}
+</intimacy>""")
+
+        return "\n\n".join(sections)
+
     async def analyze(
         self,
         dimension: str,
@@ -297,16 +351,13 @@ class MetaAnalysisAgent(BaseAnalysisAgent):
         try:
             # Build meta-analysis prompt with dimension results
             dimension_results = input_context.get("dimension_results", {})
-            results_summary = "\n".join([
-                f"{dim}: {result.get('parsed_output', {})}"
-                for dim, result in dimension_results.items()
-            ])
+            formatted_results = self._format_dimension_results(dimension_results)
 
-            input_prompt = f"""Synthesize these analysis results:
+            input_prompt = f"""Analyze this POST AUTHOR and decide if they are a suitable match:
 
-{results_summary}
+{formatted_results}
 
-Provide a final suitability recommendation in JSON format."""
+Apply the decision rules and output your recommendation as JSON."""
 
             config = AgentConfig(
                 name="meta_analysis",

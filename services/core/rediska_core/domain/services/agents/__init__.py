@@ -128,18 +128,18 @@ class BaseAnalysisAgent(ABC):
         comment_text = input_context.get("profile", {}).get("comment_text", "")
         summary = input_context.get("profile", {}).get("summary", "")
 
-        # Build content - title and body first (most important)
+        # Build content - title wrapped in XML tags, then body
         content_parts = []
         if lead_title:
-            content_parts.append(lead_title)
+            content_parts.append(f"<title>{lead_title}</title>")
         if lead_body:
-            content_parts.append(lead_body)
+            content_parts.append(f"<body>{lead_body}</body>")
         if summary:
-            content_parts.append(f"Profile summary:\n{summary}")
+            content_parts.append(f"<profile_summary>{summary}</profile_summary>")
         if post_text:
-            content_parts.append(f"Recent posts:\n{post_text}")
+            content_parts.append(f"<recent_posts>{post_text}</recent_posts>")
         if comment_text:
-            content_parts.append(f"Comments:\n{comment_text}")
+            content_parts.append(f"<comments>{comment_text}</comments>")
 
         content = "\n\n".join(content_parts)
 
