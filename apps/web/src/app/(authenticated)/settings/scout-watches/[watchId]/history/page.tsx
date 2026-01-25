@@ -23,6 +23,8 @@ import {
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import {
   Collapsible,
   CollapsibleContent,
@@ -124,6 +126,7 @@ export default function ScoutWatchHistoryPage() {
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showOnlyWithNewPosts, setShowOnlyWithNewPosts] = useState(false);
 
   // Run detail state
   const [expandedRunId, setExpandedRunId] = useState<number | null>(null);
@@ -151,13 +154,21 @@ export default function ScoutWatchHistoryPage() {
     }
   }, [watchId]);
 
-  const fetchRuns = useCallback(async (newOffset: number = 0) => {
+  const fetchRuns = useCallback(async (newOffset: number = 0, onlyWithNewPosts: boolean = showOnlyWithNewPosts) => {
     setLoading(true);
     setError(null);
 
     try {
+      const params = new URLSearchParams({
+        limit: LIMIT.toString(),
+        offset: newOffset.toString(),
+      });
+      if (onlyWithNewPosts) {
+        params.set('has_new_posts', 'true');
+      }
+
       const response = await fetch(
-        `/api/core/scout-watches/${watchId}/runs?limit=${LIMIT}&offset=${newOffset}`,
+        `/api/core/scout-watches/${watchId}/runs?${params}`,
         { credentials: 'include' }
       );
 
@@ -174,7 +185,7 @@ export default function ScoutWatchHistoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [watchId]);
+  }, [watchId, showOnlyWithNewPosts]);
 
   const fetchRunDetail = async (runId: number) => {
     if (runDetails[runId]) {
@@ -276,8 +287,11 @@ export default function ScoutWatchHistoryPage() {
 
   useEffect(() => {
     fetchWatch();
-    fetchRuns(0);
-  }, [fetchWatch, fetchRuns]);
+  }, [fetchWatch]);
+
+  useEffect(() => {
+    fetchRuns(0, showOnlyWithNewPosts);
+  }, [showOnlyWithNewPosts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return 'Never';
@@ -363,20 +377,32 @@ export default function ScoutWatchHistoryPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" asChild>
-          <Link href="/settings/scout-watches">
-            <ArrowLeft className="h-5 w-5" />
-          </Link>
-        </Button>
-        <div>
-          <h1 className="text-2xl font-bold">Run History</h1>
-          {watch && (
-            <p className="text-muted-foreground">
-              {watch.source_location}
-              {watch.search_query && ` • ${watch.search_query}`}
-            </p>
-          )}
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <Button variant="ghost" size="icon" asChild>
+            <Link href="/settings/scout-watches">
+              <ArrowLeft className="h-5 w-5" />
+            </Link>
+          </Button>
+          <div>
+            <h1 className="text-2xl font-bold">Run History</h1>
+            {watch && (
+              <p className="text-muted-foreground">
+                {watch.source_location}
+                {watch.search_query && ` • ${watch.search_query}`}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Switch
+            id="filter-new-posts"
+            checked={showOnlyWithNewPosts}
+            onCheckedChange={setShowOnlyWithNewPosts}
+          />
+          <Label htmlFor="filter-new-posts" className="text-sm">
+            Only runs with new posts
+          </Label>
         </div>
       </div>
 
@@ -520,16 +546,22 @@ export default function ScoutWatchHistoryPage() {
                               <CollapsibleContent>
                                 <div className="mt-3 pt-3 border-t space-y-4">
                                   {/* Analysis Reasoning */}
-                                  {post.analysis_reasoning && (
-                                    <div>
-                                      <h5 className="text-xs font-medium text-muted-foreground mb-1">
-                                        Reasoning:
-                                      </h5>
-                                      <p className="text-sm whitespace-pre-wrap bg-muted/50 p-2 rounded">
-                                        {post.analysis_reasoning}
-                                      </p>
-                                    </div>
-                                  )}
+                                  {(() => {
+                                    // Get reasoning from analysis_reasoning or meta_analysis
+                                    const reasoning = post.analysis_reasoning ||
+                                      (post.analysis_dimensions?.meta_analysis as Record<string, unknown>)?.reasoning as string ||
+                                      null;
+                                    return reasoning ? (
+                                      <div>
+                                        <h5 className="text-xs font-medium text-muted-foreground mb-1">
+                                          Reasoning:
+                                        </h5>
+                                        <p className="text-sm whitespace-pre-wrap bg-muted/50 p-2 rounded">
+                                          {reasoning}
+                                        </p>
+                                      </div>
+                                    ) : null;
+                                  })()}
 
                                   {/* Analysis Dimensions */}
                                   {post.analysis_dimensions && (

@@ -371,6 +371,7 @@ async def get_run_history(
     db: Session = Depends(get_db),
     limit: int = Query(20, ge=1, le=100, description="Maximum runs to return"),
     offset: int = Query(0, ge=0, description="Number of runs to skip"),
+    has_new_posts: bool = Query(False, description="Filter to only runs with new posts"),
 ) -> ScoutWatchRunListResponse:
     """Get run history for a watch with pagination.
 
@@ -378,6 +379,7 @@ async def get_run_history(
         watch_id: Watch ID.
         limit: Maximum runs to return.
         offset: Number of runs to skip.
+        has_new_posts: If true, only return runs where posts_new > 0.
         current_user: Authenticated user.
         db: Database session.
 
@@ -393,8 +395,10 @@ async def get_run_history(
         # Verify watch exists
         service.get_watch_or_raise(watch_id)
 
-        runs = service.get_run_history(watch_id, limit=limit, offset=offset)
-        total = service.count_runs(watch_id)
+        runs = service.get_run_history(
+            watch_id, limit=limit, offset=offset, has_new_posts=has_new_posts
+        )
+        total = service.count_runs(watch_id, has_new_posts=has_new_posts)
 
         return ScoutWatchRunListResponse(
             runs=[ScoutWatchRunResponse.model_validate(r) for r in runs],

@@ -391,6 +391,7 @@ class ScoutWatchService:
         watch_id: int,
         limit: int = 10,
         offset: int = 0,
+        has_new_posts: bool = False,
     ) -> list[ScoutWatchRun]:
         """Get run history for a watch.
 
@@ -398,33 +399,40 @@ class ScoutWatchService:
             watch_id: The watch ID.
             limit: Maximum runs to return.
             offset: Number of runs to skip.
+            has_new_posts: If True, only return runs where posts_new > 0.
 
         Returns:
             List of ScoutWatchRun objects.
         """
+        query = self.db.query(ScoutWatchRun).filter(ScoutWatchRun.watch_id == watch_id)
+
+        if has_new_posts:
+            query = query.filter(ScoutWatchRun.posts_new > 0)
+
         return (
-            self.db.query(ScoutWatchRun)
-            .filter(ScoutWatchRun.watch_id == watch_id)
+            query
             .order_by(desc(ScoutWatchRun.started_at))
             .offset(offset)
             .limit(limit)
             .all()
         )
 
-    def count_runs(self, watch_id: int) -> int:
+    def count_runs(self, watch_id: int, has_new_posts: bool = False) -> int:
         """Count total runs for a watch.
 
         Args:
             watch_id: The watch ID.
+            has_new_posts: If True, only count runs where posts_new > 0.
 
         Returns:
             Total number of runs.
         """
-        return (
-            self.db.query(ScoutWatchRun)
-            .filter(ScoutWatchRun.watch_id == watch_id)
-            .count()
-        )
+        query = self.db.query(ScoutWatchRun).filter(ScoutWatchRun.watch_id == watch_id)
+
+        if has_new_posts:
+            query = query.filter(ScoutWatchRun.posts_new > 0)
+
+        return query.count()
 
     def get_run(self, run_id: int) -> Optional[ScoutWatchRun]:
         """Get a run by ID.
