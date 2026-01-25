@@ -390,12 +390,14 @@ class ScoutWatchService:
         self,
         watch_id: int,
         limit: int = 10,
+        offset: int = 0,
     ) -> list[ScoutWatchRun]:
         """Get run history for a watch.
 
         Args:
             watch_id: The watch ID.
             limit: Maximum runs to return.
+            offset: Number of runs to skip.
 
         Returns:
             List of ScoutWatchRun objects.
@@ -404,8 +406,24 @@ class ScoutWatchService:
             self.db.query(ScoutWatchRun)
             .filter(ScoutWatchRun.watch_id == watch_id)
             .order_by(desc(ScoutWatchRun.started_at))
+            .offset(offset)
             .limit(limit)
             .all()
+        )
+
+    def count_runs(self, watch_id: int) -> int:
+        """Count total runs for a watch.
+
+        Args:
+            watch_id: The watch ID.
+
+        Returns:
+            Total number of runs.
+        """
+        return (
+            self.db.query(ScoutWatchRun)
+            .filter(ScoutWatchRun.watch_id == watch_id)
+            .count()
         )
 
     def get_run(self, run_id: int) -> Optional[ScoutWatchRun]:
@@ -434,6 +452,54 @@ class ScoutWatchService:
             .order_by(desc(ScoutWatchPost.first_seen_at))
             .all()
         )
+
+    def get_post(self, post_id: int) -> Optional[ScoutWatchPost]:
+        """Get a post by ID.
+
+        Args:
+            post_id: The post ID.
+
+        Returns:
+            The ScoutWatchPost or None if not found.
+        """
+        return self.db.query(ScoutWatchPost).filter(ScoutWatchPost.id == post_id).first()
+
+    def reset_post_for_reanalysis(self, post: ScoutWatchPost) -> ScoutWatchPost:
+        """Reset a post for re-analysis.
+
+        Args:
+            post: The post to reset.
+
+        Returns:
+            The updated ScoutWatchPost.
+        """
+        post.analysis_status = "pending"
+        post.analysis_id = None
+        post.analysis_recommendation = None
+        post.analysis_confidence = None
+        post.analysis_reasoning = None
+        self.db.flush()
+        return post
+
+    def delete_old_runs(self, retention_days: int = 3) -> int:
+        """Delete runs older than retention_days.
+
+        This also deletes related posts via cascade.
+
+        Args:
+            retention_days: Number of days to retain.
+
+        Returns:
+            Number of runs deleted.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        deleted = (
+            self.db.query(ScoutWatchRun)
+            .filter(ScoutWatchRun.started_at < cutoff)
+            .delete(synchronize_session=False)
+        )
+        self.db.flush()
+        return deleted
 
     # =========================================================================
     # POST TRACKING (DEDUPLICATION)

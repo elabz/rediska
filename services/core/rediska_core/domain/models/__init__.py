@@ -1121,6 +1121,9 @@ class ScoutWatchPost(Base):
     analysis_recommendation: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     analysis_confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
     analysis_reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    dimension_results_json: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="Full dimension results from multi-agent analysis"
+    )
 
     # Lead creation
     lead_id: Mapped[Optional[int]] = mapped_column(

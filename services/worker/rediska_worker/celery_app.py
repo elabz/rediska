@@ -91,6 +91,12 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=5, minute=0, day_of_week=0),
         "args": (),
     },
+    # Daily scout watch history cleanup at 2 AM UTC
+    "daily-scout-history-cleanup": {
+        "task": "maintenance.cleanup_scout_watch_history",
+        "schedule": crontab(hour=2, minute=0),
+        "args": (3,),  # 3 days retention
+    },
 }
 
 

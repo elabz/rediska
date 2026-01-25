@@ -461,3 +461,60 @@ def restore_test_local(self) -> dict:
                 container.remove(force=True)
             except Exception:
                 pass
+
+
+@app.task(name="maintenance.cleanup_scout_watch_history", bind=True, max_retries=3)
+def cleanup_scout_watch_history(self, retention_days: int = 3) -> dict:
+    """Delete scout watch runs and posts older than retention_days.
+
+    This task removes old ScoutWatchRun records (and their associated
+    ScoutWatchPost records via cascade) to conserve database space.
+
+    Args:
+        retention_days: Number of days of history to retain. Default is 3.
+
+    Returns:
+        Dict with status, runs_deleted count, and timestamps.
+    """
+    started_at = _now_utc()
+
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session as SQLSession
+
+        from rediska_core.domain.services.scout_watch import ScoutWatchService
+
+        # Create database session
+        engine = create_engine(MYSQL_URL)
+        with SQLSession(engine) as session:
+            service = ScoutWatchService(session)
+
+            # Delete old runs (posts cascade via FK)
+            deleted_count = service.delete_old_runs(retention_days=retention_days)
+
+            session.commit()
+
+        completed_at = _now_utc()
+
+        return {
+            "status": "success",
+            "runs_deleted": deleted_count,
+            "retention_days": retention_days,
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "duration_seconds": int((completed_at - started_at).total_seconds()),
+        }
+
+    except Exception as exc:
+        completed_at = _now_utc()
+
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "retention_days": retention_days,
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+        }

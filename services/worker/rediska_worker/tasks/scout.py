@@ -781,7 +781,22 @@ def analyze_and_decide(
             }
 
         # =================================================================
-        # STEP 7: Decide - Create lead or not
+        # STEP 7: Store dimension results for ALL posts (for auditing)
+        # =================================================================
+        # Build dimension results dict for storage
+        all_dimension_results = {}
+        for dim_name, dim_result in dimension_results.items():
+            if dim_result.get("parsed_output"):
+                all_dimension_results[dim_name] = dim_result.get("parsed_output")
+        # Add meta-analysis
+        if meta_output:
+            all_dimension_results["meta_analysis"] = meta_output
+
+        # Store dimension results on scout_post (for all posts, suitable or not)
+        scout_post.dimension_results_json = all_dimension_results
+
+        # =================================================================
+        # STEP 8: Decide - Create lead or not
         # =================================================================
         lead_id = None
         analysis_id = None
@@ -889,7 +904,7 @@ def analyze_and_decide(
             )
 
         # =================================================================
-        # STEP 8: Update scout_watch_posts with results
+        # STEP 9: Update scout_watch_posts with results
         # =================================================================
         scout_post.analysis_status = "analyzed"
         scout_post.analysis_recommendation = recommendation

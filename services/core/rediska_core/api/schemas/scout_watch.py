@@ -91,9 +91,12 @@ class ScoutWatchRunResponse(BaseModel):
 
 
 class ScoutWatchRunListResponse(BaseModel):
-    """Response schema for list of scout watch runs."""
+    """Response schema for list of scout watch runs with pagination."""
 
     runs: list[ScoutWatchRunResponse]
+    total: int = 0
+    offset: int = 0
+    limit: int = 20
 
 
 class ScoutWatchRunTriggerResponse(BaseModel):
@@ -127,6 +130,9 @@ class ScoutWatchPostResponse(BaseModel):
     analysis_confidence: Optional[float] = None
     analysis_reasoning: Optional[str] = None
 
+    # Full analysis dimension outputs (when analysis_id is present)
+    analysis_dimensions: Optional[dict] = None
+
     # Lead creation
     lead_id: Optional[int] = None
 
@@ -139,6 +145,22 @@ class ScoutWatchRunDetailResponse(BaseModel):
 
     run: ScoutWatchRunResponse
     posts: list[ScoutWatchPostResponse]
+
+
+class ScoutWatchPostReanalyzeResponse(BaseModel):
+    """Response schema for re-analyze post request."""
+
+    post_id: int
+    status: str
+    message: str
+
+
+class ScoutWatchPostAddToLeadsResponse(BaseModel):
+    """Response schema for adding a post to leads."""
+
+    post_id: int
+    lead_id: int
+    message: str
 
 
 # =============================================================================
@@ -156,4 +178,6 @@ __all__ = [
     "ScoutWatchRunTriggerResponse",
     "ScoutWatchPostResponse",
     "ScoutWatchRunDetailResponse",
+    "ScoutWatchPostReanalyzeResponse",
+    "ScoutWatchPostAddToLeadsResponse",
 ]

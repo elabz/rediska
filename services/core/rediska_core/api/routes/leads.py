@@ -797,21 +797,114 @@ async def get_lead_analysis(
             detail="Analysis not found",
         )
 
+    return _build_analysis_response(analysis)
+
+
+def _build_analysis_response(analysis) -> MultiAgentAnalysisResponse:
+    """Build a full MultiAgentAnalysisResponse from a LeadAnalysis model."""
+    from rediska_core.domain.schemas.multi_agent_analysis import DimensionAnalysisResult
+
+    def build_dimension_result(
+        dimension_name: str,
+        dimensions_list: list,
+    ) -> DimensionAnalysisResult | None:
+        """Build a DimensionAnalysisResult from dimension records."""
+        # Find the matching dimension record
+        dim_record = next(
+            (d for d in dimensions_list if d.dimension == dimension_name),
+            None,
+        )
+
+        if not dim_record or not dim_record.output_json:
+            return None
+
+        return DimensionAnalysisResult(
+            dimension=dimension_name,
+            status=dim_record.status or "completed",
+            output=dim_record.output_json,  # SQLAlchemy JSON type auto-parses
+            error=dim_record.error_detail,
+            model_info=dim_record.model_info_json,
+            started_at=dim_record.started_at.isoformat() if dim_record.started_at else analysis.started_at.isoformat(),
+            completed_at=dim_record.completed_at.isoformat() if dim_record.completed_at else None,
+        )
+
+    # Get dimension records from the relationship
+    dimensions = analysis.dimensions if hasattr(analysis, 'dimensions') else []
+
+    # Get meta_analysis output from dimensions
+    meta_dim = next((d for d in dimensions if d.dimension == "meta_analysis"), None)
+    meta_output = meta_dim.output_json if meta_dim else None
+
     return MultiAgentAnalysisResponse(
         id=analysis.id,
         lead_id=analysis.lead_id,
         account_id=analysis.account_id,
         status=analysis.status,
         started_at=analysis.started_at.isoformat(),
-        completed_at=analysis.completed_at.isoformat()
-        if analysis.completed_at
-        else None,
+        completed_at=analysis.completed_at.isoformat() if analysis.completed_at else None,
+        demographics=build_dimension_result("demographics", dimensions),
+        preferences=build_dimension_result("preferences", dimensions),
+        relationship_goals=build_dimension_result("relationship_goals", dimensions),
+        risk_flags=build_dimension_result("risk_flags", dimensions),
+        sexual_preferences=build_dimension_result("sexual_preferences", dimensions),
         final_recommendation=analysis.final_recommendation,
         recommendation_reasoning=analysis.recommendation_reasoning,
         confidence_score=analysis.confidence_score,
         prompt_versions=analysis.prompt_versions_json,
-        meta_analysis=analysis.meta_analysis_json,
+        meta_analysis=meta_output,
     )
+
+
+@router.get("/{lead_id}/analysis/{analysis_id}", response_model=MultiAgentAnalysisResponse)
+async def get_lead_analysis_by_id(
+    lead_id: int,
+    analysis_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MultiAgentAnalysisResponse:
+    """
+    Get a specific analysis by ID with full dimension details.
+
+    Returns complete analysis results including all agent outputs.
+
+    Args:
+        lead_id: ID of lead
+        analysis_id: ID of the specific analysis to retrieve
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        MultiAgentAnalysisResponse: Full analysis results
+
+    Raises:
+        HTTPException: If lead or analysis not found
+    """
+    # Fetch lead
+    lead = db.query(LeadPost).filter(LeadPost.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead not found: {lead_id}",
+        )
+
+    from rediska_core.domain.models import LeadAnalysis
+    from sqlalchemy.orm import joinedload
+
+    # Get specific analysis with dimensions eagerly loaded
+    analysis = db.query(LeadAnalysis).options(
+        joinedload(LeadAnalysis.dimensions)
+    ).filter(
+        LeadAnalysis.id == analysis_id,
+        LeadAnalysis.lead_id == lead_id,
+    ).first()
+
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis not found: {analysis_id}",
+        )
+
+    return _build_analysis_response(analysis)
 
 
 @router.get("/{lead_id}/analysis/history", response_model=list[MultiAgentAnalysisSummary])
