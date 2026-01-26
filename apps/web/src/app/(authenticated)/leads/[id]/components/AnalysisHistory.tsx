@@ -120,7 +120,13 @@ export function AnalysisHistory({ leadId, currentAnalysisId }: AnalysisHistoryPr
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.detail || 'Failed to fetch history');
+        let errorMessage = 'Failed to fetch history';
+        if (typeof data.detail === 'string') {
+          errorMessage = data.detail;
+        } else if (Array.isArray(data.detail)) {
+          errorMessage = data.detail.map((e: { msg?: string }) => e.msg || 'Error').join(', ');
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();

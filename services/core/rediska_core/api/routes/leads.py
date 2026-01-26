@@ -855,58 +855,6 @@ def _build_analysis_response(analysis) -> MultiAgentAnalysisResponse:
     )
 
 
-@router.get("/{lead_id}/analysis/{analysis_id}", response_model=MultiAgentAnalysisResponse)
-async def get_lead_analysis_by_id(
-    lead_id: int,
-    analysis_id: int,
-    current_user: CurrentUser,
-    db: Session = Depends(get_db),
-) -> MultiAgentAnalysisResponse:
-    """
-    Get a specific analysis by ID with full dimension details.
-
-    Returns complete analysis results including all agent outputs.
-
-    Args:
-        lead_id: ID of lead
-        analysis_id: ID of the specific analysis to retrieve
-        current_user: Current authenticated user
-        db: Database session
-
-    Returns:
-        MultiAgentAnalysisResponse: Full analysis results
-
-    Raises:
-        HTTPException: If lead or analysis not found
-    """
-    # Fetch lead
-    lead = db.query(LeadPost).filter(LeadPost.id == lead_id).first()
-    if not lead:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Lead not found: {lead_id}",
-        )
-
-    from rediska_core.domain.models import LeadAnalysis
-    from sqlalchemy.orm import joinedload
-
-    # Get specific analysis with dimensions eagerly loaded
-    analysis = db.query(LeadAnalysis).options(
-        joinedload(LeadAnalysis.dimensions)
-    ).filter(
-        LeadAnalysis.id == analysis_id,
-        LeadAnalysis.lead_id == lead_id,
-    ).first()
-
-    if not analysis:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Analysis not found: {analysis_id}",
-        )
-
-    return _build_analysis_response(analysis)
-
-
 @router.get("/{lead_id}/analysis/history", response_model=list[MultiAgentAnalysisSummary])
 async def get_lead_analysis_history(
     lead_id: int,
@@ -958,3 +906,55 @@ async def get_lead_analysis_history(
         )
         for analysis in analyses
     ]
+
+
+@router.get("/{lead_id}/analysis/{analysis_id}", response_model=MultiAgentAnalysisResponse)
+async def get_lead_analysis_by_id(
+    lead_id: int,
+    analysis_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MultiAgentAnalysisResponse:
+    """
+    Get a specific analysis by ID with full dimension details.
+
+    Returns complete analysis results including all agent outputs.
+
+    Args:
+        lead_id: ID of lead
+        analysis_id: ID of the specific analysis to retrieve
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        MultiAgentAnalysisResponse: Full analysis results
+
+    Raises:
+        HTTPException: If lead or analysis not found
+    """
+    # Fetch lead
+    lead = db.query(LeadPost).filter(LeadPost.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead not found: {lead_id}",
+        )
+
+    from rediska_core.domain.models import LeadAnalysis
+    from sqlalchemy.orm import joinedload
+
+    # Get specific analysis with dimensions eagerly loaded
+    analysis = db.query(LeadAnalysis).options(
+        joinedload(LeadAnalysis.dimensions)
+    ).filter(
+        LeadAnalysis.id == analysis_id,
+        LeadAnalysis.lead_id == lead_id,
+    ).first()
+
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis not found: {analysis_id}",
+        )
+
+    return _build_analysis_response(analysis)

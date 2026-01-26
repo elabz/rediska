@@ -140,24 +140,29 @@ function renderValue(value: unknown): React.ReactNode {
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return <span className="text-muted-foreground">None</span>;
-    // Check if it's an array of objects
-    if (typeof value[0] === 'object' && value[0] !== null) {
+    // Check if any items are complex (objects or arrays)
+    const hasComplexItems = value.some(item => typeof item === 'object' && item !== null);
+    if (hasComplexItems) {
       return (
         <div className="space-y-2 mt-1">
           {value.map((item, idx) => (
             <div key={idx} className="text-xs bg-muted/30 p-2 rounded">
-              {Object.entries(item as Record<string, unknown>).map(([k, v]) => (
-                <div key={k}>
-                  <span className="font-medium">{formatLabel(k)}:</span>{' '}
-                  <span className="text-muted-foreground">{String(v)}</span>
-                </div>
-              ))}
+              {typeof item === 'object' && item !== null ? (
+                Object.entries(item as Record<string, unknown>).map(([k, v]) => (
+                  <div key={k}>
+                    <span className="font-medium">{formatLabel(k)}:</span>{' '}
+                    <span className="text-muted-foreground">{renderValue(v)}</span>
+                  </div>
+                ))
+              ) : (
+                <span>{String(item)}</span>
+              )}
             </div>
           ))}
         </div>
       );
     }
-    // Simple array - render as tags
+    // Simple array of primitives - render as tags
     return <TagList items={value.map(String)} />;
   }
   if (typeof value === 'object') {
@@ -166,7 +171,7 @@ function renderValue(value: unknown): React.ReactNode {
         {Object.entries(value as Record<string, unknown>).map(([k, v]) => (
           <div key={k} className="text-xs">
             <span className="font-medium">{formatLabel(k)}:</span>{' '}
-            <span className="text-muted-foreground">{String(v)}</span>
+            <span className="text-muted-foreground">{renderValue(v)}</span>
           </div>
         ))}
       </div>
