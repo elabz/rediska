@@ -61,10 +61,16 @@ app.conf.update(
 
 # Beat schedule for periodic tasks
 app.conf.beat_schedule = {
-    # Delta sync every 10 minutes
+    # Fast inbox check every 60 seconds - catches new incoming messages quickly
+    "sync-inbox-fast-periodic": {
+        "task": "ingest.sync_inbox_fast",
+        "schedule": 60.0,  # 1 minute
+        "args": (),
+    },
+    # Full sync (inbox + sent) every 2 minutes with early-exit optimization
     "sync-delta-periodic": {
         "task": "ingest.sync_delta",
-        "schedule": 600.0,  # 10 minutes
+        "schedule": 120.0,  # 2 minutes (reduced from 10 minutes)
         "args": (),
     },
     # Scout watches every 5 minutes

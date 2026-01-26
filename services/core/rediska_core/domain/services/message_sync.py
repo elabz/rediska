@@ -3,6 +3,7 @@
 Syncs conversations and messages from providers (e.g., Reddit) to the local database.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -195,6 +196,8 @@ class MessageSyncService:
     ) -> int:
         """Download images and create attachments. Returns count of images saved.
 
+        Downloads images in parallel (up to 5 concurrent) for better performance.
+
         Args:
             message_id: ID of the message to link attachments to.
             image_urls: List of image URLs to download.
@@ -210,15 +213,32 @@ class MessageSyncService:
             storage_path=self.settings.attachments_path,
         )
 
-        count = 0
-        for url in image_urls:
-            try:
-                result = await self._download_image(url)
-                if result is None:
-                    logger.warning(f"Failed to download image from {url}")
-                    continue
+        # Download all images in parallel (max 5 concurrent to avoid overwhelming network)
+        semaphore = asyncio.Semaphore(5)
 
-                data, content_type = result
+        async def download_with_limit(url: str) -> tuple[str, tuple[bytes, str] | None]:
+            async with semaphore:
+                result = await self._download_image(url)
+                return url, result
+
+        # Download all images concurrently
+        download_tasks = [download_with_limit(url) for url in image_urls]
+        download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        # Store successful downloads
+        count = 0
+        for dl_result in download_results:
+            if isinstance(dl_result, BaseException):
+                logger.error(f"Error downloading image for message {message_id}: {dl_result}")
+                continue
+
+            url, download_data = dl_result
+            if download_data is None:
+                logger.warning(f"Failed to download image from {url}")
+                continue
+
+            try:
+                data, content_type = download_data
 
                 # Generate a filename from URL
                 url_path = url.split('?')[0].split('/')[-1]
@@ -744,15 +764,23 @@ class MessageSyncService:
     async def sync_reddit_messages(
         self,
         identity_id: Optional[int] = None,
+        inbox_only: bool = False,
     ) -> MessageSyncResult:
         """Sync messages from Reddit for an identity.
 
+        Uses early-exit optimization: stops pagination when encountering
+        consecutive existing messages (since Reddit returns newest first).
+
         Args:
             identity_id: Specific identity to sync, or None for default active identity.
+            inbox_only: If True, only sync inbox (not sent). Faster for catching new messages.
 
         Returns:
             MessageSyncResult with counts of synced items.
         """
+        # Early exit threshold: stop after this many consecutive existing messages
+        EARLY_EXIT_THRESHOLD = 10
+
         result = MessageSyncResult()
 
         # Get identity
@@ -787,21 +815,25 @@ class MessageSyncService:
 
         my_username = identity.external_username.lower()
 
-        # Fetch ALL messages from both inbox AND sent folders
-        # This ensures we get complete conversation histories
+        # Fetch messages from inbox (and optionally sent)
         conversation_cache: dict[str, tuple] = {}  # conv_id -> (Conversation, counterpart)
         processed_message_ids: set[str] = set()
 
-        # Fetch from both endpoints
-        endpoints = ["/message/inbox", "/message/sent"]
+        # Choose endpoints based on inbox_only flag
+        if inbox_only:
+            endpoints = ["/message/inbox"]
+        else:
+            endpoints = ["/message/inbox", "/message/sent"]
 
         for endpoint in endpoints:
             cursor = None
             pages_fetched = 0
             endpoint_messages = 0
+            consecutive_existing = 0  # Track consecutive existing messages for early exit
+            early_exit = False
             logger.info(f"Starting to fetch messages from {endpoint}")
 
-            while True:  # Continue until Reddit returns no more data
+            while True:  # Continue until Reddit returns no more data or early exit
                 try:
                     # Fetch a page of raw messages
                     messages_page = await adapter.fetch_inbox_messages(
@@ -883,6 +915,7 @@ class MessageSyncService:
                         )
 
                         if is_new_msg:
+                            consecutive_existing = 0  # Reset counter on new message
                             result.new_messages += 1
 
                             # Download images for new messages
@@ -911,12 +944,30 @@ class MessageSyncService:
                                 except Exception as img_err:
                                     logger.error(f"Failed to download images for message {msg_id}: {img_err}", exc_info=True)
                                     result.errors.append(f"Failed to download images for message {msg_id}: {img_err}")
+                        else:
+                            # Message already exists - increment consecutive counter
+                            consecutive_existing += 1
+
+                            # Early exit if we've seen enough consecutive existing messages
+                            # Reddit returns newest first, so if we hit many existing messages
+                            # in a row, all remaining messages are older and already synced
+                            if consecutive_existing >= EARLY_EXIT_THRESHOLD:
+                                logger.info(
+                                    f"{endpoint}: Early exit after {EARLY_EXIT_THRESHOLD} consecutive "
+                                    f"existing messages (page {pages_fetched}, {endpoint_messages} processed)"
+                                )
+                                early_exit = True
+                                break
 
                         result.messages_synced += 1
                         endpoint_messages += 1
 
                     except Exception as e:
                         result.errors.append(f"Failed to process message: {e}")
+
+                # Check if early exit was triggered
+                if early_exit:
+                    break
 
                 # Log progress every 10 pages
                 if pages_fetched % 10 == 0:
@@ -939,6 +990,23 @@ class MessageSyncService:
         self.db.commit()
 
         return result
+
+    async def sync_inbox_only(
+        self,
+        identity_id: Optional[int] = None,
+    ) -> MessageSyncResult:
+        """Fast sync of inbox only - for catching new incoming messages quickly.
+
+        This is a lightweight sync that only checks the inbox (not sent folder),
+        making it suitable for frequent polling (e.g., every 60 seconds).
+
+        Args:
+            identity_id: Specific identity to sync, or None for default active identity.
+
+        Returns:
+            MessageSyncResult with counts of synced items.
+        """
+        return await self.sync_reddit_messages(identity_id=identity_id, inbox_only=True)
 
     def _parse_reddit_timestamp(self, ts: float | None) -> datetime:
         """Parse a Reddit UTC timestamp."""

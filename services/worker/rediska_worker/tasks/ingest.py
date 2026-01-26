@@ -174,6 +174,9 @@ def backfill_messages(
 def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[int] = None) -> dict:
     """Sync new messages since last sync.
 
+    Uses early-exit optimization to stop pagination when hitting consecutive
+    existing messages, drastically reducing API calls for routine syncs.
+
     Args:
         provider_id: Provider to sync (currently only 'reddit' supported).
                     If None, syncs all providers.
@@ -242,6 +245,73 @@ def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[in
         session.close()
 
 
+@app.task(name="ingest.sync_inbox_fast", bind=True)
+def sync_inbox_fast(self, identity_id: Optional[int] = None) -> dict:
+    """Fast inbox-only sync for catching new incoming messages quickly.
+
+    This is a lightweight sync that only checks the inbox (not sent folder),
+    with early-exit optimization. Designed to run frequently (every 60 seconds)
+    to minimize latency for new message detection.
+
+    Args:
+        identity_id: Specific identity to sync. If None, syncs the default/active identity.
+
+    Returns:
+        Dictionary with sync results including counts and any errors.
+    """
+    from rediska_core.infra.db import get_sync_session_factory
+    from rediska_core.domain.services.message_sync import MessageSyncService, SyncError
+
+    session_factory = get_sync_session_factory()
+    session = session_factory()
+
+    try:
+        sync_service = MessageSyncService(db=session)
+
+        # Run the async inbox-only sync
+        result = asyncio.run(sync_service.sync_inbox_only(identity_id=identity_id))
+
+        # Queue indexing if new messages were synced
+        index_task_id = None
+        if result.new_messages > 0:
+            index_task = app.send_task(
+                "index.bulk_index_all_messages",
+                kwargs={"batch_size": 500},
+                queue="celery",
+            )
+            index_task_id = index_task.id
+
+        return {
+            "status": "success",
+            "provider_id": "reddit",
+            "sync_type": "inbox_fast",
+            "conversations_synced": result.conversations_synced,
+            "messages_synced": result.messages_synced,
+            "new_conversations": result.new_conversations,
+            "new_messages": result.new_messages,
+            "errors": result.errors,
+            "index_task_id": index_task_id,
+        }
+
+    except SyncError as e:
+        return {
+            "status": "error",
+            "provider_id": "reddit",
+            "sync_type": "inbox_fast",
+            "error": str(e),
+        }
+    except Exception as e:
+        session.rollback()
+        return {
+            "status": "error",
+            "provider_id": "reddit",
+            "sync_type": "inbox_fast",
+            "error": str(e),
+        }
+    finally:
+        session.close()
+
+
 @app.task(name="ingest.browse_location")
 def browse_location(provider_id: str, location: str, cursor: Optional[str] = None) -> dict:
     """Browse posts from a provider location (e.g., subreddit)."""
@@ -268,6 +338,226 @@ def fetch_profile_items(provider_id: str, external_username: str) -> dict:
     """Fetch profile items (posts, comments, images) for a user."""
     # TODO: Implement standalone profile items fetch
     return {"status": "not_implemented", "provider_id": provider_id, "username": external_username}
+
+
+@app.task(name="ingest.analyze_reddit_user", bind=True)
+def analyze_reddit_user(
+    self,
+    username: str,
+    identity_id: Optional[int] = None,
+) -> dict:
+    """Analyze a Reddit user's profile and generate summaries.
+
+    Fetches the user's profile, posts, comments, and generates
+    interests and character summaries using LLM.
+
+    This can be triggered manually for any Reddit username,
+    without requiring a lead to exist.
+
+    Args:
+        username: Reddit username (without u/ prefix).
+        identity_id: Optional identity to use for API access.
+
+    Returns:
+        Dictionary with profile data and summaries.
+    """
+    import logging
+    import json
+    from datetime import datetime, timezone
+    from rediska_core.infra.db import get_sync_session_factory
+    from rediska_core.domain.models import Identity
+    from rediska_core.providers.reddit.adapter import RedditAdapter
+    from rediska_core.config import get_settings
+    from rediska_core.domain.services.credentials import CredentialsService
+    from rediska_core.infrastructure.crypto import CryptoService
+
+    logger = logging.getLogger(__name__)
+    logger.info(f"Analyzing Reddit user: u/{username}")
+
+    session_factory = get_sync_session_factory()
+    session = session_factory()
+
+    MAX_POSTS = 20
+    MAX_COMMENTS = 100
+
+    try:
+        settings = get_settings()
+
+        # Get identity
+        if identity_id:
+            identity = session.query(Identity).filter(Identity.id == identity_id).first()
+        else:
+            identity = (
+                session.query(Identity)
+                .filter(Identity.provider_id == "reddit", Identity.is_default == True)
+                .first()
+            )
+
+        if not identity:
+            return {
+                "status": "error",
+                "username": username,
+                "error": "No Reddit identity configured",
+            }
+
+        # Get decrypted credentials
+        crypto = CryptoService(settings.encryption_key)
+        creds_service = CredentialsService(session, crypto)
+
+        tokens_json = creds_service.get_credential_decrypted(
+            provider_id="reddit",
+            identity_id=identity.id,
+            credential_type="oauth_tokens",
+        )
+
+        if not tokens_json:
+            return {
+                "status": "error",
+                "username": username,
+                "error": f"No credentials found for identity {identity.id}",
+            }
+
+        tokens = json.loads(tokens_json)
+
+        # Create Reddit adapter
+        from rediska_core.providers.reddit.adapter import RedditAdapter as DirectAdapter
+        adapter = DirectAdapter(
+            access_token=tokens["access_token"],
+            refresh_token=tokens["refresh_token"],
+            client_id=settings.provider_reddit_client_id,
+            client_secret=settings.provider_reddit_client_secret,
+            user_agent=settings.provider_reddit_user_agent,
+        )
+
+        # Fetch profile data
+        async def fetch_all():
+            profile = await adapter.fetch_profile(username)
+            posts = await adapter.fetch_user_posts(username, limit=MAX_POSTS)
+            comments = await adapter.fetch_user_comments(username, limit=MAX_COMMENTS)
+            return profile, posts, comments
+
+        profile, posts, comments = asyncio.run(fetch_all())
+
+        logger.info(f"Fetched profile for u/{username}: posts={len(posts)}, comments={len(comments)}")
+
+        # Build profile data for response
+        profile_data = {
+            "username": username,
+            "bio": profile.bio if profile else None,
+            "karma": profile.karma if profile else None,
+            "created_at": profile.created_at.isoformat() if profile and profile.created_at else None,
+            "is_verified": profile.is_verified if profile else False,
+            "posts_count": len(posts),
+            "comments_count": len(comments),
+        }
+
+        # Generate summaries using LLM
+        from rediska_core.domain.services.inference import get_inference_client
+        from rediska_core.domain.services.interests_summary import InterestsSummaryService
+        from rediska_core.domain.services.character_summary import CharacterSummaryService
+
+        async def generate_summaries():
+            inference_client = get_inference_client()
+
+            try:
+                interests_service = InterestsSummaryService(
+                    inference_client=inference_client,
+                    db=session,
+                )
+                character_service = CharacterSummaryService(
+                    inference_client=inference_client,
+                    db=session,
+                )
+
+                # Convert to ProfileItem-like objects
+                class ProfileItemLike:
+                    def __init__(self, item_type: str, text_content: str, item_created_at=None):
+                        self.item_type = item_type
+                        self.text_content = text_content
+                        self.item_created_at = item_created_at
+
+                posts_for_summary = [
+                    ProfileItemLike("post", p.body_text or p.title or "", p.created_at)
+                    for p in posts
+                    if p.body_text or p.title
+                ]
+
+                comments_for_summary = [
+                    ProfileItemLike("comment", c.body_text or "", c.created_at)
+                    for c in comments
+                    if c.body_text
+                ]
+
+                # Run summaries
+                interests_result, character_result = await asyncio.gather(
+                    interests_service.summarize(posts_for_summary),
+                    character_service.summarize(comments_for_summary),
+                )
+
+                return interests_result, character_result
+
+            finally:
+                await inference_client.close()
+
+        interests_result, character_result = asyncio.run(generate_summaries())
+
+        logger.info(
+            f"Generated summaries for u/{username}: "
+            f"interests_success={interests_result.success}, "
+            f"character_success={character_result.success}"
+        )
+
+        # Build posts and comments data
+        posts_data = [
+            {
+                "title": p.title,
+                "body": p.body_text[:500] if p.body_text else None,
+                "subreddit": p.subreddit,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "url": p.url,
+            }
+            for p in posts[:10]  # Limit to 10 for response size
+        ]
+
+        comments_data = [
+            {
+                "body": c.body_text[:300] if c.body_text else None,
+                "subreddit": c.subreddit if hasattr(c, 'subreddit') else None,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in comments[:10]  # Limit to 10 for response size
+        ]
+
+        return {
+            "status": "success",
+            "username": username,
+            "profile": profile_data,
+            "posts": posts_data,
+            "comments": comments_data,
+            "summaries": {
+                "interests": {
+                    "success": interests_result.success,
+                    "summary": interests_result.summary if interests_result.success else None,
+                    "error": interests_result.error if not interests_result.success else None,
+                },
+                "character": {
+                    "success": character_result.success,
+                    "summary": character_result.summary if character_result.success else None,
+                    "error": character_result.error if not character_result.success else None,
+                },
+            },
+            "analyzed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    except Exception as e:
+        logger.exception(f"Error analyzing Reddit user u/{username}")
+        return {
+            "status": "error",
+            "username": username,
+            "error": str(e),
+        }
+    finally:
+        session.close()
 
 
 @app.task(name="ingest.analyze_lead_profile", bind=True)
