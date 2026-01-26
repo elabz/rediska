@@ -556,7 +556,7 @@ async def reanalyze_post(
         )
 
         task = celery_app.send_task(
-            "scout.analyze_single_post",
+            "scout.reanalyze_post",
             kwargs={
                 "watch_id": watch_id,
                 "post_id": post_id,

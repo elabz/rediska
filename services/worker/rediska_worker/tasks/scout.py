@@ -960,6 +960,137 @@ def analyze_and_decide(
             db.close()
 
 
+@app.task(
+    bind=True,
+    name="scout.reanalyze_post",
+    max_retries=2,
+    default_retry_delay=60,
+)
+def reanalyze_post(
+    self,
+    watch_id: int,
+    post_id: int,
+    external_post_id: str,
+) -> dict:
+    """Re-analyze a scout watch post by fetching fresh data from Reddit.
+
+    This task:
+    1. Fetches the post content from Reddit
+    2. Runs the full analyze_and_decide pipeline
+
+    Args:
+        watch_id: ID of the watch.
+        post_id: ID of the scout_watch_posts record.
+        external_post_id: Reddit post ID.
+
+    Returns:
+        dict: Analysis results.
+    """
+    db = None
+
+    try:
+        db = _get_db_session()
+
+        from rediska_core.domain.models import ScoutWatch, ScoutWatchPost
+
+        # Get watch and post
+        watch = db.query(ScoutWatch).filter(ScoutWatch.id == watch_id).first()
+        if not watch:
+            return {"status": "error", "error": f"Watch not found: {watch_id}"}
+
+        scout_post = db.query(ScoutWatchPost).filter(ScoutWatchPost.id == post_id).first()
+        if not scout_post:
+            return {"status": "error", "error": f"Post not found: {post_id}"}
+
+        logger.info(f"Re-analyzing post {external_post_id} for watch {watch_id}")
+
+        # Update status to fetching
+        scout_post.analysis_status = "fetching_profile"
+        db.commit()
+
+        # Get Reddit adapter
+        try:
+            adapter = _get_reddit_adapter(db, watch.identity_id)
+        except Exception as e:
+            logger.error(f"Failed to get Reddit adapter: {e}")
+            scout_post.analysis_status = "failed"
+            scout_post.analysis_reasoning = f"Failed to get Reddit adapter: {e}"
+            db.commit()
+            return {"status": "error", "error": str(e)}
+
+        # Fetch the post from Reddit
+        try:
+            post_result = asyncio.run(adapter.fetch_post(external_post_id))
+            if not post_result:
+                scout_post.analysis_status = "failed"
+                scout_post.analysis_reasoning = "Post not found on Reddit (may have been deleted)"
+                db.commit()
+                return {"status": "error", "error": "Post not found on Reddit"}
+
+            # Build post_data
+            post_data = {
+                "provider_id": "reddit",
+                "source_location": watch.source_location,
+                "external_post_id": external_post_id,
+                "post_url": f"https://reddit.com{post_result.url}" if post_result.url and not post_result.url.startswith("http") else post_result.url,
+                "title": post_result.title,
+                "body_text": post_result.body_text,
+                "author_username": post_result.author_username,
+                "author_external_id": post_result.author_id,
+                "post_created_at": post_result.created_at.isoformat() if post_result.created_at else None,
+            }
+
+            logger.info(f"Fetched post {external_post_id}, author: {post_result.author_username}")
+
+        except Exception as e:
+            logger.error(f"Failed to fetch post {external_post_id}: {e}")
+            scout_post.analysis_status = "failed"
+            scout_post.analysis_reasoning = f"Failed to fetch post: {e}"
+            db.commit()
+            return {"status": "error", "error": str(e)}
+
+        # Close this db session before calling analyze_and_decide
+        # (it will create its own session)
+        db.close()
+        db = None
+
+        # Call analyze_and_decide synchronously using apply()
+        # This runs the task in the current process without going through the broker
+        result = analyze_and_decide.apply(
+            kwargs={
+                "watch_id": watch_id,
+                "scout_post_id": post_id,
+                "post_data": post_data,
+            }
+        )
+
+        return result.result if result.successful() else {"status": "error", "error": str(result.result)}
+
+    except Exception as exc:
+        logger.error(f"reanalyze_post failed: {str(exc)}", exc_info=True)
+
+        if db:
+            try:
+                scout_post = db.query(ScoutWatchPost).filter(
+                    ScoutWatchPost.id == post_id
+                ).first()
+                if scout_post:
+                    scout_post.analysis_status = "failed"
+                    scout_post.analysis_reasoning = str(exc)[:2000]
+                    db.commit()
+            except Exception:
+                pass
+
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60)
+        else:
+            return {"status": "error", "error": str(exc)}
+
+    finally:
+        if db:
+            db.close()
+
+
 # =============================================================================
 # EXPORTS
 # =============================================================================
@@ -969,4 +1100,5 @@ __all__ = [
     "run_all_watches",
     "run_single_watch",
     "analyze_and_decide",
+    "reanalyze_post",
 ]
