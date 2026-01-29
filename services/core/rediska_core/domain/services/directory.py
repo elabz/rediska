@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import desc, func
+from sqlalchemy import asc, desc, func
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ExternalAccount, ProfileSnapshot
@@ -91,6 +91,30 @@ class DirectoryService:
         self.db = db
 
     # =========================================================================
+    # SHARED HELPERS
+    # =========================================================================
+
+    def _apply_search(self, query, search: Optional[str]):
+        """Apply search filter to a query."""
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            query = query.filter(
+                ExternalAccount.external_username.ilike(term)
+            )
+        return query
+
+    def _apply_sort(self, query, sort_by: Optional[str], default_column):
+        """Apply sort order to a query."""
+        if sort_by == "oldest":
+            query = query.order_by(asc(default_column))
+        elif sort_by == "alphabetical":
+            query = query.order_by(asc(ExternalAccount.external_username))
+        else:
+            # Default: newest first
+            query = query.order_by(desc(default_column))
+        return query
+
+    # =========================================================================
     # ANALYZED DIRECTORY
     # =========================================================================
 
@@ -99,17 +123,10 @@ class DirectoryService:
         provider_id: Optional[str] = None,
         limit: int = 20,
         offset: int = 0,
+        search: Optional[str] = None,
+        sort_by: Optional[str] = None,
     ) -> list[DirectoryEntry]:
-        """List accounts that have been analyzed.
-
-        Args:
-            provider_id: Optional filter by provider.
-            limit: Maximum number of results.
-            offset: Pagination offset.
-
-        Returns:
-            List of DirectoryEntry objects.
-        """
+        """List accounts that have been analyzed."""
         query = self.db.query(ExternalAccount).filter(
             ExternalAccount.analysis_state == "analyzed",
             ExternalAccount.deleted_at.is_(None),
@@ -118,23 +135,15 @@ class DirectoryService:
         if provider_id:
             query = query.filter(ExternalAccount.provider_id == provider_id)
 
-        # Sort by first_analyzed_at descending (most recently analyzed first)
-        query = query.order_by(desc(ExternalAccount.first_analyzed_at))
-
+        query = self._apply_search(query, search)
+        query = self._apply_sort(query, sort_by, ExternalAccount.first_analyzed_at)
         query = query.offset(offset).limit(limit)
 
         accounts = query.all()
         return [self._to_directory_entry(account) for account in accounts]
 
-    def count_analyzed(self, provider_id: Optional[str] = None) -> int:
-        """Count accounts that have been analyzed.
-
-        Args:
-            provider_id: Optional filter by provider.
-
-        Returns:
-            Count of analyzed accounts.
-        """
+    def count_analyzed(self, provider_id: Optional[str] = None, search: Optional[str] = None) -> int:
+        """Count accounts that have been analyzed."""
         query = self.db.query(func.count(ExternalAccount.id)).filter(
             ExternalAccount.analysis_state == "analyzed",
             ExternalAccount.deleted_at.is_(None),
@@ -143,6 +152,7 @@ class DirectoryService:
         if provider_id:
             query = query.filter(ExternalAccount.provider_id == provider_id)
 
+        query = self._apply_search(query, search)
         return query.scalar() or 0
 
     # =========================================================================
@@ -154,17 +164,10 @@ class DirectoryService:
         provider_id: Optional[str] = None,
         limit: int = 20,
         offset: int = 0,
+        search: Optional[str] = None,
+        sort_by: Optional[str] = None,
     ) -> list[DirectoryEntry]:
-        """List accounts that have been contacted.
-
-        Args:
-            provider_id: Optional filter by provider.
-            limit: Maximum number of results.
-            offset: Pagination offset.
-
-        Returns:
-            List of DirectoryEntry objects.
-        """
+        """List accounts that have been contacted."""
         query = self.db.query(ExternalAccount).filter(
             ExternalAccount.contact_state == "contacted",
             ExternalAccount.deleted_at.is_(None),
@@ -173,23 +176,15 @@ class DirectoryService:
         if provider_id:
             query = query.filter(ExternalAccount.provider_id == provider_id)
 
-        # Sort by first_contacted_at descending (most recently contacted first)
-        query = query.order_by(desc(ExternalAccount.first_contacted_at))
-
+        query = self._apply_search(query, search)
+        query = self._apply_sort(query, sort_by, ExternalAccount.first_contacted_at)
         query = query.offset(offset).limit(limit)
 
         accounts = query.all()
         return [self._to_directory_entry(account) for account in accounts]
 
-    def count_contacted(self, provider_id: Optional[str] = None) -> int:
-        """Count accounts that have been contacted.
-
-        Args:
-            provider_id: Optional filter by provider.
-
-        Returns:
-            Count of contacted accounts.
-        """
+    def count_contacted(self, provider_id: Optional[str] = None, search: Optional[str] = None) -> int:
+        """Count accounts that have been contacted."""
         query = self.db.query(func.count(ExternalAccount.id)).filter(
             ExternalAccount.contact_state == "contacted",
             ExternalAccount.deleted_at.is_(None),
@@ -198,6 +193,7 @@ class DirectoryService:
         if provider_id:
             query = query.filter(ExternalAccount.provider_id == provider_id)
 
+        query = self._apply_search(query, search)
         return query.scalar() or 0
 
     # =========================================================================
@@ -209,17 +205,10 @@ class DirectoryService:
         provider_id: Optional[str] = None,
         limit: int = 20,
         offset: int = 0,
+        search: Optional[str] = None,
+        sort_by: Optional[str] = None,
     ) -> list[DirectoryEntry]:
-        """List accounts that have engaged (responded after contact).
-
-        Args:
-            provider_id: Optional filter by provider.
-            limit: Maximum number of results.
-            offset: Pagination offset.
-
-        Returns:
-            List of DirectoryEntry objects.
-        """
+        """List accounts that have engaged (responded after contact)."""
         query = self.db.query(ExternalAccount).filter(
             ExternalAccount.engagement_state == "engaged",
             ExternalAccount.deleted_at.is_(None),
@@ -228,23 +217,15 @@ class DirectoryService:
         if provider_id:
             query = query.filter(ExternalAccount.provider_id == provider_id)
 
-        # Sort by first_inbound_after_contact_at descending
-        query = query.order_by(desc(ExternalAccount.first_inbound_after_contact_at))
-
+        query = self._apply_search(query, search)
+        query = self._apply_sort(query, sort_by, ExternalAccount.first_inbound_after_contact_at)
         query = query.offset(offset).limit(limit)
 
         accounts = query.all()
         return [self._to_directory_entry(account) for account in accounts]
 
-    def count_engaged(self, provider_id: Optional[str] = None) -> int:
-        """Count accounts that have engaged.
-
-        Args:
-            provider_id: Optional filter by provider.
-
-        Returns:
-            Count of engaged accounts.
-        """
+    def count_engaged(self, provider_id: Optional[str] = None, search: Optional[str] = None) -> int:
+        """Count accounts that have engaged."""
         query = self.db.query(func.count(ExternalAccount.id)).filter(
             ExternalAccount.engagement_state == "engaged",
             ExternalAccount.deleted_at.is_(None),
@@ -253,6 +234,7 @@ class DirectoryService:
         if provider_id:
             query = query.filter(ExternalAccount.provider_id == provider_id)
 
+        query = self._apply_search(query, search)
         return query.scalar() or 0
 
     # =========================================================================

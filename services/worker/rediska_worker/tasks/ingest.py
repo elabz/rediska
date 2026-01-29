@@ -440,6 +440,164 @@ def analyze_reddit_user(
 
         logger.info(f"Fetched profile for u/{username}: posts={len(posts)}, comments={len(comments)}")
 
+        # Store ExternalAccount and ProfileItems
+        from rediska_core.domain.models import ExternalAccount, ProfileItem, ProfileSnapshot
+        import re
+        import httpx
+
+        # Get or create ExternalAccount
+        account = (
+            session.query(ExternalAccount)
+            .filter_by(provider_id="reddit", external_username=username)
+            .first()
+        )
+        if not account:
+            account = ExternalAccount(
+                provider_id="reddit",
+                external_username=username,
+                external_user_id=profile.external_id if profile else None,
+                remote_status="active",
+            )
+            session.add(account)
+            session.flush()
+        elif profile and profile.external_id and not account.external_user_id:
+            account.external_user_id = profile.external_id
+            session.flush()
+
+        # Store ProfileItems for posts
+        posts_stored = 0
+        for p in posts:
+            existing = (
+                session.query(ProfileItem)
+                .filter_by(account_id=account.id, item_type="post", external_item_id=p.external_id)
+                .first()
+            )
+            if not existing:
+                item = ProfileItem(
+                    account_id=account.id,
+                    item_type="post",
+                    external_item_id=p.external_id,
+                    item_created_at=p.created_at,
+                    text_content=f"{p.title or ''}\n\n{p.body_text or ''}".strip() if (p.title or p.body_text) else None,
+                    remote_visibility="visible",
+                )
+                session.add(item)
+                posts_stored += 1
+
+        # Store ProfileItems for comments
+        comments_stored = 0
+        for c in comments:
+            existing = (
+                session.query(ProfileItem)
+                .filter_by(account_id=account.id, item_type="comment", external_item_id=c.external_id)
+                .first()
+            )
+            if not existing:
+                item = ProfileItem(
+                    account_id=account.id,
+                    item_type="comment",
+                    external_item_id=c.external_id,
+                    item_created_at=c.created_at,
+                    text_content=c.body_text,
+                    remote_visibility="visible",
+                )
+                session.add(item)
+                comments_stored += 1
+
+        session.flush()
+        logger.info(f"Stored {posts_stored} posts, {comments_stored} comments for u/{username}")
+
+        # Extract and download images from posts
+        IMAGE_PATTERNS = [
+            r'https?://i\.redd\.it/[^\s\)]+',
+            r'https?://preview\.redd\.it/[^\s\)]+',
+            r'https?://(?:i\.)?imgur\.com/[^\s\)]+\.(?:jpg|jpeg|png|gif|webp)',
+        ]
+        ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}
+
+        images_stored = 0
+        image_urls = []
+        for p in posts:
+            # Check post URL itself (link posts to images)
+            if p.url and any(ext in p.url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                image_urls.append((p.external_id, p.url))
+            # Check for gallery/media in raw_data
+            if p.raw_data and p.raw_data.get("media_metadata"):
+                for media_id, media_info in p.raw_data["media_metadata"].items():
+                    if "s" in media_info:
+                        s = media_info["s"]
+                        img_url = s.get("u") or s.get("x")
+                        if img_url:
+                            # Reddit HTML-encodes URLs in media_metadata
+                            img_url = img_url.replace("&amp;", "&")
+                            image_urls.append((f"{p.external_id}_img_{media_id}", img_url))
+            # Check body text for image URLs
+            if p.body_text:
+                for pattern in IMAGE_PATTERNS:
+                    for match in re.findall(pattern, p.body_text, re.IGNORECASE):
+                        image_urls.append((f"{p.external_id}_body_{images_stored}", match))
+
+        # Download images (limit to 20)
+        if image_urls:
+            from rediska_core.domain.services.attachment import AttachmentService
+
+            att_service = AttachmentService(
+                db=session,
+                storage_path=settings.attachments_path,
+            )
+
+            async def download_images():
+                nonlocal images_stored
+                async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+                    for ext_id, url in image_urls[:20]:
+                        # Check if already stored
+                        existing = (
+                            session.query(ProfileItem)
+                            .filter_by(account_id=account.id, item_type="image", external_item_id=ext_id)
+                            .first()
+                        )
+                        if existing:
+                            continue
+
+                        try:
+                            resp = await client.get(url, headers={'User-Agent': settings.provider_reddit_user_agent})
+                            if resp.status_code != 200:
+                                continue
+                            ct = resp.headers.get('Content-Type', '').split(';')[0].strip()
+                            if ct not in ALLOWED_IMAGE_TYPES:
+                                continue
+                            if len(resp.content) > 10 * 1024 * 1024:
+                                continue
+
+                            # Generate filename
+                            url_path = url.split('?')[0].split('/')[-1]
+                            if '.' not in url_path:
+                                url_path = f"image.{ct.split('/')[-1]}"
+
+                            upload_result = att_service.upload(
+                                file_data=resp.content,
+                                filename=url_path,
+                                content_type=ct,
+                                message_id=None,
+                                username=username,
+                            )
+
+                            pi = ProfileItem(
+                                account_id=account.id,
+                                item_type="image",
+                                external_item_id=ext_id,
+                                attachment_id=upload_result.attachment_id,
+                                remote_visibility="visible",
+                            )
+                            session.add(pi)
+                            session.flush()
+                            images_stored += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to download image {url}: {e}")
+
+            asyncio.run(download_images())
+            logger.info(f"Downloaded {images_stored} images for u/{username}")
+
         # Build profile data for response
         profile_data = {
             "username": username,
@@ -449,6 +607,7 @@ def analyze_reddit_user(
             "is_verified": profile.is_verified if profile else False,
             "posts_count": len(posts),
             "comments_count": len(comments),
+            "images_count": images_stored,
         }
 
         # Generate summaries using LLM
@@ -507,12 +666,39 @@ def analyze_reddit_user(
             f"character_success={character_result.success}"
         )
 
+        # Store ProfileSnapshot
+        summary_text_parts = []
+        signals = {}
+        if interests_result.success and interests_result.summary:
+            summary_text_parts.append(f"Interests: {interests_result.summary}")
+            signals["interests_summary"] = interests_result.summary
+        if character_result.success and character_result.summary:
+            summary_text_parts.append(f"Character: {character_result.summary}")
+            signals["character_summary"] = character_result.summary
+
+        snapshot = ProfileSnapshot(
+            account_id=account.id,
+            fetched_at=datetime.now(timezone.utc),
+            summary_text="\n\n".join(summary_text_parts) if summary_text_parts else None,
+            signals_json=signals if signals else None,
+        )
+        session.add(snapshot)
+
+        # Update account state
+        account.analysis_state = "analyzed"
+        if not account.first_analyzed_at:
+            account.first_analyzed_at = datetime.now(timezone.utc)
+        account.last_fetched_at = datetime.now(timezone.utc)
+
+        session.commit()
+        logger.info(f"Stored ProfileSnapshot for u/{username}, account state -> analyzed")
+
         # Build posts and comments data
         posts_data = [
             {
                 "title": p.title,
                 "body": p.body_text[:500] if p.body_text else None,
-                "subreddit": p.subreddit,
+                "subreddit": p.location,  # location field contains subreddit name
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "url": p.url,
             }

@@ -383,19 +383,26 @@ class MessageSyncService:
         if existing:
             return existing, False
 
-        # For outgoing messages, check if there's a pending local message
+        # For outgoing messages, check if there's a pending or sent-without-id local message
         # that matches (created before sync got the external_id from Reddit)
         if direction == "out":
-            # Look for a pending outgoing message in the same conversation
-            # with matching body text (normalized) that was sent recently
             from sqlalchemy import or_
+            # Look for outgoing messages in the same conversation that lack an external_message_id.
+            # Two cases:
+            # 1. remote_visibility == "unknown" — pending send (not yet confirmed)
+            # 2. remote_visibility == "visible" AND external_message_id is NULL/empty
+            #    — confirmed sent but Reddit didn't return an ID
             pending_message = (
                 self.db.query(Message)
                 .filter(
                     Message.provider_id == "reddit",
                     Message.conversation_id == conversation.id,
                     Message.direction == "out",
-                    Message.remote_visibility == "unknown",  # Pending send
+                    or_(
+                        Message.remote_visibility == "unknown",  # Pending send
+                        # Sent but missing external ID (Reddit often returns empty string)
+                        Message.remote_visibility == "visible",
+                    ),
                     # Not yet synced (NULL or empty string)
                     or_(
                         Message.external_message_id.is_(None),

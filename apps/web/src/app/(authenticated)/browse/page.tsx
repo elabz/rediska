@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { Loader2, Search, BookmarkPlus, BookmarkCheck, ExternalLink, MessageSquare, ArrowUp, Clock, ChevronDown, Star, StarOff, X, Filter, User, Flame, TrendingUp, Trophy, Zap, AlertTriangle, Venus, Eye, Plus } from 'lucide-react';
+import { Loader2, Search, BookmarkPlus, BookmarkCheck, ExternalLink, MessageSquare, ArrowUp, Clock, ChevronDown, Star, StarOff, X, Filter, User, Flame, TrendingUp, Trophy, AlertTriangle, Venus, Eye, Plus } from 'lucide-react';
+import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -115,16 +116,6 @@ function PostCard({
             {post.title || '(No title)'}
           </h3>
           <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-            <a
-              href={`https://reddit.com/u/${post.author_username}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 hover:text-primary hover:underline"
-            >
-              <User className="h-3 w-3" />
-              u/{post.author_username}
-            </a>
-            <span>•</span>
             <Badge variant="secondary" className="text-xs h-5 px-1.5">
               r/{post.source_location}
             </Badge>
@@ -134,6 +125,13 @@ function PostCard({
                 <span>{formatDate(post.post_created_at)}</span>
               </>
             )}
+          </div>
+          {/* User Profile Panel */}
+          <div className="mt-2">
+            <UserProfilePanel
+              username={post.author_username}
+              compact
+            />
           </div>
         </div>
         <Button
@@ -703,59 +701,56 @@ export default function BrowsePage() {
       {/* Results */}
       {hasSearched && !loading && !error && (
         <>
-          {posts.length === 0 ? (
-            <EmptyState
-              icon="📭"
-              title="No posts found"
-              description={`No posts found in r/${location}. Try a different subreddit.`}
-            />
-          ) : (
-            <>
-              {/* Results header with bookmark and filter */}
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-2">
-                  <p className="text-sm text-muted-foreground">
-                    {filterQuery ? `${filteredPosts.length} of ` : ''}{posts.length} post{posts.length !== 1 ? 's' : ''} from r/{currentLocation}
-                  </p>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => toggleBookmark(currentLocation)}
-                    className="h-7 px-2"
-                    title={isBookmarked(currentLocation) ? 'Remove bookmark' : 'Bookmark this subreddit'}
-                  >
-                    {isBookmarked(currentLocation) ? (
-                      <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
-                    ) : (
-                      <StarOff className="h-4 w-4" />
-                    )}
-                  </Button>
-                  <Button
-                    variant={watchCreated ? "secondary" : "outline"}
-                    size="sm"
-                    onClick={createScoutWatch}
-                    disabled={creatingWatch || watchCreated}
-                    className="h-7"
-                    title="Add this search to Scout Watches for automatic monitoring"
-                  >
-                    {creatingWatch ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : watchCreated ? (
-                      <>
-                        <Eye className="h-4 w-4 mr-1" />
-                        Watch Added
-                      </>
-                    ) : (
-                      <>
-                        <Plus className="h-4 w-4 mr-1" />
-                        <Eye className="h-4 w-4 mr-1" />
-                        Add Watch
-                      </>
-                    )}
-                  </Button>
-                </div>
+          {/* Results header with bookmark and watch */}
+          {currentLocation && (
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <p className="text-sm text-muted-foreground">
+                  {posts.length === 0
+                    ? `No posts found in r/${currentLocation}`
+                    : `${filterQuery ? `${filteredPosts.length} of ` : ''}${posts.length} post${posts.length !== 1 ? 's' : ''} from r/${currentLocation}`
+                  }
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => toggleBookmark(currentLocation)}
+                  className="h-7 px-2"
+                  title={isBookmarked(currentLocation) ? 'Remove bookmark' : 'Bookmark this subreddit'}
+                >
+                  {isBookmarked(currentLocation) ? (
+                    <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
+                  ) : (
+                    <StarOff className="h-4 w-4" />
+                  )}
+                </Button>
+                <Button
+                  variant={watchCreated ? "secondary" : "outline"}
+                  size="sm"
+                  onClick={createScoutWatch}
+                  disabled={creatingWatch || watchCreated}
+                  className="h-7"
+                  title="Add this search to Scout Watches for automatic monitoring"
+                >
+                  {creatingWatch ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : watchCreated ? (
+                    <>
+                      <Eye className="h-4 w-4 mr-1" />
+                      Watch Added
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="h-4 w-4 mr-1" />
+                      <Eye className="h-4 w-4 mr-1" />
+                      Add Watch
+                    </>
+                  )}
+                </Button>
+              </div>
 
-                {/* Filter results (local filtering of downloaded posts) */}
+              {/* Filter results (local filtering of downloaded posts) */}
+              {posts.length > 0 && (
                 <div className="relative w-64">
                   <Filter className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input
@@ -774,8 +769,20 @@ export default function BrowsePage() {
                     </button>
                   )}
                 </div>
-              </div>
+              )}
+            </div>
+          )}
 
+          {posts.length === 0 ? (
+            !currentLocation ? (
+              <EmptyState
+                icon="📭"
+                title="No posts found"
+                description={`No posts found in r/${location}. Try a different subreddit.`}
+              />
+            ) : null
+          ) : (
+            <>
               {filteredPosts.length === 0 && filterQuery ? (
                 <Card className="p-8">
                   <div className="text-center">

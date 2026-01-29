@@ -11,10 +11,20 @@ import {
   ExternalLink,
   Sparkles,
   AlertCircle,
+  Search,
+  ArrowUpDown,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { EmptyState } from '@/components';
 import { cn } from '@/lib/utils';
 
@@ -48,6 +58,13 @@ interface DirectoryCounts {
 }
 
 type DirectoryTab = 'analyzed' | 'contacted' | 'engaged';
+type SortOption = 'newest' | 'oldest' | 'alphabetical';
+
+const SORT_OPTIONS: { value: SortOption; label: string }[] = [
+  { value: 'newest', label: 'Newest First' },
+  { value: 'oldest', label: 'Oldest First' },
+  { value: 'alphabetical', label: 'A-Z' },
+];
 
 const TABS: { key: DirectoryTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: 'analyzed', label: 'Analyzed', icon: Sparkles },
@@ -156,6 +173,11 @@ export default function DirectoriesPage() {
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortBy, setSortBy] = useState<SortOption>('newest');
+  const [analyzeUsername, setAnalyzeUsername] = useState('');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeResult, setAnalyzeResult] = useState<string | null>(null);
 
   const LIMIT = 20;
 
@@ -174,7 +196,7 @@ export default function DirectoriesPage() {
     }
   }, []);
 
-  const fetchDirectory = useCallback(async (tab: DirectoryTab, newOffset = 0) => {
+  const fetchDirectory = useCallback(async (tab: DirectoryTab, newOffset = 0, search?: string, sort?: SortOption) => {
     setLoading(true);
     setError(null);
 
@@ -183,6 +205,16 @@ export default function DirectoriesPage() {
         limit: String(LIMIT),
         offset: String(newOffset),
       });
+
+      const actualSearch = search ?? searchQuery;
+      const actualSort = sort ?? sortBy;
+
+      if (actualSearch.trim()) {
+        params.set('search', actualSearch.trim());
+      }
+      if (actualSort !== 'newest') {
+        params.set('sort_by', actualSort);
+      }
 
       const response = await fetch(`/api/core/directories/${tab}?${params.toString()}`, {
         credentials: 'include',
@@ -202,7 +234,36 @@ export default function DirectoriesPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [searchQuery, sortBy]);
+
+  const handleAnalyzeUsername = useCallback(async () => {
+    const username = analyzeUsername.trim().replace(/^u\//, '');
+    if (!username) return;
+
+    setAnalyzing(true);
+    setAnalyzeResult(null);
+
+    try {
+      const response = await fetch('/api/core/accounts/analyze-username', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to queue analysis');
+      }
+
+      setAnalyzeResult(`Analysis queued for u/${username}`);
+      setAnalyzeUsername('');
+    } catch (err) {
+      setAnalyzeResult(err instanceof Error ? err.message : 'Failed to analyze');
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [analyzeUsername]);
 
   useEffect(() => {
     fetchCounts();
@@ -215,6 +276,17 @@ export default function DirectoriesPage() {
   const handleTabChange = (tab: DirectoryTab) => {
     setActiveTab(tab);
     setOffset(0);
+  };
+
+  const handleSearchSubmit = () => {
+    setOffset(0);
+    fetchDirectory(activeTab, 0);
+  };
+
+  const handleSortChange = (newSort: SortOption) => {
+    setSortBy(newSort);
+    setOffset(0);
+    fetchDirectory(activeTab, 0, searchQuery, newSort);
   };
 
   const refresh = () => {
@@ -266,6 +338,81 @@ export default function DirectoriesPage() {
             <RefreshCw className="h-4 w-4" />
           )}
         </Button>
+      </div>
+
+      {/* Analyze Username */}
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">
+            u/
+          </span>
+          <Input
+            type="text"
+            placeholder="Enter Reddit username to analyze..."
+            value={analyzeUsername}
+            onChange={(e) => setAnalyzeUsername(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleAnalyzeUsername();
+              }
+            }}
+            className="pl-8 h-10"
+          />
+        </div>
+        <Button
+          onClick={handleAnalyzeUsername}
+          disabled={analyzing || !analyzeUsername.trim()}
+          className="h-10"
+        >
+          {analyzing ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <>
+              <Sparkles className="h-4 w-4 mr-2" />
+              Analyze
+            </>
+          )}
+        </Button>
+      </div>
+      {analyzeResult && (
+        <p className="text-sm text-muted-foreground">{analyzeResult}</p>
+      )}
+
+      {/* Search and Sort */}
+      <div className="flex gap-2 items-center">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            type="text"
+            placeholder="Search by username or summary..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleSearchSubmit();
+              }
+            }}
+            className="pl-9 h-9"
+          />
+        </div>
+        <Button variant="secondary" size="sm" onClick={handleSearchSubmit} className="h-9">
+          <Search className="h-4 w-4" />
+        </Button>
+        <Select value={sortBy} onValueChange={(v) => handleSortChange(v as SortOption)}>
+          <SelectTrigger className="w-[160px] h-9">
+            <ArrowUpDown className="h-4 w-4 mr-2" />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SORT_OPTIONS.map((opt) => (
+              <SelectItem key={opt.value} value={opt.value}>
+                {opt.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Tabs */}

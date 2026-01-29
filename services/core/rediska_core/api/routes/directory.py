@@ -70,6 +70,8 @@ async def list_analyzed(
     provider_id: Optional[str] = Query(default=None, description="Filter by provider"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     limit: int = Query(default=20, ge=1, le=100, description="Maximum results"),
+    search: Optional[str] = Query(default=None, description="Search by username or summary"),
+    sort_by: Optional[str] = Query(default=None, description="Sort: newest, oldest, alphabetical"),
 ):
     """List analyzed accounts."""
     service = DirectoryService(db=db)
@@ -78,8 +80,10 @@ async def list_analyzed(
         provider_id=provider_id,
         limit=limit,
         offset=offset,
+        search=search,
+        sort_by=sort_by,
     )
-    total = service.count_analyzed(provider_id=provider_id)
+    total = service.count_analyzed(provider_id=provider_id, search=search)
 
     return DirectoryListResponse(
         entries=[_entry_to_response(e) for e in entries],
@@ -105,6 +109,8 @@ async def list_contacted(
     provider_id: Optional[str] = Query(default=None, description="Filter by provider"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     limit: int = Query(default=20, ge=1, le=100, description="Maximum results"),
+    search: Optional[str] = Query(default=None, description="Search by username or summary"),
+    sort_by: Optional[str] = Query(default=None, description="Sort: newest, oldest, alphabetical"),
 ):
     """List contacted accounts."""
     service = DirectoryService(db=db)
@@ -113,8 +119,10 @@ async def list_contacted(
         provider_id=provider_id,
         limit=limit,
         offset=offset,
+        search=search,
+        sort_by=sort_by,
     )
-    total = service.count_contacted(provider_id=provider_id)
+    total = service.count_contacted(provider_id=provider_id, search=search)
 
     return DirectoryListResponse(
         entries=[_entry_to_response(e) for e in entries],
@@ -140,6 +148,8 @@ async def list_engaged(
     provider_id: Optional[str] = Query(default=None, description="Filter by provider"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     limit: int = Query(default=20, ge=1, le=100, description="Maximum results"),
+    search: Optional[str] = Query(default=None, description="Search by username or summary"),
+    sort_by: Optional[str] = Query(default=None, description="Sort: newest, oldest, alphabetical"),
 ):
     """List engaged accounts."""
     service = DirectoryService(db=db)
@@ -148,8 +158,10 @@ async def list_engaged(
         provider_id=provider_id,
         limit=limit,
         offset=offset,
+        search=search,
+        sort_by=sort_by,
     )
-    total = service.count_engaged(provider_id=provider_id)
+    total = service.count_engaged(provider_id=provider_id, search=search)
 
     return DirectoryListResponse(
         entries=[_entry_to_response(e) for e in entries],
