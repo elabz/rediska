@@ -43,6 +43,10 @@ class DemographicsOutput(BaseModel):
         default=False,
         description="True if location is in our target area (PA, NJ, DE, Philadelphia area)",
     )
+    distance_miles: Optional[int] = Field(
+        None,
+        description="Distance in miles from home location (computed by geocoder)",
+    )
     location_confidence: float = Field(
         default=0.5,
         ge=0.0,

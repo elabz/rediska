@@ -10,6 +10,7 @@ from rediska_core.domain.schemas.multi_agent_analysis import (
     DemographicsOutput,
 )
 from rediska_core.domain.services.agent import AgentConfig
+from rediska_core.domain.services.geocoding import classify_location
 
 from . import BaseAnalysisAgent
 
@@ -61,6 +62,14 @@ class DemographicsAgent(BaseAnalysisAgent):
             if result.get("success") and result.get("parsed_output"):
                 try:
                     output = DemographicsOutput(**result["parsed_output"])
+
+                    # Post-process: override location_near with geocoder
+                    if output.location:
+                        geo = classify_location(output.location)
+                        if geo["geocoded"]:
+                            output.location_near = geo["location_near"]
+                            output.distance_miles = geo["distance_miles"]
+
                     result["parsed_output"] = output.model_dump()
                 except (ValidationError, TypeError):
                     # Schema validation failed, but agent returned something

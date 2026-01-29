@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     )
     session_expire_hours: int = Field(default=24 * 7)  # 1 week
 
+    # Geocoding
+    home_latitude: float = Field(default=40.0, description="Home latitude for distance calculation")
+    home_longitude: float = Field(default=-75.2, description="Home longitude for distance calculation")
+    location_near_threshold_miles: int = Field(
+        default=200, description="Max miles to consider a location 'near'"
+    )
+
     @field_validator("mysql_url")
     @classmethod
     def validate_mysql_url(cls, v: str) -> str:

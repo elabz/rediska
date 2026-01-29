@@ -30,44 +30,9 @@ Gender is indicated by the FIRST letter in brackets:
 
 LOCATION EXTRACTION:
 Location is often a hashtag or abbreviation in the title or body.
-
-=== NEAR LOCATIONS (location_near: true) ===
-Pennsylvania:
-  PA, Pennsylvania, Philly, Philadelphia, Pittsburgh, SEPA, NEPA, Allentown, Reading, Lancaster, Harrisburg
-
-New Jersey:
-  NJ, New Jersey, NNJ, CNJ, SNJ, Jersey City, Newark, Trenton, Atlantic City, Camden
-
-Delaware:
-  DE, Delaware, Wilmington, Dover
-
-New York (close enough):
-  NYC, New York City, Manhattan, Brooklyn, Queens, Bronx, Staten Island, Long Island, LI, Westchester, Hudson Valley
-
-Maryland (close enough):
-  MD, Maryland, Baltimore, Annapolis
-
-Washington DC:
-  DC, DMV, Washington DC, NoVA, Northern Virginia
-
-Connecticut (borderline):
-  CT, Connecticut
-
-Eastern timezone indicator:
-  EST, Eastern, East Coast
-
-Generic US (if no other location):
-  USA, US, United States
-
-=== FAR LOCATIONS (location_near: false) ===
-West Coast: CA, California, LA, Los Angeles, SF, San Francisco, Seattle, WA, OR, Oregon, Portland, San Diego, PST, Pacific
-Midwest: Chicago, IL, Illinois, OH, Ohio, MI, Michigan, Detroit, MN, Minnesota, WI, Wisconsin, IN, Indiana, CST, Central
-South: TX, Texas, Houston, Dallas, Austin, FL, Florida, Miami, Tampa, Orlando, GA, Georgia, Atlanta, NC, Charlotte, TN, Nashville
-Mountain: CO, Colorado, Denver, AZ, Arizona, Phoenix, NV, Nevada, Las Vegas, UT, Utah, NM, MST, Mountain
-International: Canada, UK, Europe, Berlin, London, Australia, Asia
-
-=== DEFAULT RULE ===
-If location is not in either list above: location_near = false
+Extract the location string exactly as it appears (e.g., "PA", "NYC", "EST", "SEPA", "California").
+Do NOT try to determine if the location is near or far — just extract the text.
+Set location_near to false (it will be computed automatically after extraction).
 
 Output as JSON:
 {
@@ -76,7 +41,7 @@ Output as JSON:
   "gender": "female" | "male" | "non-binary" | "unclear",
   "gender_confidence": 0.95,
   "location": "PA",
-  "location_near": true,
+  "location_near": false,
   "location_confidence": 0.9,
   "evidence": ["32[F4M] #PA"],
   "flags": []

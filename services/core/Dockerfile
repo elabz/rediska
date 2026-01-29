@@ -9,6 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     default-mysql-client \
     && rm -rf /var/lib/apt/lists/*
 
+# Download GeoNames cities500 dataset for offline geocoding
+RUN mkdir -p /app/data && \
+    curl -sL https://download.geonames.org/export/dump/cities500.zip -o /tmp/cities500.zip && \
+    apt-get update && apt-get install -y --no-install-recommends unzip && \
+    unzip /tmp/cities500.zip -d /app/data/ && \
+    rm /tmp/cities500.zip && \
+    apt-get purge -y unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 # Copy all application code first
 COPY . .
 
