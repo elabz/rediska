@@ -59,6 +59,8 @@ ALIAS_COORDS: dict[str, tuple[float, float]] = {
     "bay area": (37.6, -122.1),
     "tristate": (40.7, -74.2),
     "tri-state": (40.7, -74.2),
+    "vegas": (36.17, -115.14),
+    "las vegas": (36.17, -115.14),
 }
 
 # ---------------------------------------------------------------------------
@@ -117,6 +119,30 @@ US_STATE_COORDS: dict[str, tuple[float, float]] = {
     "wy": (43.0, -107.6), "wyoming": (43.0, -107.6),
     "dc": (38.9, -77.0), "washington dc": (38.9, -77.0),
     "washington d.c.": (38.9, -77.0),
+}
+
+# ---------------------------------------------------------------------------
+# Tier 3b: Canadian provinces → approximate centroid
+# ---------------------------------------------------------------------------
+CA_PROVINCE_COORDS: dict[str, tuple[float, float]] = {
+    "ontario": (51.3, -85.3),
+    "quebec": (52.0, -72.0), "québec": (52.0, -72.0), "qc": (52.0, -72.0),
+    "british columbia": (53.7, -127.6), "bc": (53.7, -127.6),
+    "alberta": (53.9, -116.6), "ab": (53.9, -116.6),
+    "manitoba": (53.8, -98.8), "mb": (53.8, -98.8),
+    "saskatchewan": (52.9, -106.5), "sk": (52.9, -106.5),
+    "nova scotia": (44.7, -63.7), "ns": (44.7, -63.7),
+    "new brunswick": (46.5, -66.2), "nb": (46.5, -66.2),
+    "newfoundland": (48.5, -56.0), "nl": (48.5, -56.0),
+    "prince edward island": (46.2, -63.0), "pei": (46.2, -63.0),
+    "niagara": (43.1, -79.1),  # Niagara region, Ontario
+    "toronto": (43.65, -79.38), "gta": (43.65, -79.38),
+    "vancouver": (49.28, -123.12),
+    "montreal": (45.50, -73.57), "montréal": (45.50, -73.57),
+    "calgary": (51.05, -114.07),
+    "edmonton": (53.55, -113.49),
+    "ottawa": (45.42, -75.70),
+    "winnipeg": (49.90, -97.14),
 }
 
 # ---------------------------------------------------------------------------
@@ -254,6 +280,10 @@ def _geocode(location_str: str) -> Optional[tuple[float, float, str]]:
     if key in US_STATE_COORDS:
         return (*US_STATE_COORDS[key], "us_state")
 
+    # Tier 3b: Canadian provinces / cities
+    if key in CA_PROVINCE_COORDS:
+        return (*CA_PROVINCE_COORDS[key], "ca_province")
+
     # Tier 4: Countries
     if key in COUNTRY_COORDS:
         return (*COUNTRY_COORDS[key], "country")
@@ -271,37 +301,108 @@ def _geocode(location_str: str) -> Optional[tuple[float, float, str]]:
 _ALWAYS_NEAR = {"online", "remote", "anywhere", "us", "usa", "united states"}
 
 
+def _split_location(location_str: str) -> list[str]:
+    """Split a compound location string into individual parts.
+
+    Handles separators: comma, slash, ampersand, plus, semicolon, and whitespace
+    between hashtag tokens (e.g., "#Ontario #Niagara" → ["Ontario", "Niagara"]).
+    """
+    # First, split on common delimiters
+    parts = re.split(r"[,/&+;]+", location_str)
+
+    # Further split on whitespace-separated hashtag tokens:
+    # "#Ontario #Niagara" or "Ontario Niagara" when each looks like a token
+    expanded: list[str] = []
+    for part in parts:
+        stripped = part.strip()
+        if not stripped:
+            continue
+        # If part contains multiple #-prefixed tokens, split them
+        hashtag_tokens = re.findall(r"#\S+", stripped)
+        if len(hashtag_tokens) > 1:
+            expanded.extend(t.lstrip("#").strip() for t in hashtag_tokens)
+        else:
+            expanded.append(stripped)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for p in expanded:
+        norm = _normalize(p)
+        if norm and norm not in seen:
+            seen.add(norm)
+            result.append(p)
+    return result
+
+
 def classify_location(location_str: Optional[str]) -> dict:
     """Classify a location string as near/far based on haversine distance.
+
+    Handles compound locations (e.g., "Ontario, Niagara" or "#Europe #online"):
+    - Splits into parts and classifies each independently.
+    - "always-near" tokens (online, remote, anywhere, us, usa) are ignored
+      when a concrete geographic location is also present.
+    - If ANY concrete part geocodes as far, the whole location is far.
+    - Only returns near if ALL concrete parts are near, or if there are
+      no concrete parts (pure "online" / "anywhere").
 
     Returns:
         dict with keys:
           - location_near (bool)
-          - distance_miles (int or None)
-          - geocoded (bool) – whether we resolved the string
+          - distance_miles (int or None) – max distance among parts
+          - geocoded (bool) – whether we resolved at least one part
     """
     if not location_str:
         return {"location_near": False, "distance_miles": None, "geocoded": False}
 
-    key = _normalize(location_str)
+    parts = _split_location(location_str)
+    if not parts:
+        return {"location_near": False, "distance_miles": None, "geocoded": False}
 
-    # Special cases: always near
-    if key in _ALWAYS_NEAR:
+    # Separate "always near" tokens from concrete locations
+    always_near_parts: list[str] = []
+    concrete_parts: list[str] = []
+    for p in parts:
+        if _normalize(p) in _ALWAYS_NEAR:
+            always_near_parts.append(p)
+        else:
+            concrete_parts.append(p)
+
+    # If all parts are "always near" (e.g., pure "online"), return near
+    if not concrete_parts:
         return {"location_near": True, "distance_miles": 0, "geocoded": True}
 
+    # Classify each concrete part; if ANY is far, the whole thing is far
     settings = get_settings()
     home_lat = settings.home_latitude
     home_lon = settings.home_longitude
     threshold = settings.location_near_threshold_miles
 
-    result = _geocode(location_str)
-    if result is None:
+    max_distance: Optional[int] = None
+    any_geocoded = False
+    any_far = False
+
+    for p in concrete_parts:
+        result = _geocode(p)
+        if result is None:
+            continue
+        any_geocoded = True
+        lat, lon, _tier = result
+        dist = round(_haversine(home_lat, home_lon, lat, lon))
+        if max_distance is None or dist > max_distance:
+            max_distance = dist
+        if dist > threshold:
+            any_far = True
+
+    if not any_geocoded:
+        # None of the concrete parts could be geocoded
+        # If there were also always-near parts, treat as near
+        if always_near_parts:
+            return {"location_near": True, "distance_miles": 0, "geocoded": True}
         return {"location_near": False, "distance_miles": None, "geocoded": False}
 
-    lat, lon, _tier = result
-    dist = _haversine(home_lat, home_lon, lat, lon)
     return {
-        "location_near": dist <= threshold,
-        "distance_miles": round(dist),
+        "location_near": not any_far,
+        "distance_miles": max_distance,
         "geocoded": True,
     }
