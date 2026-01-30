@@ -249,7 +249,7 @@ export function Sidebar({ onLogout, username }: SidebarProps) {
       {/* Desktop Sidebar */}
       <aside
         className={cn(
-          'hidden lg:flex flex-col fixed left-0 top-0 z-40 h-screen border-r border-border bg-card transition-all duration-300',
+          'hidden lg:flex flex-col fixed left-0 top-0 z-40 h-screen border-r border-white/20 dark:border-white/10 bg-white/70 dark:bg-slate-900/70 backdrop-blur-xl transition-all duration-300',
           isCollapsed ? 'w-16' : 'w-60'
         )}
       >
@@ -283,7 +283,7 @@ export function Sidebar({ onLogout, username }: SidebarProps) {
             <Menu className="h-5 w-5" />
           </Button>
         </SheetTrigger>
-        <SheetContent side="left" className="w-60 p-0">
+        <SheetContent side="left" className="w-60 p-0 bg-white/70 dark:bg-slate-900/70 backdrop-blur-xl border-r border-white/20 dark:border-white/10">
           <SidebarContent onLogout={onLogout} username={username} />
         </SheetContent>
       </Sheet>
