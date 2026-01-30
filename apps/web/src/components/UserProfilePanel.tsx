@@ -54,6 +54,9 @@ interface ProfileItem {
   item_created_at: string | null;
   text_content: string | null;
   attachment_id: number | null;
+  subreddit: string | null;
+  link_title: string | null;
+  link_id: string | null;
   remote_visibility: string;
   created_at: string;
 }
@@ -254,20 +257,70 @@ function ProfileItemsList({
   }
 
   return (
-    <div className="divide-y divide-border">
-      {items.map((item) => (
-        <div key={item.id} className="py-2 first:pt-0 last:pb-0">
-          <p className="text-sm line-clamp-2">
-            {item.text_content || '(No content)'}
-          </p>
-          {item.item_created_at && (
-            <p className="text-xs text-muted-foreground mt-1">
-              {formatRelativeTime(item.item_created_at)}
-            </p>
-          )}
-        </div>
-      ))}
-    </div>
+    <>
+      {lightboxSrc && (
+        <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      )}
+      <div className="divide-y divide-border">
+        {items.map((item) => (
+          <div key={item.id} className="py-2 first:pt-0 last:pb-0">
+            {/* Subreddit + parent post info */}
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-0.5 flex-wrap">
+              {item.subreddit && (
+                <a
+                  href={`https://reddit.com/${item.subreddit.startsWith('r/') ? item.subreddit : `r/${item.subreddit}`}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-primary hover:underline"
+                >
+                  {item.subreddit.startsWith('r/') ? item.subreddit : `r/${item.subreddit}`}
+                </a>
+              )}
+              {item.link_title && (
+                <>
+                  <span className="text-muted-foreground/50">·</span>
+                  <a
+                    href={item.link_id ? `https://reddit.com/comments/${item.link_id.replace('t3_', '')}` : '#'}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-primary hover:underline truncate max-w-[300px]"
+                    title={item.link_title}
+                  >
+                    {item.link_title}
+                  </a>
+                </>
+              )}
+            </div>
+            <div className="flex gap-2">
+              {/* Inline thumbnail for posts with images */}
+              {itemType === 'post' && item.attachment_id && (
+                <button
+                  className="shrink-0 w-16 h-16 rounded overflow-hidden bg-muted"
+                  onClick={() => setLightboxSrc(`/api/core/attachments/${item.attachment_id}`)}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`/api/core/attachments/${item.attachment_id}`}
+                    alt=""
+                    className="w-full h-full object-cover hover:opacity-80 transition-opacity cursor-pointer"
+                  />
+                </button>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-sm line-clamp-2">
+                  {item.text_content || '(No content)'}
+                </p>
+                {item.item_created_at && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {formatRelativeTime(item.item_created_at)}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 

@@ -479,6 +479,7 @@ def analyze_reddit_user(
                     external_item_id=p.external_id,
                     item_created_at=p.created_at,
                     text_content=f"{p.title or ''}\n\n{p.body_text or ''}".strip() if (p.title or p.body_text) else None,
+                    subreddit=p.location,
                     remote_visibility="visible",
                 )
                 session.add(item)
@@ -499,6 +500,9 @@ def analyze_reddit_user(
                     external_item_id=c.external_id,
                     item_created_at=c.created_at,
                     text_content=c.body_text,
+                    subreddit=c.location,
+                    link_title=c.title,
+                    link_id=c.raw_data.get("link_id") if c.raw_data else None,
                     remote_visibility="visible",
                 )
                 session.add(item)
@@ -516,11 +520,11 @@ def analyze_reddit_user(
         ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/gif', 'image/webp'}
 
         images_stored = 0
-        image_urls = []
+        image_urls = []  # (image_ext_id, url, post_external_id)
         for p in posts:
             # Check post URL itself (link posts to images)
             if p.url and any(ext in p.url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                image_urls.append((p.external_id, p.url))
+                image_urls.append((p.external_id, p.url, p.external_id))
             # Check for gallery/media in raw_data
             if p.raw_data and p.raw_data.get("media_metadata"):
                 for media_id, media_info in p.raw_data["media_metadata"].items():
@@ -530,12 +534,12 @@ def analyze_reddit_user(
                         if img_url:
                             # Reddit HTML-encodes URLs in media_metadata
                             img_url = img_url.replace("&amp;", "&")
-                            image_urls.append((f"{p.external_id}_img_{media_id}", img_url))
+                            image_urls.append((f"{p.external_id}_img_{media_id}", img_url, p.external_id))
             # Check body text for image URLs
             if p.body_text:
                 for pattern in IMAGE_PATTERNS:
                     for match in re.findall(pattern, p.body_text, re.IGNORECASE):
-                        image_urls.append((f"{p.external_id}_body_{images_stored}", match))
+                        image_urls.append((f"{p.external_id}_body_{images_stored}", match, p.external_id))
 
         # Download images (limit to 20)
         if image_urls:
@@ -548,8 +552,9 @@ def analyze_reddit_user(
 
             async def download_images():
                 nonlocal images_stored
+                post_first_attachment = {}  # post_external_id -> first attachment_id
                 async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-                    for ext_id, url in image_urls[:20]:
+                    for ext_id, url, post_ext_id in image_urls[:20]:
                         # Check if already stored
                         existing = (
                             session.query(ProfileItem)
@@ -592,8 +597,22 @@ def analyze_reddit_user(
                             session.add(pi)
                             session.flush()
                             images_stored += 1
+
+                            # Track first image per post for thumbnail
+                            if post_ext_id and post_ext_id not in post_first_attachment:
+                                post_first_attachment[post_ext_id] = upload_result.attachment_id
                         except Exception as e:
                             logger.warning(f"Failed to download image {url}: {e}")
+
+                # Link first image to each post's ProfileItem as thumbnail
+                for post_ext_id, att_id in post_first_attachment.items():
+                    post_item = (
+                        session.query(ProfileItem)
+                        .filter_by(account_id=account.id, item_type="post", external_item_id=post_ext_id)
+                        .first()
+                    )
+                    if post_item and not post_item.attachment_id:
+                        post_item.attachment_id = att_id
 
             asyncio.run(download_images())
             logger.info(f"Downloaded {images_stored} images for u/{username}")

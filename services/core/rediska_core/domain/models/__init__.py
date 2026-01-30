@@ -669,6 +669,10 @@ class ProfileItem(Base):
         BigInteger, ForeignKey("attachments.id"), nullable=True
     )
 
+    subreddit: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    link_title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    link_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
     remote_visibility: Mapped[str] = mapped_column(
         Enum(
             "visible", "deleted_by_author", "removed", "unknown",

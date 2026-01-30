@@ -80,6 +80,9 @@ class ProfileItemResponse(BaseModel):
     item_created_at: Optional[datetime] = None
     text_content: Optional[str] = None
     attachment_id: Optional[int] = None
+    subreddit: Optional[str] = None
+    link_title: Optional[str] = None
+    link_id: Optional[str] = None
     remote_visibility: str
     created_at: datetime
 
@@ -252,6 +255,9 @@ async def get_profile_items(
                 item_created_at=item.item_created_at,
                 text_content=item.text_content,
                 attachment_id=item.attachment_id,
+                subreddit=item.subreddit,
+                link_title=item.link_title,
+                link_id=item.link_id,
                 remote_visibility=item.remote_visibility,
                 created_at=item.created_at,
             )
@@ -400,6 +406,9 @@ async def trigger_analyze(
     db: DBSession,
 ):
     """Trigger profile analysis for an account."""
+    from celery import Celery
+    from rediska_core.config import get_settings
+
     # Verify account exists
     account = db.query(ExternalAccount).filter_by(id=account_id).first()
     if not account:
@@ -408,8 +417,19 @@ async def trigger_analyze(
             detail="Account not found",
         )
 
-    # TODO: Queue analysis job when agent tasks are implemented
-    # For now, just update the analysis state and create audit log
+    # Queue analysis job
+    settings = get_settings()
+    celery_app = Celery(
+        "rediska",
+        broker=settings.celery_broker_url,
+        backend=settings.celery_result_backend,
+    )
+
+    task = celery_app.send_task(
+        "ingest.analyze_reddit_user",
+        kwargs={"username": account.external_username},
+        queue="ingest",
+    )
 
     # Audit log
     audit_entry = AuditLog(
@@ -420,14 +440,170 @@ async def trigger_analyze(
         provider_id=account.provider_id,
         entity_type="external_account",
         entity_id=account_id,
-        request_json={"account_id": account_id},
-        response_json={"status": "queued"},
+        request_json={"account_id": account_id, "username": account.external_username},
+        response_json={"status": "queued", "task_id": task.id},
     )
     db.add(audit_entry)
     db.commit()
 
     return AnalyzeResponse(
         status="queued",
-        message="Profile analysis has been queued. This feature requires the agent worker to be running.",
-        job_id=None,  # Would be set once job infrastructure is in place
+        message=f"Analysis queued for u/{account.external_username}",
+        job_id=task.id,
+    )
+
+
+class AnalyzeUsernameRequest(BaseModel):
+    """Request to analyze a Reddit username."""
+
+    username: str
+
+
+class AnalyzeUsernameResponse(BaseModel):
+    """Response for username analysis."""
+
+    status: str
+    message: str
+    task_id: Optional[str] = None
+    username: str
+
+
+@router.get(
+    "/by-username/{provider_id}/{username}",
+    response_model=AccountDetailResponse,
+    summary="Get account by username",
+    description="Look up an external account by provider and username. Returns 404 if account doesn't exist.",
+)
+async def get_account_by_username(
+    provider_id: str,
+    username: str,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Get account by provider and username.
+
+    This endpoint allows looking up an account by username instead of ID.
+    Useful for checking if a user has been analyzed and fetching their data.
+    """
+    # Clean up username (remove u/ prefix if present)
+    clean_username = username.strip().lstrip("u/").lstrip("/u/")
+
+    account = (
+        db.query(ExternalAccount)
+        .filter(
+            ExternalAccount.provider_id == provider_id,
+            ExternalAccount.external_username == clean_username,
+            ExternalAccount.deleted_at.is_(None),
+        )
+        .first()
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Account not found",
+        )
+
+    # Get latest snapshot
+    latest_snapshot = (
+        db.query(ProfileSnapshot)
+        .filter(ProfileSnapshot.account_id == account.id)
+        .order_by(desc(ProfileSnapshot.fetched_at))
+        .first()
+    )
+
+    snapshot_response = None
+    if latest_snapshot:
+        snapshot_response = ProfileSnapshotResponse(
+            id=latest_snapshot.id,
+            fetched_at=latest_snapshot.fetched_at,
+            summary_text=latest_snapshot.summary_text,
+            signals_json=latest_snapshot.signals_json,
+            risk_flags_json=latest_snapshot.risk_flags_json,
+            model_info_json=latest_snapshot.model_info_json,
+            created_at=latest_snapshot.created_at,
+        )
+
+    return AccountDetailResponse(
+        id=account.id,
+        provider_id=account.provider_id,
+        external_username=account.external_username,
+        external_user_id=account.external_user_id,
+        remote_status=account.remote_status,
+        analysis_state=account.analysis_state,
+        contact_state=account.contact_state,
+        engagement_state=account.engagement_state,
+        first_analyzed_at=account.first_analyzed_at,
+        first_contacted_at=account.first_contacted_at,
+        first_inbound_after_contact_at=account.first_inbound_after_contact_at,
+        created_at=account.created_at,
+        updated_at=account.updated_at,
+        latest_snapshot=snapshot_response,
+    )
+
+
+@router.post(
+    "/analyze-username",
+    response_model=AnalyzeUsernameResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Analyze a Reddit username",
+    description="Queue a job to fetch profile, posts, comments and generate summaries for any Reddit username.",
+)
+async def analyze_username(
+    request: AnalyzeUsernameRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Analyze any Reddit username.
+
+    This endpoint can be used to analyze a Reddit user without
+    requiring them to be in the system as a lead or account first.
+    It will fetch their profile, posts, comments, and generate
+    interests and character summaries.
+    """
+    from celery import Celery
+    from rediska_core.config import get_settings
+
+    username = request.username.strip().lstrip("u/").lstrip("/u/")
+
+    if not username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username is required",
+        )
+
+    # Queue analysis job
+    settings = get_settings()
+    celery_app = Celery(
+        "rediska",
+        broker=settings.celery_broker_url,
+        backend=settings.celery_result_backend,
+    )
+
+    task = celery_app.send_task(
+        "ingest.analyze_reddit_user",
+        kwargs={"username": username},
+        queue="ingest",
+    )
+
+    # Audit log
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="account.analyze_username",
+        result="ok",
+        provider_id="reddit",
+        entity_type="username",
+        entity_id=0,
+        request_json={"username": username},
+        response_json={"status": "queued", "task_id": task.id},
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return AnalyzeUsernameResponse(
+        status="queued",
+        message=f"Analysis queued for u/{username}. Results will be available shortly.",
+        task_id=task.id,
+        username=username,
     )
