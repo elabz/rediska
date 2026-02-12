@@ -3,7 +3,8 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, Download, MoreVertical, Trash2, X, Paperclip, Search, Images } from 'lucide-react';
+import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images } from 'lucide-react';
+import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -804,6 +805,15 @@ export default function ConversationDetailPage() {
         </a>
       </div>
 
+      {/* User Profile Panel */}
+      <div className="px-4 pb-3 border-b border-border">
+        <UserProfilePanel
+          username={counterpart.external_username}
+          accountId={counterpart.id}
+          compact
+        />
+      </div>
+
       {/* Messages */}
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto min-w-0 flex flex-col">
         {/* Sticky header with gallery and search */}
@@ -976,7 +986,7 @@ export default function ConversationDetailPage() {
                 ? `Cannot send to ${counterpart.remote_status} user`
                 : 'Type a message... (Enter to send, Shift+Enter for new line)'
             }
-            className="min-h-[44px] max-h-32 resize-none flex-1 min-w-0"
+            className="min-h-[44px] max-h-60 resize-y flex-1 min-w-0"
             disabled={sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
             rows={1}
           />

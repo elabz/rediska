@@ -114,6 +114,7 @@ class ScoutWatchPostResponse(BaseModel):
     watch_id: int
     external_post_id: str
     post_title: Optional[str] = None
+    post_body: Optional[str] = None
     post_author: Optional[str] = None
     first_seen_at: datetime
     run_id: Optional[int]

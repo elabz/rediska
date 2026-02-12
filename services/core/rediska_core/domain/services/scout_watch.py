@@ -539,6 +539,7 @@ class ScoutWatchService:
         run_id: int,
         external_post_id: str,
         post_title: Optional[str] = None,
+        post_body: Optional[str] = None,
         post_author: Optional[str] = None,
     ) -> ScoutWatchPost:
         """Record a post as seen by this watch.
@@ -548,6 +549,7 @@ class ScoutWatchService:
             run_id: The current run ID.
             external_post_id: The external post ID.
             post_title: The post title (for audit display).
+            post_body: The post body text.
             post_author: The post author (for audit display).
 
         Returns:
@@ -558,6 +560,7 @@ class ScoutWatchService:
             run_id=run_id,
             external_post_id=external_post_id,
             post_title=post_title[:500] if post_title else None,  # Truncate to column limit
+            post_body=post_body,
             post_author=post_author,
             first_seen_at=datetime.now(timezone.utc),
             analysis_status="pending",

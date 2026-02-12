@@ -20,6 +20,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { UserProfilePanel } from '@/components/UserProfilePanel';
 
 import { LeadAnalysisPanel } from './components/LeadAnalysisPanel';
 
@@ -256,55 +257,57 @@ export default function LeadDetailPage() {
         </CardHeader>
 
         <CardContent className="space-y-4">
-          {/* Author Info */}
+          {/* Author Info with Profile Panel */}
           {lead.author_username && (
-            <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50">
-              <div className="flex items-center justify-center w-10 h-10 rounded-full bg-primary/10 text-primary shrink-0">
-                <User className="h-5 w-5" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Link
-                    href={`/profile/${lead.author_account_id}`}
-                    className="font-semibold text-sm hover:underline"
-                  >
-                    u/{lead.author_username}
-                  </Link>
-                  {authorInfo?.is_verified && (
-                    <Badge variant="secondary" className="text-xs h-4 px-1">Verified</Badge>
-                  )}
-                  {authorInfo?.is_suspended && (
-                    <Badge variant="destructive" className="text-xs h-4 px-1">Suspended</Badge>
-                  )}
+            <div className="p-3 rounded-lg bg-muted/50">
+              <div className="flex items-start gap-3">
+                <div className="flex items-center justify-center w-10 h-10 rounded-full bg-primary/10 text-primary shrink-0">
+                  <User className="h-5 w-5" />
                 </div>
-                {authorInfo && (
-                  <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
-                    {authorInfo.account_created_at && (
-                      <span className="flex items-center gap-1">
-                        <Calendar className="h-3 w-3" />
-                        {formatAccountAge(authorInfo.account_created_at)}
-                      </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    {authorInfo?.is_verified && (
+                      <Badge variant="secondary" className="text-xs h-4 px-1">Verified</Badge>
                     )}
-                    {authorInfo.karma !== null && (
-                      <span className="flex items-center gap-1">
-                        <Award className="h-3 w-3" />
-                        {formatKarma(authorInfo.karma)} karma
-                      </span>
-                    )}
-                    {authorInfo.post_count !== null && authorInfo.post_count > 0 && (
-                      <span className="flex items-center gap-1">
-                        <FileText className="h-3 w-3" />
-                        {authorInfo.post_count} posts
-                      </span>
-                    )}
-                    {authorInfo.comment_count !== null && authorInfo.comment_count > 0 && (
-                      <span className="flex items-center gap-1">
-                        <MessageCircle className="h-3 w-3" />
-                        {authorInfo.comment_count} comments
-                      </span>
+                    {authorInfo?.is_suspended && (
+                      <Badge variant="destructive" className="text-xs h-4 px-1">Suspended</Badge>
                     )}
                   </div>
-                )}
+                  {authorInfo && (
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap mb-2">
+                      {authorInfo.account_created_at && (
+                        <span className="flex items-center gap-1">
+                          <Calendar className="h-3 w-3" />
+                          {formatAccountAge(authorInfo.account_created_at)}
+                        </span>
+                      )}
+                      {authorInfo.karma !== null && (
+                        <span className="flex items-center gap-1">
+                          <Award className="h-3 w-3" />
+                          {formatKarma(authorInfo.karma)} karma
+                        </span>
+                      )}
+                      {authorInfo.post_count !== null && authorInfo.post_count > 0 && (
+                        <span className="flex items-center gap-1">
+                          <FileText className="h-3 w-3" />
+                          {authorInfo.post_count} posts
+                        </span>
+                      )}
+                      {authorInfo.comment_count !== null && authorInfo.comment_count > 0 && (
+                        <span className="flex items-center gap-1">
+                          <MessageCircle className="h-3 w-3" />
+                          {authorInfo.comment_count} comments
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {/* User Profile Panel */}
+                  <UserProfilePanel
+                    username={lead.author_username}
+                    accountId={lead.author_account_id ?? undefined}
+                    compact
+                  />
+                </div>
               </div>
             </div>
           )}

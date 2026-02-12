@@ -13,13 +13,13 @@ services:
         condition: service_started
     ports:
       - "443:443"
-      - "80:80"
     volumes:
       - ./nginx/rediska.conf:/etc/nginx/conf.d/default.conf:ro
       - ./nginx/certs:/etc/nginx/certs:ro
     networks:
-      - rediska-net
-      - laradock_frontend
+      rediska-net:
+      laradock_frontend:
+        ipv4_address: 172.25.0.50
     restart: unless-stopped
 
   rediska-web:

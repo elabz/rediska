@@ -148,15 +148,17 @@ def run_all_watches(self) -> dict:
 
         logger.info(f"Running {len(watches)} active watches")
 
+        import random
         task_ids = []
         for watch in watches:
-            task = run_single_watch.delay(watch_id=watch.id)
+            delay = random.uniform(0, 270)  # Spread across 4.5 minutes
+            task = run_single_watch.apply_async(args=[], kwargs={"watch_id": watch.id}, countdown=delay)
             task_ids.append({
                 "watch_id": watch.id,
                 "task_id": task.id,
                 "source_location": watch.source_location,
             })
-            logger.debug(f"Queued watch {watch.id} ({watch.source_location}): {task.id}")
+            logger.debug(f"Queued watch {watch.id} ({watch.source_location}): {task.id} (delay={delay:.0f}s)")
 
         return {
             "status": "success",
@@ -331,6 +333,7 @@ def run_single_watch(self, watch_id: int) -> dict:
                 run_id=run.id,
                 external_post_id=external_post_id,
                 post_title=post.title,
+                post_body=post.body_text,
                 post_author=post.author_username,
             )
             db.commit()
@@ -916,6 +919,17 @@ def analyze_and_decide(
         # Update watch stats
         watch.total_posts_seen = (watch.total_posts_seen or 0) + 1
         db.commit()
+
+        # =================================================================
+        # STEP 10: Queue profile items fetch for the author
+        # =================================================================
+        if author_username:
+            try:
+                from rediska_worker.tasks.ingest import analyze_reddit_user
+                analyze_reddit_user.delay(username=author_username)
+                logger.info(f"Queued analyze_reddit_user for {author_username}")
+            except Exception as e:
+                logger.warning(f"Failed to queue analyze_reddit_user for {author_username}: {e}")
 
         return {
             "status": "success",

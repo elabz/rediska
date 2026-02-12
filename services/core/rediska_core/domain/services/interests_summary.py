@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ProfileItem
@@ -64,6 +64,43 @@ class InterestsSummaryOutput(BaseModel):
         alias="postingPatterns",
         description="Notable patterns in posting behavior"
     )
+
+    @field_validator("main_interests", mode="before")
+    @classmethod
+    def normalize_interests_list(cls, v):
+        """Normalize interests list when LLM returns objects instead of strings."""
+        if not isinstance(v, list):
+            return []
+        result = []
+        for item in v:
+            if isinstance(item, str):
+                result.append(item)
+            elif isinstance(item, dict):
+                # Extract values from dict like {'category': 'Tech', 'specificInterest': 'Computing'}
+                values = [str(val) for val in item.values() if val]
+                result.extend(values)
+        return result
+
+    @field_validator("posting_patterns", mode="before")
+    @classmethod
+    def normalize_posting_patterns(cls, v):
+        """Convert dict/list to string if LLM returns wrong type."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v if v.strip() else None
+        if isinstance(v, list):
+            # Empty list or list of items
+            if not v:
+                return None
+            # Join list items into string
+            parts = [str(item) for item in v if item]
+            return "; ".join(parts) if parts else None
+        if isinstance(v, dict):
+            # Convert dict like {'postingFrequency': 'X', 'postType': 'Y'} to string
+            parts = [f"{k}: {val}" for k, val in v.items() if val]
+            return "; ".join(parts) if parts else None
+        return str(v) if v else None
 
 
 # =============================================================================

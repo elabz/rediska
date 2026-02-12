@@ -1091,6 +1091,7 @@ class ScoutWatchPost(Base):
 
     # Post details for audit display
     post_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    post_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     post_author: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     # Tracking

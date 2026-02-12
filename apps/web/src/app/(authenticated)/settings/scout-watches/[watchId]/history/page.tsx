@@ -25,6 +25,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import { AnalyzeUserButton } from '@/components/AnalyzeUserButton';
 import {
   Collapsible,
   CollapsibleContent,
@@ -66,6 +67,7 @@ interface ScoutWatchPost {
   watch_id: number;
   external_post_id: string;
   post_title: string | null;
+  post_body: string | null;
   post_author: string | null;
   first_seen_at: string;
   run_id: number | null;
@@ -517,7 +519,15 @@ export default function ScoutWatchHistoryPage() {
                                       {post.post_title || post.external_post_id}
                                     </p>
                                     <div className="flex items-center flex-wrap gap-2 text-xs text-muted-foreground mt-1">
-                                      {post.post_author && <span>u/{post.post_author}</span>}
+                                      {post.post_author && (
+                                        <>
+                                          <span>u/{post.post_author}</span>
+                                          <AnalyzeUserButton
+                                            username={post.post_author}
+                                            variant="icon"
+                                          />
+                                        </>
+                                      )}
                                       <span>{getRecommendationLabel(post.analysis_recommendation)}</span>
                                       {post.analysis_confidence !== null && (
                                         <span>({Math.round(post.analysis_confidence * 100)}%)</span>
@@ -545,6 +555,18 @@ export default function ScoutWatchHistoryPage() {
 
                               <CollapsibleContent>
                                 <div className="mt-3 pt-3 border-t space-y-4">
+                                  {/* Post Body */}
+                                  {post.post_body && (
+                                    <div>
+                                      <h5 className="text-xs font-medium text-muted-foreground mb-1">
+                                        Post Body:
+                                      </h5>
+                                      <p className="text-sm whitespace-pre-wrap bg-muted/30 p-2 rounded max-h-48 overflow-y-auto">
+                                        {post.post_body}
+                                      </p>
+                                    </div>
+                                  )}
+
                                   {/* Analysis Reasoning */}
                                   {(() => {
                                     // Get reasoning from analysis_reasoning or meta_analysis
