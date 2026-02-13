@@ -28,11 +28,12 @@ Usage:
 """
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ExternalAccount, LeadPost
+from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
 
 # =============================================================================
@@ -130,23 +131,40 @@ class LeadsService:
             # Always set status to 'saved' when saving
             existing.status = "saved"
             self.db.flush()
-            return existing
+            lead = existing
+        else:
+            # Create new lead
+            lead = LeadPost(
+                provider_id=provider_id,
+                source_location=source_location,
+                external_post_id=external_post_id,
+                post_url=post_url,
+                title=title,
+                body_text=body_text,
+                author_account_id=author_account_id,
+                post_created_at=post_created_at,
+                status="saved",
+                remote_visibility="unknown",
+            )
+            self.db.add(lead)
+            self.db.flush()
 
-        # Create new lead
-        lead = LeadPost(
-            provider_id=provider_id,
-            source_location=source_location,
-            external_post_id=external_post_id,
-            post_url=post_url,
-            title=title,
-            body_text=body_text,
-            author_account_id=author_account_id,
-            post_created_at=post_created_at,
-            status="saved",
-            remote_visibility="unknown",
-        )
-        self.db.add(lead)
-        self.db.flush()
+        # Also save the post as a profile_item for the author so that
+        # analysis always has at least this post even when the provider
+        # API returns nothing (e.g., hidden NSFW profile).
+        if author_account_id and (body_text or title):
+            profile_item_id = upsert_profile_item_from_post(
+                db=self.db,
+                account_id=author_account_id,
+                external_post_id=external_post_id,
+                title=title,
+                body_text=body_text,
+                source_location=source_location,
+                post_created_at=post_created_at,
+            )
+            # Attach as transient attribute for the response
+            lead._profile_item_id = profile_item_id  # type: ignore[attr-defined]
+
         return lead
 
     def _get_or_create_author_account(

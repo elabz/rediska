@@ -22,6 +22,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { ContactButton } from '@/components/ContactButton';
 import { EmptyState } from '@/components';
 import { cn } from '@/lib/utils';
 
@@ -190,6 +191,11 @@ function ProfileHeader({
               <><Sparkles className="h-4 w-4 mr-2" />{account.analysis_state === 'analyzed' ? 'Re-analyze' : 'Analyze'}</>
             )}
           </Button>
+          <ContactButton
+            username={account.external_username}
+            providerId={account.provider_id}
+            size="sm"
+          />
           <a
             href={redditProfileUrl}
             target="_blank"

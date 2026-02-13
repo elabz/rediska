@@ -26,12 +26,14 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import (
+    ExternalAccount,
     Identity,
     LeadPost,
     ScoutWatch,
     ScoutWatchPost,
     ScoutWatchRun,
 )
+from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
 
 # =============================================================================
@@ -544,6 +546,10 @@ class ScoutWatchService:
     ) -> ScoutWatchPost:
         """Record a post as seen by this watch.
 
+        Also saves the post as a profile_item for the author if they
+        already exist in external_accounts, ensuring analysis has the
+        post content even if the provider API hides it later.
+
         Args:
             watch_id: The watch ID.
             run_id: The current run ID.
@@ -567,6 +573,35 @@ class ScoutWatchService:
         )
         self.db.add(post)
         self.db.flush()
+
+        # If the author already has an ExternalAccount, save this post as
+        # a profile_item so it's available for analysis even if the author's
+        # profile is hidden (NSFW).
+        if post_author and (post_body or post_title):
+            # Look up the watch to get provider_id and source_location
+            watch = self.db.query(ScoutWatch).filter(ScoutWatch.id == watch_id).first()
+            provider_id = watch.provider_id if watch else "reddit"
+            source_location = watch.source_location if watch else None
+
+            # Only create profile_item if author is already known
+            account = (
+                self.db.query(ExternalAccount)
+                .filter(
+                    ExternalAccount.provider_id == provider_id,
+                    ExternalAccount.external_username == post_author,
+                )
+                .first()
+            )
+            if account:
+                upsert_profile_item_from_post(
+                    db=self.db,
+                    account_id=account.id,
+                    external_post_id=external_post_id,
+                    title=post_title,
+                    body_text=post_body,
+                    source_location=source_location,
+                )
+
         return post
 
     def update_post_analysis(

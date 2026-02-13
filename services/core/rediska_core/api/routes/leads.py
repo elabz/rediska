@@ -229,6 +229,9 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
                 is_suspended=signals.get("is_suspended"),
             )
 
+    # Get profile_item_id if it was just created (transient attr from save_lead)
+    profile_item_id = getattr(lead, "_profile_item_id", None)
+
     return LeadResponse(
         id=lead.id,
         provider_id=lead.provider_id,
@@ -243,6 +246,7 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
         status=lead.status,
         score=None,  # TODO: Add lead scoring
         lead_source=lead.lead_source,
+        profile_item_id=profile_item_id,
         post_created_at=_ensure_utc(lead.post_created_at),
         created_at=_ensure_utc(lead.created_at),
         # Analysis fields
@@ -479,6 +483,22 @@ async def analyze_lead(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Lead has no author - cannot analyze",
         )
+
+    # Ensure the lead post itself is saved as a profile_item before analysis.
+    # This guarantees at least one profile_item exists even for leads saved
+    # before v0.5, or when the provider API returns nothing (hidden NSFW).
+    from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
+
+    upsert_profile_item_from_post(
+        db=db,
+        account_id=lead.author_account_id,
+        external_post_id=lead.external_post_id,
+        title=lead.title,
+        body_text=lead.body_text,
+        source_location=lead.source_location,
+        post_created_at=lead.post_created_at,
+    )
+    db.flush()
 
     # Get services
     provider_adapter = get_provider_adapter(lead.provider_id, db)

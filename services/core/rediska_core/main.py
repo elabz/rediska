@@ -32,6 +32,7 @@ from rediska_core.api.routes import identity as identity_routes
 from rediska_core.api.routes import leads as leads_routes
 from rediska_core.api.routes import metrics as metrics_routes
 from rediska_core.api.routes import ops as ops_routes
+from rediska_core.api.routes import profile_items as profile_items_routes
 from rediska_core.api.routes import reddit_oauth as reddit_oauth_routes
 from rediska_core.api.routes import scout_watches as scout_watches_routes
 from rediska_core.api.routes import search as search_routes
@@ -81,6 +82,7 @@ app.include_router(identity_routes.router)
 app.include_router(leads_routes.router)
 app.include_router(metrics_routes.router)
 app.include_router(ops_routes.router)
+app.include_router(profile_items_routes.router)
 app.include_router(reddit_oauth_routes.router)
 app.include_router(scout_watches_routes.router)
 app.include_router(search_routes.router)

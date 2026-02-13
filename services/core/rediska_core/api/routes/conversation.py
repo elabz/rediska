@@ -8,6 +8,7 @@ Provides endpoints for:
 - GET /conversations/{id}/pending - Get pending (unsent) messages
 - POST /conversations/{id}/messages/{id}/retry - Retry sending a failed message
 - POST /conversations/initiate/from-lead/{lead_id} - Start conversation with lead author
+- POST /conversations/initiate/by-username - Start conversation by username
 """
 
 import base64
@@ -26,6 +27,7 @@ from rediska_core.api.schemas.conversation import (
     ConversationListResponse,
     ConversationSummaryResponse,
     CounterpartResponse,
+    InitiateByUsernameRequest,
     MessageInConversationResponse,
     MessageListResponse,
 )
@@ -1131,6 +1133,135 @@ async def initiate_conversation_from_lead(
         counterpart=counterpart,
         last_activity_at=conversation.last_activity_at,
         unread_count=0,  # Newly created conversation has no unread messages
+        archived_at=conversation.archived_at,
+        created_at=conversation.created_at,
+    )
+
+
+@router.post(
+    "/initiate/by-username",
+    response_model=ConversationSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Initiate a conversation by username",
+    description="Create or get a conversation with a user by their username. "
+    "Creates an ExternalAccount if the user is not yet known.",
+)
+async def initiate_conversation_by_username(
+    request: InitiateByUsernameRequest,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Initiate a conversation with a user by username.
+
+    This endpoint:
+    1. Looks up or creates an ExternalAccount for the given username
+    2. Gets the default identity for the provider
+    3. Gets or creates a Conversation between identity and account
+    4. Returns the conversation details
+    """
+    from datetime import datetime, timezone
+
+    username = request.username.strip()
+    provider_id = request.provider_id.strip()
+
+    if not username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username must not be empty",
+        )
+
+    # Look up or create the ExternalAccount
+    external_account = (
+        db.query(ExternalAccount)
+        .filter(
+            ExternalAccount.provider_id == provider_id,
+            ExternalAccount.external_username == username,
+        )
+        .first()
+    )
+
+    if not external_account:
+        external_account = ExternalAccount(
+            provider_id=provider_id,
+            external_username=username,
+            remote_status="unknown",
+            analysis_state="not_analyzed",
+            contact_state="not_contacted",
+            engagement_state="not_engaged",
+        )
+        db.add(external_account)
+        db.flush()
+
+    # Get the default identity
+    identity = (
+        db.query(Identity)
+        .filter_by(provider_id=provider_id, is_active=True, is_default=True)
+        .first()
+    )
+
+    if not identity:
+        identity = (
+            db.query(Identity)
+            .filter_by(provider_id=provider_id, is_active=True)
+            .first()
+        )
+
+    if not identity:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active identity configured",
+        )
+
+    # Get or create conversation
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.provider_id == provider_id,
+            Conversation.identity_id == identity.id,
+            Conversation.counterpart_account_id == external_account.id,
+        )
+        .first()
+    )
+
+    if not conversation:
+        conversation = Conversation(
+            provider_id=provider_id,
+            external_conversation_id=f"{provider_id}:pair:{identity.external_username.lower()}:{username.lower()}",
+            counterpart_account_id=external_account.id,
+            identity_id=identity.id,
+            last_activity_at=datetime.now(timezone.utc),
+        )
+        db.add(conversation)
+        db.flush()
+
+        audit_entry = AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="conversation.initiate",
+            result="ok",
+            entity_type="conversation",
+            entity_id=conversation.id,
+            request_json={"username": username, "provider_id": provider_id},
+            response_json={"conversation_id": conversation.id},
+        )
+        db.add(audit_entry)
+        db.commit()
+
+    counterpart = CounterpartResponse(
+        id=external_account.id,
+        external_username=external_account.external_username,
+        external_user_id=external_account.external_user_id,
+        remote_status=external_account.remote_status,
+    )
+
+    return ConversationSummaryResponse(
+        id=conversation.id,
+        provider_id=conversation.provider_id,
+        identity_id=identity.id,
+        external_conversation_id=conversation.external_conversation_id,
+        counterpart=counterpart,
+        last_activity_at=conversation.last_activity_at,
+        unread_count=0,
         archived_at=conversation.archived_at,
         created_at=conversation.created_at,
     )

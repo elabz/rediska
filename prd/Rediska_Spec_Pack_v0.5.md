@@ -1,5 +1,5 @@
-# Rediska – Spec Pack v0.4
-**Date:** 2026-01-09
+# Rediska – Spec Pack v0.5
+**Date:** 2026-02-13
 **Purpose:** Engineering-level specification pack (near "build plan") for implementing Rediska, with concrete schemas, mappings, task contracts, retry/idempotency rules, and repository scaffolding.
 
 > **Local storage only (v1):** DB/search/queue are Docker volumes; attachments and backups are local filesystem paths on the host. NAS integration is deferred but the design keeps backup targets pluggable.
@@ -943,4 +943,257 @@ docker stop rediska-mysql-restoretest
 
 ---
 
-**End of Spec Pack v0.4**
+---
+
+## 11) Post Content Persistence & Analysis Resilience (v0.5)
+
+### 11.0 Problem Statement
+
+Browse and Scout searches surface posts via Reddit's search API, which returns posts matching search criteria regardless of the author's profile visibility settings. Many users hide NSFW posts from their public profile. When "Analyze" is triggered, the system fetches the author's profile items via their user page API (`/user/{username}/submitted`), which respects visibility settings and may return zero results. This causes the `InterestsSummaryService` to return "No posts available for analysis" and the `CharacterSummaryService` to produce empty results, despite having the post content readily available from the search that surfaced the user in the first place.
+
+**Root cause chain:**
+1. Browse/Scout returns posts from Reddit search → posts displayed in UI with full body_text
+2. User clicks "Save Lead" → `lead_posts` row created with body_text, `ExternalAccount` created
+3. Auto-analysis triggers → `AnalysisService.analyze_lead()` runs
+4. `_fetch_profile_items()` calls Reddit's user page API → returns 0 items (NSFW hidden)
+5. `_store_profile_items()` stores 0 items
+6. `InterestsSummaryService.summarize()` sees 0 posts → returns `InterestsSummaryResult.empty()`
+7. `MultiAgentAnalysisService` runs with empty context → poor/useless results
+
+**Fix:** The post content we already have from the search must be saved as a `profile_item` linked to the author's `ExternalAccount` **before** analysis runs. Analysis must merge locally-stored items with provider-fetched items and proceed even when the provider returns nothing.
+
+---
+
+### 11.1 Lead Post → Profile Item Linking
+
+When saving a lead (via "Save Lead" button or Scout Watch auto-save), the post content **must also** be stored as a `profile_item` record linked to the author's `ExternalAccount`.
+
+#### Rules
+1. `LeadsService.save_lead()` must call a new method `_save_post_as_profile_item()` after creating/upserting the `lead_posts` row.
+2. The profile_item is upserted by `(account_id, item_type='post', external_item_id)`.
+3. Fields mapped from lead post data:
+   - `account_id` ← `lead.author_account_id`
+   - `item_type` ← `'post'`
+   - `external_item_id` ← `lead.external_post_id`
+   - `text_content` ← `lead.body_text` (full text, including title prepended)
+   - `item_created_at` ← `lead.post_created_at`
+   - `subreddit` ← `lead.source_location`
+   - `link_title` ← `lead.title`
+   - `remote_visibility` ← `'visible'` (we just saw it in search results)
+4. This ensures at minimum one profile_item exists for every saved lead.
+
+#### Scout Watch Integration
+`ScoutWatchService.record_post()` must also create a profile_item when it creates a `ScoutWatchPost` with an associated author. The `post_body` field on `ScoutWatchPost` is already populated; this must be propagated to `profile_items`.
+
+---
+
+### 11.2 Auto-Accumulate Posts for Known Users
+
+When Browse or Scout encounters a post from a user who already has an `ExternalAccount` record, the new post should be automatically saved as a `profile_item` — even without the user explicitly clicking "Save Lead".
+
+#### Approach: Batch Upsert Endpoint
+
+```
+POST /api/core/profile-items/ingest-browse-posts
+Content-Type: application/json
+
+{
+  "posts": [
+    {
+      "provider_id": "reddit",
+      "external_post_id": "abc123",
+      "author_username": "some_user",
+      "title": "Post title",
+      "body_text": "Full text",
+      "source_location": "subreddit_name",
+      "post_created_at": "2026-02-13T10:00:00Z"
+    },
+    ...
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "ingested_count": 3,
+  "new_items_count": 2,
+  "known_authors": ["user1", "user2"]
+}
+```
+
+#### Backend Logic
+1. For each post in the batch, check if `author_username` exists in `external_accounts` for the given `provider_id`.
+2. If the author IS known: upsert a `profile_item` record for this post.
+3. If the author is NOT known: skip (no ExternalAccount to link to).
+4. Return which authors were known (for UI to show indicators).
+
+#### Frontend Integration
+- After `fetchPosts()` returns browse results, fire a background `POST /profile-items/ingest-browse-posts` with all posts.
+- Response tells the UI which authors are already known (show badge/indicator on PostCard).
+- Scout Watch runs already create posts via `record_post()` — enhance that path to also create profile_items (§11.1).
+
+---
+
+### 11.3 Analysis Resilience
+
+The analysis pipeline must work even when the provider's profile item fetch returns zero results.
+
+#### Changes to `AnalysisService.analyze_lead()`
+
+1. **Before fetching from provider**, query locally-stored `profile_items` for the account.
+2. **After fetching from provider**, merge provider items with local items (union by `external_item_id`; local items fill gaps).
+3. **Ensure the lead post itself** is present as a profile_item. If not, create it inline before proceeding.
+4. **Never fail** due to zero profile items. The analysis pipeline should proceed with whatever data is available (even just one post).
+
+#### Updated Step Sequence
+```
+Step 1: Get lead + author account
+Step 2: Ensure lead post is saved as profile_item (§11.1)
+Step 3: Fetch profile from provider (metadata: karma, age, bio)
+Step 4: Create/update ProfileSnapshot
+Step 5: Fetch profile items from provider (may return 0)
+Step 6: Query existing local profile_items for this account
+Step 7: Merge: provider items ∪ local items (dedupe by external_item_id)
+Step 8: Store merged items
+Step 9: Index + embed
+Step 10: Update analysis_state
+```
+
+#### Impact on Multi-Agent Analysis
+- `InterestsSummaryService` will now always have at least the lead post → never returns empty.
+- `CharacterSummaryService` may still return empty if no comments are found — this is acceptable.
+- `MultiAgentAnalysisService` context will include at least one post's text.
+
+---
+
+### 11.4 Contact Author from Any Screen
+
+Users must be able to initiate contact with a post's author from any screen where the username appears.
+
+#### UI Touchpoints
+
+| Screen | Component | Action |
+|--------|-----------|--------|
+| Browse | `PostCard` | "Message" button next to "Save Lead" |
+| Leads list | `LeadRow` | "Message" icon button |
+| Lead detail | `LeadDetail` | "Contact Author" button |
+| UserProfilePanel | Panel header | "Message" action button |
+| Scout Watch history | `WatchPostRow` | "Message" icon button |
+| Directories | `AccountRow` | "Message" icon button |
+| Profile page | Profile header | "Contact" button |
+
+#### New Conversation Flow
+
+Clicking "Message" / "Contact" triggers:
+
+1. **Check existing conversation**: Query `GET /api/core/conversations?counterpart_username={username}` to find if an open conversation already exists with this author.
+2. **If conversation exists**: Navigate to `/inbox/{conversationId}` — open existing thread.
+3. **If no conversation**: Navigate to `/inbox/new?to={username}&provider=reddit` — open compose view for new conversation.
+
+#### New Compose Page: `/inbox/new`
+
+A new page for composing the first message to a new contact:
+- Header shows recipient username, profile panel (collapsed by default)
+- Message compose box (same as existing conversation compose)
+- Posts panel on the side (§11.5)
+- On send: creates conversation + sends first message via `POST /api/core/conversations` (new endpoint or enhanced existing)
+
+#### Backend: Create Conversation + First Message
+
+```
+POST /api/core/conversations
+{
+  "provider_id": "reddit",
+  "counterpart_username": "target_user",
+  "identity_id": 123,        // optional, uses default if omitted
+  "initial_message": "Hello..."
+}
+```
+
+Returns:
+```json
+{
+  "conversation_id": 456,
+  "message_id": 789,
+  "status": "queued"
+}
+```
+
+Backend steps:
+1. Get or create `ExternalAccount` for counterpart
+2. Check `do_not_contact` list — block if listed
+3. Create `Conversation` row (identity_id from request or default)
+4. Enqueue `message.send_manual` task with message text
+5. Create local `Message` record with `direction='out'`
+6. Write audit log
+
+---
+
+### 11.5 Posts Panel in Message Compose
+
+When composing a message (both new conversation and existing thread), an expandable side panel shows the counterpart's saved posts.
+
+#### UI Specification
+
+- **Location**: Right side panel in conversation view, below existing image gallery
+- **Toggle**: Collapsible section header: "Posts ({count})" with expand/collapse chevron
+- **Default state**: Collapsed (same as image gallery behavior)
+- **Content**: Scrollable list of posts from `profile_items` where `item_type='post'` for the counterpart's `ExternalAccount`
+
+#### Post Item Display
+```
+┌─────────────────────────────────────────┐
+│ r/subreddit_name · 3d ago               │
+│ Post Title Here                         │
+│ First 200 chars of body text...         │
+│ [View full ↗]                           │
+└─────────────────────────────────────────┘
+```
+
+#### Data Source
+```
+GET /api/core/accounts/{account_id}/profile-items?item_type=post&limit=50
+```
+
+This endpoint already exists via the profile items query in `UserProfilePanel`. Reuse the same API.
+
+#### Benefits
+- User can reference specific posts when composing personalized messages
+- Posts from browse, scout, and provider fetches are all visible
+- As more posts accumulate (§11.2), the panel gets richer over time
+
+---
+
+### 11.6 Auto-Analyze on Save Lead (Enhancement)
+
+The current auto-analyze on save (fire-and-forget from browse page) has a race condition: analysis may start before the lead post is saved as a profile_item.
+
+#### Enhanced Flow
+
+1. `POST /api/core/leads/save` now also creates profile_item (§11.1) — synchronous, within same DB transaction
+2. Response includes `profile_item_id` in addition to existing fields
+3. Frontend fires `POST /api/core/leads/{id}/analyze` as before (fire-and-forget)
+4. Backend `analyze_lead()` now finds at least 1 profile_item for the account (the lead post itself)
+5. Analysis never returns "No posts available" for a saved lead
+
+#### Schema Change: `SaveLeadResponse`
+Add field:
+```python
+profile_item_id: Optional[int] = Field(default=None, description="Profile item created for this post")
+```
+
+---
+
+## 12) DDL Additions (v0.5)
+
+No new tables required. All changes use existing tables:
+
+- `profile_items` — already supports posts, comments, images with `subreddit`, `link_title` metadata columns (added in migration 013)
+- `lead_posts` — no schema changes
+- `external_accounts` — no schema changes
+- `conversations` — may need a new creation path but schema unchanged
+
+---
+
+**End of Spec Pack v0.5**

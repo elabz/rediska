@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ContactButton } from '@/components/ContactButton';
 import { cn } from '@/lib/utils';
 
 interface ProfileSnapshot {
@@ -557,6 +558,13 @@ export function UserProfilePanel({
             {isQueued ? 'Queued' : isAnalyzed ? 'Re-analyze' : 'Analyze'}
           </span>
         </Button>
+
+        {/* Contact Button */}
+        <ContactButton
+          username={cleanUsername}
+          providerId={providerId}
+          variant="icon"
+        />
 
         {/* Expand/Collapse Button */}
         <Button

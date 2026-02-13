@@ -26,6 +26,7 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { AnalyzeUserButton } from '@/components/AnalyzeUserButton';
+import { ContactButton } from '@/components/ContactButton';
 import {
   Collapsible,
   CollapsibleContent,
@@ -523,6 +524,10 @@ export default function ScoutWatchHistoryPage() {
                                         <>
                                           <span>u/{post.post_author}</span>
                                           <AnalyzeUserButton
+                                            username={post.post_author}
+                                            variant="icon"
+                                          />
+                                          <ContactButton
                                             username={post.post_author}
                                             variant="icon"
                                           />

@@ -94,12 +94,14 @@ function PostCard({
   post,
   onSave,
   isSaving,
-  isSaved
+  isSaved,
+  isKnownAuthor,
 }: {
   post: BrowsePost;
   onSave: () => void;
   isSaving: boolean;
   isSaved: boolean;
+  isKnownAuthor?: boolean;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const hasLongContent = post.body_text && post.body_text.length > 300;
@@ -119,6 +121,12 @@ function PostCard({
             <Badge variant="secondary" className="text-xs h-5 px-1.5">
               r/{post.source_location}
             </Badge>
+            {isKnownAuthor && (
+              <Badge variant="outline" className="text-xs h-5 px-1.5 border-primary/50 text-primary">
+                <User className="h-3 w-3 mr-0.5" />
+                Known
+              </Badge>
+            )}
             {post.post_created_at && (
               <>
                 <span>•</span>
@@ -222,6 +230,7 @@ export default function BrowsePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [creatingWatch, setCreatingWatch] = useState(false);
   const [watchCreated, setWatchCreated] = useState(false);
+  const [knownAuthors, setKnownAuthors] = useState<Set<string>>(new Set());
 
   // Load recent locations and bookmarks from localStorage
   useEffect(() => {
@@ -333,6 +342,43 @@ export default function BrowsePage() {
         addToRecent(cleanLocation);
       }
       setCursor(data.cursor);
+
+      // Auto-ingest posts for known users (fire-and-forget background call).
+      // If any post authors already exist in the system, their new posts
+      // get saved as profile_items for richer analysis context.
+      if (data.posts.length > 0) {
+        fetch('/api/core/profile-items/ingest-browse-posts', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            posts: data.posts.map((p: BrowsePost) => ({
+              provider_id: p.provider_id,
+              external_post_id: p.external_post_id,
+              author_username: p.author_username,
+              title: p.title,
+              body_text: p.body_text,
+              source_location: p.source_location,
+              post_created_at: p.post_created_at,
+            })),
+          }),
+        })
+          .then(res => res.ok ? res.json() : null)
+          .then(result => {
+            if (result?.known_authors?.length) {
+              setKnownAuthors(prev => {
+                const next = new Set(prev);
+                for (const author of result.known_authors) {
+                  next.add(author);
+                }
+                return next;
+              });
+            }
+          })
+          .catch(() => {
+            // Silent failure — this is a background enhancement
+          });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -811,6 +857,7 @@ export default function BrowsePage() {
                           onSave={() => saveAsLead(post)}
                           isSaving={savingPosts.has(postKey)}
                           isSaved={savedPosts.has(postKey)}
+                          isKnownAuthor={knownAuthors.has(post.author_username)}
                         />
                       );
                     })}

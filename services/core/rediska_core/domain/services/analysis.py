@@ -3,10 +3,11 @@
 This service orchestrates the lead analysis workflow:
 1. Fetches author profile from provider
 2. Fetches author items (posts, comments) from provider
-3. Creates/updates ProfileSnapshot and ProfileItem records
-4. Indexes content in Elasticsearch
-5. Generates embeddings for content
-6. Updates ExternalAccount.analysis_state
+3. Merges provider items with locally-stored items (from browse/scout saves)
+4. Creates/updates ProfileSnapshot and ProfileItem records
+5. Indexes content in Elasticsearch
+6. Generates embeddings for content
+7. Updates ExternalAccount.analysis_state
 
 Usage:
     service = AnalysisService(
@@ -19,6 +20,7 @@ Usage:
     result = await service.analyze_lead(lead_id)
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -38,6 +40,8 @@ from rediska_core.providers.base import (
     ProviderProfile,
     ProviderProfileItem,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -151,19 +155,36 @@ class AnalysisService:
             # Step 2: Create profile snapshot
             snapshot = self._create_profile_snapshot(account, profile)
 
-            # Step 3: Fetch author items from provider (with pagination)
-            items = await self._fetch_profile_items(account)
+            # Step 3: Fetch author items from provider (may return 0 if NSFW hidden)
+            provider_items = await self._fetch_profile_items(account)
 
-            # Step 4: Store profile items
-            stored_items = self._store_profile_items(account, items)
+            # Step 4: Query existing local profile_items (from prior saves, browse, scout)
+            local_items = (
+                self.db.query(ProfileItem)
+                .filter(
+                    ProfileItem.account_id == account.id,
+                    ProfileItem.deleted_at.is_(None),
+                )
+                .all()
+            )
 
-            # Step 5: Index content
+            # Step 5: Merge — provider items take precedence, local items fill gaps
+            merged_items = self._merge_items(provider_items, local_items)
+            logger.info(
+                "Analysis merge for account %d: %d provider + %d local → %d merged",
+                account.id, len(provider_items), len(local_items), len(merged_items),
+            )
+
+            # Step 6: Store merged items
+            stored_items = self._store_profile_items(account, merged_items)
+
+            # Step 7: Index content
             indexed_count = self._index_content(account, snapshot, stored_items)
 
-            # Step 6: Generate embeddings
+            # Step 8: Generate embeddings
             embedded_count = self._generate_embeddings(account, snapshot, stored_items)
 
-            # Step 7: Update account analysis state
+            # Step 9: Update account analysis state
             self._update_analysis_state(account)
 
             return AnalysisResult(
@@ -197,7 +218,7 @@ class AnalysisService:
             ProviderProfile if found, None otherwise.
         """
         if not self.provider_adapter:
-            self.logger.error("Provider adapter not initialized")
+            logger.error("Provider adapter not initialized")
             return None
 
         return await self.provider_adapter.fetch_profile(account.external_username)
@@ -236,6 +257,54 @@ class AnalysisService:
             cursor = result.next_cursor
 
         return all_items
+
+    # =========================================================================
+    # MERGE LOCAL + PROVIDER ITEMS
+    # =========================================================================
+
+    def _merge_items(
+        self,
+        provider_items: list[ProviderProfileItem],
+        local_items: list[ProfileItem],
+    ) -> list[ProviderProfileItem]:
+        """Merge provider-fetched items with locally-stored items.
+
+        Provider items take precedence (fresher data from API).
+        Local items fill gaps for posts hidden from the user's profile
+        but captured from browse/scout search results.
+
+        Args:
+            provider_items: Items fetched from the provider API.
+            local_items: Items already stored locally in profile_items table.
+
+        Returns:
+            Merged list of ProviderProfileItem (union, deduplicated by external_id).
+        """
+        # Build set of external IDs already covered by provider
+        provider_ids = {item.external_id for item in provider_items}
+
+        # Convert local items that are NOT in the provider set
+        for local_item in local_items:
+            if local_item.external_item_id not in provider_ids:
+                try:
+                    item_type = ProfileItemType(local_item.item_type)
+                except ValueError:
+                    continue
+
+                provider_items.append(
+                    ProviderProfileItem(
+                        external_id=local_item.external_item_id,
+                        item_type=item_type,
+                        author_id=str(local_item.account_id),
+                        title=getattr(local_item, "link_title", None),
+                        body_text=local_item.text_content,
+                        created_at=local_item.item_created_at,
+                        location=getattr(local_item, "subreddit", None),
+                    )
+                )
+                provider_ids.add(local_item.external_item_id)
+
+        return provider_items
 
     # =========================================================================
     # PROFILE SNAPSHOT

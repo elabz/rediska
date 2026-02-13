@@ -97,3 +97,10 @@ class MessageListResponse(BaseModel):
         description="Cursor for the next page (base64 encoded). None if no more pages.",
     )
     has_more: bool = False
+
+
+class InitiateByUsernameRequest(BaseModel):
+    """Request to initiate a conversation by username."""
+
+    username: str = Field(..., description="External username to contact")
+    provider_id: str = Field(default="reddit", description="Provider ID")

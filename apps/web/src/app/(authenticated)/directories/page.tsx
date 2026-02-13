@@ -25,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { ContactButton } from '@/components/ContactButton';
 import { EmptyState } from '@/components';
 import { cn } from '@/lib/utils';
 
@@ -150,15 +151,21 @@ function DirectoryEntryCard({ entry }: { entry: DirectoryEntry }) {
         </div>
 
           {/* Actions */}
-          <a
-            href={redditProfileUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <ExternalLink className="h-4 w-4" />
-          </a>
+          <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+            <ContactButton
+              username={entry.external_username}
+              providerId={entry.provider_id}
+              variant="icon"
+            />
+            <a
+              href={redditProfileUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <ExternalLink className="h-4 w-4" />
+            </a>
+          </div>
         </div>
       </Card>
     </Link>

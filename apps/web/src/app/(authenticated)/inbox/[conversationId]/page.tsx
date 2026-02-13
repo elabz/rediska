@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images } from 'lucide-react';
+import { PostsPanel } from '@/components/PostsPanel';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -859,6 +860,13 @@ export default function ConversationDetailPage() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Collapsible posts panel */}
+          {conversation && (
+            <div className="border-b border-border">
+              <PostsPanel accountId={conversation.counterpart.id} />
             </div>
           )}
 
