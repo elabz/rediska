@@ -453,8 +453,13 @@ class MessageSyncService:
         self.db.flush()
 
         # Update conversation last_activity_at
-        if conversation.last_activity_at is None or sent_at > conversation.last_activity_at:
-            conversation.last_activity_at = sent_at
+        # Compare as naive datetimes since MySQL DATETIME columns don't store timezone
+        sent_at_naive = sent_at.replace(tzinfo=None) if sent_at.tzinfo else sent_at
+        last_activity = conversation.last_activity_at
+        if last_activity is not None and last_activity.tzinfo:
+            last_activity = last_activity.replace(tzinfo=None)
+        if last_activity is None or sent_at_naive > last_activity:
+            conversation.last_activity_at = sent_at_naive
             self.db.flush()
 
         return message, True
