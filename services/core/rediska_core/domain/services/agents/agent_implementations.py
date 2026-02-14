@@ -286,12 +286,15 @@ class MetaAnalysisAgent(BaseAnalysisAgent):
     """Meta-analysis coordinator - synthesizes results into final recommendation."""
 
     def _format_dimension_results(self, dimension_results: dict[str, Any]) -> str:
-        """Format dimension results with clear labels for the LLM."""
+        """Format dimension results with clear labels for the LLM.
+
+        Handles None parsed_output from failed dimension agents gracefully.
+        """
         sections = []
 
         # Demographics
         if "demographics" in dimension_results:
-            demo = dimension_results["demographics"].get("parsed_output", {})
+            demo = dimension_results["demographics"].get("parsed_output") or {}
             sections.append(f"""<demographics>
 POST_AUTHOR_AGE: {demo.get('age', 'unknown')}
 POST_AUTHOR_GENDER: {demo.get('gender', 'unknown')}
@@ -301,7 +304,7 @@ POST_AUTHOR_LOCATION_NEAR: {demo.get('location_near', False)}
 
         # Preferences
         if "preferences" in dimension_results:
-            prefs = dimension_results["preferences"].get("parsed_output", {})
+            prefs = dimension_results["preferences"].get("parsed_output") or {}
             sections.append(f"""<preferences>
 HOBBIES: {prefs.get('hobbies', [])}
 PREFERRED_HOBBIES_FOUND: {prefs.get('preferred_hobbies_found', [])}
@@ -312,7 +315,7 @@ COMPATIBILITY_SCORE: {prefs.get('compatibility_score', 0)}
 
         # Relationship Goals
         if "relationship_goals" in dimension_results:
-            goals = dimension_results["relationship_goals"].get("parsed_output", {})
+            goals = dimension_results["relationship_goals"].get("parsed_output") or {}
             sections.append(f"""<relationship_goals>
 RELATIONSHIP_INTENT: {goals.get('relationship_intent', 'unknown')}
 PARTNER_MAX_AGE: {goals.get('partner_max_age', 'no_max_age')}
@@ -321,7 +324,7 @@ DEAL_BREAKERS: {goals.get('deal_breakers', [])}
 
         # Risk Assessment
         if "risk_flags" in dimension_results:
-            risk = dimension_results["risk_flags"].get("parsed_output", {})
+            risk = dimension_results["risk_flags"].get("parsed_output") or {}
             sections.append(f"""<risk_assessment>
 IS_AUTHENTIC: {risk.get('is_authentic', True)}
 ASSESSMENT: {risk.get('assessment', 'unknown')}
@@ -331,7 +334,7 @@ SCAM_INDICATORS: {risk.get('scam_indicators', [])}
 
         # Intimacy & Compatibility
         if "sexual_preferences" in dimension_results:
-            intimate = dimension_results["sexual_preferences"].get("parsed_output", {})
+            intimate = dimension_results["sexual_preferences"].get("parsed_output") or {}
             sections.append(f"""<intimacy>
 POST_AUTHOR_DS_ORIENTATION: {intimate.get('ds_orientation', 'unknown')}
 KINKS_INTERESTS: {intimate.get('kinks_interests', [])}

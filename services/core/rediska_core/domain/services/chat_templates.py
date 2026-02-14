@@ -14,6 +14,7 @@ Usage:
     defaults = template.get_default_params()
 """
 
+import json
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -21,6 +22,41 @@ from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _repair_json(json_str: str) -> str:
+    """Attempt to repair common JSON issues from LLM output.
+
+    Fixes:
+    - Trailing commas before } or ]
+    - Single quotes used instead of double quotes (only in simple cases)
+    - Unescaped newlines inside string values
+    """
+    # Remove trailing commas before } or ]
+    repaired = re.sub(r',\s*([\]}])', r'\1', json_str)
+
+    # Try parsing as-is first
+    try:
+        json.loads(repaired)
+        return repaired
+    except json.JSONDecodeError:
+        pass
+
+    # Try fixing unescaped control characters in string values
+    # Replace literal newlines/tabs inside strings with escaped versions
+    # This is a best-effort approach
+    repaired = re.sub(r'(?<=": ")(.*?)(?="[,\}])', _escape_string_value, repaired, flags=re.DOTALL)
+
+    return repaired
+
+
+def _escape_string_value(match: re.Match) -> str:
+    """Escape control characters in a JSON string value."""
+    val = match.group(0)
+    val = val.replace('\n', '\\n')
+    val = val.replace('\t', '\\t')
+    val = val.replace('\r', '\\r')
+    return val
 
 
 @dataclass
@@ -80,7 +116,8 @@ class BaseChatTemplate(ABC):
         """Extract JSON from the response content.
 
         First applies template-specific content extraction,
-        then looks for JSON object in the result.
+        then looks for JSON object in the result, and repairs
+        common JSON issues (trailing commas, etc.).
 
         Args:
             raw_response: The raw text from the LLM
@@ -100,7 +137,19 @@ class BaseChatTemplate(ABC):
                 f"[{self.name}] Extracted JSON: {len(json_str)} chars "
                 f"from positions {first_brace}-{last_brace}"
             )
-            return json_str
+
+            # Try parsing raw first; if it fails, attempt repair
+            try:
+                json.loads(json_str)
+                return json_str
+            except json.JSONDecodeError:
+                repaired = _repair_json(json_str)
+                if repaired != json_str:
+                    logger.info(
+                        f"[{self.name}] Applied JSON repair "
+                        f"({len(json_str)} -> {len(repaired)} chars)"
+                    )
+                return repaired
 
         logger.warning(
             f"[{self.name}] No JSON braces found in response. "

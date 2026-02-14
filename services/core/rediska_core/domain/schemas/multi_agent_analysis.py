@@ -1,8 +1,39 @@
 """Pydantic schemas for multi-agent lead analysis output."""
 
+import json
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _coerce_evidence_items(v: list) -> list[str]:
+    """Coerce evidence items to strings.
+
+    Some models output evidence as list of dicts like:
+        [{"quote": "...", "analysis": "..."}]
+    instead of list of strings. This normalizes them.
+    """
+    result = []
+    for item in v:
+        if isinstance(item, str):
+            result.append(item)
+        elif isinstance(item, dict):
+            # Try common keys: quote, text, description, analysis
+            parts = []
+            for key in ("quote", "text", "description"):
+                if key in item and item[key]:
+                    parts.append(str(item[key]))
+            for key in ("analysis", "reasoning", "interpretation", "notes"):
+                if key in item and item[key]:
+                    parts.append(str(item[key]))
+            if parts:
+                result.append(" — ".join(parts))
+            else:
+                # Fallback: stringify the whole dict
+                result.append(json.dumps(item))
+        else:
+            result.append(str(item))
+    return result
 
 
 # ============================================================================
@@ -64,6 +95,13 @@ class DemographicsOutput(BaseModel):
         description="Any concerns or inconsistencies in demographic information",
     )
 
+    @field_validator("evidence", "flags", mode="before")
+    @classmethod
+    def coerce_str_list(cls, v):
+        if isinstance(v, list):
+            return _coerce_evidence_items(v)
+        return v
+
     model_config = {"extra": "allow"}
 
 
@@ -111,6 +149,13 @@ class PreferencesOutput(BaseModel):
         default_factory=list,
         description="Supporting evidence from content",
     )
+
+    @field_validator("evidence", "hobbies", "preferred_hobbies_found", "kinks", "preferred_kinks_found", mode="before")
+    @classmethod
+    def coerce_str_list(cls, v):
+        if isinstance(v, list):
+            return _coerce_evidence_items(v)
+        return v
 
     model_config = {"extra": "allow"}
 
@@ -179,6 +224,17 @@ class RelationshipGoalsOutput(BaseModel):
         description="Supporting evidence from content",
     )
 
+    @field_validator(
+        "evidence", "relationship_goals", "deal_breakers",
+        "relationship_history", "compatibility_factors",
+        "incompatibility_factors", mode="before",
+    )
+    @classmethod
+    def coerce_str_list(cls, v):
+        if isinstance(v, list):
+            return _coerce_evidence_items(v)
+        return v
+
     model_config = {"extra": "allow"}
 
 
@@ -214,6 +270,13 @@ class RiskFlagsOutput(BaseModel):
         default_factory=list,
         description="Supporting evidence from content",
     )
+
+    @field_validator("evidence", "red_flags", "scam_indicators", mode="before")
+    @classmethod
+    def coerce_str_list(cls, v):
+        if isinstance(v, list):
+            return _coerce_evidence_items(v)
+        return v
 
     model_config = {"extra": "allow"}
 
@@ -256,6 +319,13 @@ class SexualPreferencesOutput(BaseModel):
         default_factory=list,
         description="Supporting evidence from content",
     )
+
+    @field_validator("evidence", "kinks_interests", "sexual_compatibility_notes", mode="before")
+    @classmethod
+    def coerce_str_list(cls, v):
+        if isinstance(v, list):
+            return _coerce_evidence_items(v)
+        return v
 
     model_config = {"extra": "allow"}
 
@@ -311,6 +381,13 @@ class MetaAnalysisOutput(BaseModel):
         default="medium",
         description="Contact priority - 'high', 'medium', or 'low'",
     )
+
+    @field_validator("strengths", "concerns", mode="before")
+    @classmethod
+    def coerce_str_list(cls, v):
+        if isinstance(v, list):
+            return _coerce_evidence_items(v)
+        return v
 
     model_config = {"extra": "allow"}
 
