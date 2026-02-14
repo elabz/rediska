@@ -496,9 +496,14 @@ class TestAtMostOnceSemantics:
             is_ambiguous=False,
         )
 
-        # Job should be marked as retrying
+        # Job should be marked as failed (user can manually retry via UI)
         db_session.refresh(job)
-        assert job.status == "retrying"
+        assert job.status == "failed"
+
+        # Message should be marked as send_failed with error
+        message = db_session.query(Message).filter(Message.id == result.message_id).first()
+        assert message.remote_visibility == "send_failed"
+        assert message.send_error == "Rate limited - try again later"
 
     def test_manual_retry_allowed_for_ambiguous_failure(
         self, db_session, setup_conversation, setup_credentials

@@ -838,6 +838,17 @@ export default function ConversationDetailPage() {
     };
   }, []);
 
+  // Build Reddit compose URL for failed message fallback
+  // Must be before early returns to satisfy React's rules of hooks
+  const redditComposeUrl = useMemo(() => {
+    if (!conversation) return '';
+    const params = new URLSearchParams({ to: conversation.counterpart.external_username });
+    if (conversation.counterpart_last_post_title) {
+      params.set('subject', conversation.counterpart_last_post_title);
+    }
+    return `https://www.reddit.com/message/compose/?${params.toString()}`;
+  }, [conversation]);
+
   if (loading) {
     return (
       <div className="flex flex-col h-[calc(100vh-3.5rem)] lg:h-screen bg-card overflow-hidden">
@@ -892,15 +903,6 @@ export default function ConversationDetailPage() {
   }
 
   const { counterpart } = conversation;
-
-  // Build Reddit compose URL for failed message fallback
-  const redditComposeUrl = useMemo(() => {
-    const params = new URLSearchParams({ to: counterpart.external_username });
-    if (conversation.counterpart_last_post_title) {
-      params.set('subject', conversation.counterpart_last_post_title);
-    }
-    return `https://www.reddit.com/message/compose/?${params.toString()}`;
-  }, [counterpart.external_username, conversation.counterpart_last_post_title]);
 
   return (
     <div className="flex flex-col h-[calc(100vh-10rem)] min-h-[400px] border border-border rounded-lg bg-card overflow-hidden">
