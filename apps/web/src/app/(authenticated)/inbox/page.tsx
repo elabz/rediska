@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useCallback, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Loader2, MessageSquare, Paperclip, RefreshCw, Reply, Search, X } from 'lucide-react';
+import { AlertTriangle, Loader2, MessageSquare, Paperclip, RefreshCw, Reply, Search, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -30,6 +30,7 @@ interface Conversation {
   last_activity_at: string | null;
   last_message_preview: string | null;
   unread_count: number;
+  has_failed_messages: boolean;
   archived_at: string | null;
   created_at: string;
 }
@@ -81,16 +82,23 @@ function ConversationSkeleton() {
 }
 
 function ConversationItem({ conversation, identity }: { conversation: Conversation; identity?: { provider_id: string; display_name: string; external_username: string } }) {
-  const { counterpart, last_message_preview, last_activity_at, unread_count } = conversation;
+  const { counterpart, last_message_preview, last_activity_at, unread_count, has_failed_messages } = conversation;
 
   return (
     <Link href={`/inbox/${conversation.id}`}>
       <div className="flex items-center gap-4 p-4 hover:bg-muted/50 transition-colors cursor-pointer border-b border-border last:border-b-0">
-        <Avatar className="h-12 w-12">
-          <AvatarFallback className="bg-primary/10 text-primary font-medium">
-            {getInitials(counterpart.external_username)}
-          </AvatarFallback>
-        </Avatar>
+        <div className="relative">
+          <Avatar className="h-12 w-12">
+            <AvatarFallback className="bg-primary/10 text-primary font-medium">
+              {getInitials(counterpart.external_username)}
+            </AvatarFallback>
+          </Avatar>
+          {has_failed_messages && (
+            <div className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-destructive flex items-center justify-center" title="Has failed messages">
+              <AlertTriangle className="h-3 w-3 text-destructive-foreground" />
+            </div>
+          )}
+        </div>
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">

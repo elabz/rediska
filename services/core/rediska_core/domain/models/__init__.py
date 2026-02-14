@@ -447,7 +447,7 @@ class Message(Base):
 
     remote_visibility: Mapped[str] = mapped_column(
         Enum(
-            "visible", "deleted_by_author", "removed", "unknown",
+            "visible", "deleted_by_author", "removed", "unknown", "send_failed",
             name="remote_visibility_enum"
         ),
         nullable=False,
@@ -455,6 +455,7 @@ class Message(Base):
     )
     remote_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
+    send_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow

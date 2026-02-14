@@ -42,6 +42,7 @@ class ConversationSummaryResponse(BaseModel):
     last_activity_at: Optional[datetime] = None
     last_message_preview: Optional[str] = None
     unread_count: int = 0
+    has_failed_messages: bool = False
     archived_at: Optional[datetime] = None
     created_at: datetime
 
@@ -57,6 +58,7 @@ class ConversationDetailResponse(BaseModel):
     external_conversation_id: str
     counterpart: CounterpartResponse
     last_activity_at: Optional[datetime] = None
+    counterpart_last_post_title: Optional[str] = None
     archived_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
@@ -83,6 +85,7 @@ class MessageInConversationResponse(BaseModel):
     body_text: Optional[str] = None
     sent_at: datetime
     remote_visibility: str = "visible"
+    send_error: Optional[str] = None
     identity_id: Optional[int] = None
     created_at: datetime
     attachments: list[AttachmentInMessageResponse] = Field(default_factory=list)

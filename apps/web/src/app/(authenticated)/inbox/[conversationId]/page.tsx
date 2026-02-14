@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images } from 'lucide-react';
+import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle } from 'lucide-react';
 import { PostsPanel } from '@/components/PostsPanel';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
@@ -43,6 +43,7 @@ interface ConversationDetail {
   external_conversation_id: string;
   counterpart: Counterpart;
   last_activity_at: string | null;
+  counterpart_last_post_title: string | null;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
@@ -62,6 +63,7 @@ interface Message {
   body_text: string | null;
   sent_at: string;
   remote_visibility: string;
+  send_error: string | null;
   identity_id: number | null;
   created_at: string;
   attachments?: Attachment[];
@@ -102,22 +104,73 @@ function formatMessageTime(dateString: string): string {
   });
 }
 
+/**
+ * Translates Reddit API error codes into human-readable explanations.
+ */
+function getSendErrorExplanation(error: string | null): string {
+  if (!error) return 'Message could not be delivered.';
+
+  const errorLower = error.toLowerCase();
+
+  if (errorLower.includes('not_whitelisted_by_user_message') || errorLower.includes("can't send a message to that user")) {
+    return 'This user has their privacy settings configured to only accept messages from whitelisted users. You are not on their whitelist.';
+  }
+  if (errorLower.includes('user_blocked')) {
+    return 'This user has blocked you. You cannot send messages to them.';
+  }
+  if (errorLower.includes('user_muted')) {
+    return 'This user has muted you. They will not receive your messages.';
+  }
+  if (errorLower.includes('no_user') || errorLower.includes('user_doesnt_exist')) {
+    return 'This user account no longer exists or has been deleted.';
+  }
+  if (errorLower.includes('user_is_suspended')) {
+    return 'This user\'s account has been suspended by Reddit.';
+  }
+  if (errorLower.includes('ratelimit') || errorLower.includes('rate_limit')) {
+    return 'Reddit rate limit reached. Please wait a few minutes and try resending.';
+  }
+  if (errorLower.includes('invalid_permission')) {
+    return 'Your Reddit account does not have permission to send messages. This may be due to low karma or a new account.';
+  }
+  if (errorLower.includes('no credential') || errorLower.includes('no_credential')) {
+    return 'No Reddit credentials found for this identity. Please re-authenticate in Settings.';
+  }
+  if (errorLower.includes('thread_locked')) {
+    return 'This conversation thread has been locked and no longer accepts new messages.';
+  }
+  if (errorLower.includes('gold_required')) {
+    return 'This action requires Reddit Premium (Gold).';
+  }
+
+  // Fallback: show the raw error
+  return error;
+}
+
 function MessageBubble({
   message,
   counterpartUsername,
+  redditComposeUrl,
   onDelete,
+  onRetry,
   isDeleting,
+  isRetrying,
 }: {
   message: Message;
   counterpartUsername: string;
+  redditComposeUrl?: string;
   onDelete?: (messageId: number) => void;
+  onRetry?: (messageId: number) => void;
   isDeleting?: boolean;
+  isRetrying?: boolean;
 }) {
   const isOutgoing = message.direction === 'out';
   const isSystem = message.direction === 'system';
   const [imageErrors, setImageErrors] = useState<Set<number>>(new Set());
   const isPending = message.remote_visibility === 'unknown';
-  const canDelete = isOutgoing && isPending && onDelete;
+  const isFailed = message.remote_visibility === 'send_failed';
+  const canDelete = isOutgoing && (isPending || isFailed) && onDelete;
+  const canRetry = isOutgoing && isFailed && onRetry;
 
   const imageAttachments = (message.attachments || []).filter(att => att.mime_type.startsWith('image/'));
 
@@ -211,41 +264,74 @@ function MessageBubble({
               Pending
             </Badge>
           )}
+          {message.remote_visibility === 'send_failed' && (
+            <Badge variant="destructive" className="text-xs h-5 px-1.5">
+              <AlertTriangle className="h-3 w-3 mr-1" />
+              Failed
+            </Badge>
+          )}
           {message.remote_visibility === 'deleted_by_author' && (
             <Badge variant="secondary" className="text-xs h-5 px-1.5">
               Deleted
             </Badge>
           )}
 
-          {/* Delete button - only for pending outgoing messages */}
-          {canDelete && (
+          {/* Action buttons for pending/failed messages */}
+          {(canDelete || canRetry || (isFailed && redditComposeUrl)) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-5 w-5 p-0"
-                  disabled={isDeleting}
+                  disabled={isDeleting || isRetrying}
                 >
-                  {isDeleting ? (
+                  {(isDeleting || isRetrying) ? (
                     <Loader2 className="h-3 w-3 animate-spin" />
                   ) : (
                     <MoreVertical className="h-3 w-3" />
                   )}
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-40">
-                <DropdownMenuItem
-                  onClick={() => onDelete(message.id)}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
-                </DropdownMenuItem>
+              <DropdownMenuContent align="end" className="w-48">
+                {canRetry && (
+                  <DropdownMenuItem
+                    onClick={() => onRetry(message.id)}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Resend
+                  </DropdownMenuItem>
+                )}
+                {isFailed && redditComposeUrl && (
+                  <DropdownMenuItem asChild>
+                    <a href={redditComposeUrl} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-4 w-4 mr-2" />
+                      Send via Reddit
+                    </a>
+                  </DropdownMenuItem>
+                )}
+                {canDelete && (
+                  <DropdownMenuItem
+                    onClick={() => onDelete(message.id)}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Delete
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           )}
         </div>
+
+        {/* Error explanation for failed messages */}
+        {isFailed && message.send_error && (
+          <div className="mt-1.5 px-3 py-2 rounded-lg bg-destructive/10 border border-destructive/20 max-w-full">
+            <p className="text-xs text-destructive">
+              {getSendErrorExplanation(message.send_error)}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -288,6 +374,7 @@ export default function ConversationDetailPage() {
   const [deletingMessages, setDeletingMessages] = useState<Set<number>>(new Set());
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [messageToDelete, setMessageToDelete] = useState<number | null>(null);
+  const [retryingMessages, setRetryingMessages] = useState<Set<number>>(new Set());
   const [attachmentIds, setAttachmentIds] = useState<number[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -513,6 +600,7 @@ export default function ConversationDetailPage() {
         body_text: messageText.trim(),
         sent_at: new Date().toISOString(),
         remote_visibility: 'unknown',
+        send_error: null,
         identity_id: conversation?.identity_id || null,
         created_at: new Date().toISOString(),
       };
@@ -570,6 +658,48 @@ export default function ConversationDetailPage() {
       });
     }
   }, [conversationId]);
+
+  // Retry sending a failed message
+  const retryMessage = useCallback(async (messageId: number) => {
+    setRetryingMessages(prev => {
+      const next = new Set(prev);
+      next.add(messageId);
+      return next;
+    });
+
+    try {
+      const response = await fetch(
+        `/api/core/conversations/${conversationId}/messages/${messageId}/retry`,
+        {
+          method: 'POST',
+          credentials: 'include',
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to resend message');
+      }
+
+      // Optimistically update message status back to pending
+      setMessages(prev => prev.map(m =>
+        m.id === messageId
+          ? { ...m, remote_visibility: 'unknown', send_error: null }
+          : m
+      ));
+
+      // Start fast polling to catch the status update
+      startFastPolling();
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Failed to resend message');
+    } finally {
+      setRetryingMessages(prev => {
+        const next = new Set(prev);
+        next.delete(messageId);
+        return next;
+      });
+    }
+  }, [conversationId, startFastPolling]);
 
   // Handle attachment file selection
   const handleAttachmentSelect = useCallback(async (files: FileList | null) => {
@@ -763,6 +893,15 @@ export default function ConversationDetailPage() {
 
   const { counterpart } = conversation;
 
+  // Build Reddit compose URL for failed message fallback
+  const redditComposeUrl = useMemo(() => {
+    const params = new URLSearchParams({ to: counterpart.external_username });
+    if (conversation.counterpart_last_post_title) {
+      params.set('subject', conversation.counterpart_last_post_title);
+    }
+    return `https://www.reddit.com/message/compose/?${params.toString()}`;
+  }, [counterpart.external_username, conversation.counterpart_last_post_title]);
+
   return (
     <div className="flex flex-col h-[calc(100vh-10rem)] min-h-[400px] border border-border rounded-lg bg-card overflow-hidden">
       {/* Header */}
@@ -937,8 +1076,11 @@ export default function ConversationDetailPage() {
                 key={msg.id}
                 message={msg}
                 counterpartUsername={counterpart.external_username}
+                redditComposeUrl={redditComposeUrl}
                 onDelete={setMessageToDelete}
+                onRetry={retryMessage}
                 isDeleting={deletingMessages.has(msg.id)}
+                isRetrying={retryingMessages.has(msg.id)}
               />
             ))}
             <div ref={messagesEndRef} />

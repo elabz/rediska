@@ -41,6 +41,7 @@ class MessageResponse(BaseModel):
     body_text: Optional[str] = None
     sent_at: datetime
     remote_visibility: str
+    send_error: Optional[str] = None
     external_message_id: Optional[str] = None
     created_at: datetime
 

@@ -228,6 +228,22 @@ async def list_conversations(
         conversations = conversations[:limit]
 
     # Build response
+    # Batch-check which conversations have failed messages
+    conv_ids = [conv.id for conv in conversations]
+    failed_conv_ids = set()
+    if conv_ids:
+        failed_rows = (
+            db.query(Message.conversation_id)
+            .filter(
+                Message.conversation_id.in_(conv_ids),
+                Message.remote_visibility == "send_failed",
+                Message.deleted_at.is_(None),
+            )
+            .distinct()
+            .all()
+        )
+        failed_conv_ids = {row[0] for row in failed_rows}
+
     result = []
     for conv in conversations:
         # Get last message preview and actual timestamp
@@ -259,6 +275,7 @@ async def list_conversations(
                 last_activity_at=last_message_time,
                 last_message_preview=preview,
                 unread_count=0,  # TODO: implement unread tracking
+                has_failed_messages=conv.id in failed_conv_ids,
                 archived_at=conv.archived_at,
                 created_at=conv.created_at,
             )
@@ -322,6 +339,20 @@ async def get_conversation(
             detail="Access denied",
         )
 
+    # Get the counterpart's latest post title for Reddit compose link
+    from rediska_core.domain.models import ProfileItem
+    last_post = (
+        db.query(ProfileItem.link_title)
+        .filter(
+            ProfileItem.account_id == conversation.counterpart_account_id,
+            ProfileItem.item_type == "post",
+            ProfileItem.link_title.isnot(None),
+            ProfileItem.deleted_at.is_(None),
+        )
+        .order_by(desc(ProfileItem.item_created_at))
+        .first()
+    )
+
     return ConversationDetailResponse(
         id=conversation.id,
         provider_id=conversation.provider_id,
@@ -334,6 +365,7 @@ async def get_conversation(
             remote_status=conversation.counterpart_account.remote_status,
         ),
         last_activity_at=conversation.last_activity_at,
+        counterpart_last_post_title=last_post[0] if last_post else None,
         archived_at=conversation.archived_at,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
@@ -434,6 +466,7 @@ async def list_messages(
             body_text=msg.body_text,
             sent_at=msg.sent_at,
             remote_visibility=msg.remote_visibility,
+            send_error=msg.send_error,
             identity_id=msg.identity_id,
             created_at=msg.created_at,
             attachments=[
@@ -648,10 +681,10 @@ async def retry_message(
     send_service: SendMessageServiceDep,
     db: DBSession,
 ):
-    """Retry sending a pending message.
+    """Retry sending a failed or pending message.
 
-    Only messages with 'unknown' visibility can be retried.
-    This is a manual action to handle ambiguous failures.
+    Only messages with 'unknown' or 'send_failed' visibility can be retried.
+    This is a manual action to handle send failures.
     """
     from datetime import datetime, timezone
     from celery import Celery

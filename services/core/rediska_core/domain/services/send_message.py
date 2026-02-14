@@ -355,8 +355,8 @@ class SendMessageService:
     ) -> None:
         """Mark a message send as failed.
 
-        For ambiguous failures, visibility remains 'unknown'.
-        For clear failures, we may want to delete the message.
+        For ambiguous failures, visibility remains 'unknown' (Pending).
+        For clear failures, visibility is set to 'send_failed' with error.
 
         Args:
             message_id: The local message ID.
@@ -368,8 +368,14 @@ class SendMessageService:
             pass
         else:
             # Clear failure - message was definitely not sent
-            # Keep the message but could mark differently if needed
-            pass
+            self.db.query(Message).filter(Message.id == message_id).update(
+                {
+                    Message.remote_visibility: "send_failed",
+                    Message.send_error: error,
+                },
+                synchronize_session=False,
+            )
+            self.db.flush()
 
     def handle_send_failure(
         self,
@@ -382,10 +388,10 @@ class SendMessageService:
 
         Ambiguous failures (timeout, network error) are marked as
         failed with no automatic retry. Clear failures (rate limit,
-        validation error) can retry.
+        validation error) mark the message as send_failed.
 
         Args:
-            job_id: The job ID.
+            job_id: The job ID (may be Celery task UUID — lookup by message_id instead).
             message_id: The message ID.
             error: The error message.
             is_ambiguous: Whether failure is ambiguous.
@@ -393,22 +399,45 @@ class SendMessageService:
         # Update message state
         self.mark_message_failed(message_id, error, is_ambiguous)
 
-        # Update job state
-        if is_ambiguous:
-            # Ambiguous failure: mark as failed immediately (at-most-once)
-            self.db.query(Job).filter(Job.id == job_id).update(
-                {
-                    Job.status: "failed",
-                    Job.last_error: f"AMBIGUOUS: {error}",
-                    Job.dedupe_key: None,  # Allow manual retry
-                },
-                synchronize_session=False,
-            )
-        else:
-            # Clear failure: use normal retry logic
-            self.job_service.fail_job(job_id, error)
+        # Find the actual job by message_id in payload
+        # (job_id from Celery is a UUID string, not the DB integer ID)
+        job = self._find_job_for_message(message_id)
+
+        if job:
+            if is_ambiguous:
+                # Ambiguous failure: mark as failed immediately (at-most-once)
+                job.status = "failed"
+                job.last_error = f"AMBIGUOUS: {error}"
+                job.dedupe_key = None  # Allow manual retry
+            else:
+                # Clear failure: mark as failed with error
+                job.status = "failed"
+                job.last_error = error
+                job.dedupe_key = None
 
         self.db.flush()
+
+    def _find_job_for_message(self, message_id: int) -> Job | None:
+        """Find the send job associated with a message ID.
+
+        Looks up the job by searching for message_id in the payload,
+        since the Celery task UUID doesn't match the DB Job.id.
+        """
+        jobs = (
+            self.db.query(Job)
+            .filter(
+                Job.job_type == SEND_JOB_TYPE,
+                Job.queue_name == SEND_JOB_QUEUE,
+                Job.status.in_(["queued", "running"]),
+            )
+            .all()
+        )
+
+        for job in jobs:
+            if job.payload_json and job.payload_json.get("message_id") == message_id:
+                return job
+
+        return None
 
     def retry_failed_send(
         self,
@@ -430,8 +459,13 @@ class SendMessageService:
         if not message:
             return None
 
-        if message.remote_visibility != "unknown":
+        if message.remote_visibility not in ("unknown", "send_failed"):
             return None  # Already sent or known status
+
+        # Reset to unknown for retry
+        message.remote_visibility = "unknown"
+        message.send_error = None
+        self.db.flush()
 
         # Get conversation for identity info
         conversation = (
@@ -539,8 +573,8 @@ class SendMessageService:
                 "Only pending outgoing messages can be deleted"
             )
 
-        # Check that it's still pending (not already sent)
-        if message.remote_visibility != "unknown":
+        # Check that it's still pending or failed (not already sent)
+        if message.remote_visibility not in ("unknown", "send_failed"):
             raise MessageNotPendingError(
                 f"Message has already been sent (status: {message.remote_visibility})"
             )
