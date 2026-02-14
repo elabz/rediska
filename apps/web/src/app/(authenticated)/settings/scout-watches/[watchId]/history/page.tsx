@@ -32,6 +32,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import { MarkdownText } from '@/components/ui/markdown-text';
 
 interface ScoutWatch {
   id: number;
@@ -583,9 +584,9 @@ export default function ScoutWatchHistoryPage() {
                                         <h5 className="text-xs font-medium text-muted-foreground mb-1">
                                           Reasoning:
                                         </h5>
-                                        <p className="text-sm whitespace-pre-wrap bg-muted/50 p-2 rounded">
-                                          {reasoning}
-                                        </p>
+                                        <div className="text-sm bg-muted/50 p-2 rounded">
+                                          <MarkdownText>{reasoning}</MarkdownText>
+                                        </div>
                                       </div>
                                     ) : null;
                                   })()}

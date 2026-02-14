@@ -20,6 +20,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { MarkdownText } from '@/components/ui/markdown-text';
 
 interface RecommendationCardProps {
   recommendation: string | null;
@@ -276,7 +277,7 @@ export function RecommendationCard({
         {reasoning && (
           <div className="rounded-lg bg-muted/30 p-3">
             <span className="text-xs font-medium uppercase text-muted-foreground">Reasoning</span>
-            <p className="text-sm mt-1 leading-relaxed">{reasoning}</p>
+            <MarkdownText className="mt-1 text-sm">{reasoning}</MarkdownText>
           </div>
         )}
 

@@ -22,6 +22,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import { MarkdownText } from '@/components/ui/markdown-text';
 
 interface AnalysisSummary {
   id: number;
@@ -372,9 +373,9 @@ export function AnalysisHistory({ leadId, currentAnalysisId }: AnalysisHistoryPr
                         Meta-Analysis Decision
                       </h4>
                       {fullAnalysis.recommendation_reasoning && (
-                        <div className="text-sm mb-3 whitespace-pre-wrap">
+                        <div className="text-sm mb-3">
                           {typeof fullAnalysis.recommendation_reasoning === 'string'
-                            ? fullAnalysis.recommendation_reasoning
+                            ? <MarkdownText>{fullAnalysis.recommendation_reasoning}</MarkdownText>
                             : renderValue(fullAnalysis.recommendation_reasoning)}
                         </div>
                       )}
