@@ -344,6 +344,10 @@ class ExternalAccount(Base):
         DateTime, nullable=True
     )
 
+    # Starred/favorite
+    is_starred: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    starred_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     purged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_fetched_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

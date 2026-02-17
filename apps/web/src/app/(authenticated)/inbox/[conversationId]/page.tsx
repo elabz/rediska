@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle, Star } from 'lucide-react';
 import { PostsPanel } from '@/components/PostsPanel';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
@@ -34,6 +34,7 @@ interface Counterpart {
   external_username: string;
   external_user_id: string | null;
   remote_status: string;
+  is_starred: boolean;
 }
 
 interface ConversationDetail {
@@ -79,8 +80,12 @@ function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase();
 }
 
+function normalizeUtc(s: string): string {
+  return s.endsWith('Z') || s.includes('+') ? s : s + 'Z';
+}
+
 function formatMessageTime(dateString: string): string {
-  const date = new Date(dateString);
+  const date = new Date(normalizeUtc(dateString));
   const now = new Date();
   const isToday = date.toDateString() === now.toDateString();
 
@@ -413,7 +418,7 @@ export default function ConversationDetailPage() {
       }
     }
     // Sort by date, newest first for gallery
-    return images.sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+    return images.sort((a, b) => new Date(normalizeUtc(b.sentAt)).getTime() - new Date(normalizeUtc(a.sentAt)).getTime());
   }, [messages]);
 
   const scrollToBottom = () => {
@@ -527,7 +532,7 @@ export default function ConversationDetailPage() {
         }
 
         // Sort by sent_at to maintain order
-        updated.sort((a, b) => new Date(a.sent_at).getTime() - new Date(b.sent_at).getTime());
+        updated.sort((a, b) => new Date(normalizeUtc(a.sent_at)).getTime() - new Date(normalizeUtc(b.sent_at)).getTime());
 
         return updated;
       });
@@ -838,6 +843,27 @@ export default function ConversationDetailPage() {
     };
   }, []);
 
+  // Star toggle
+  const handleToggleStar = useCallback(async () => {
+    if (!conversation) return;
+
+    try {
+      const response = await fetch(`/api/core/directories/${conversation.counterpart.id}/star`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+
+      if (!response.ok) return;
+
+      const result = await response.json();
+      setConversation((prev) =>
+        prev ? { ...prev, counterpart: { ...prev.counterpart, is_starred: result.is_starred } } : prev
+      );
+    } catch (err) {
+      console.error('Failed to toggle star:', err);
+    }
+  }, [conversation]);
+
   // Build Reddit compose URL for failed message fallback
   // Must be before early returns to satisfy React's rules of hooks
   const redditComposeUrl = useMemo(() => {
@@ -937,14 +963,42 @@ export default function ConversationDetailPage() {
           </p>
         </div>
 
-        <a
-          href={`https://reddit.com/u/${counterpart.external_username}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <ExternalLink className="h-4 w-4" />
-        </a>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleToggleStar}
+            className={cn(
+              "p-1.5 rounded transition-colors",
+              counterpart.is_starred
+                ? "text-yellow-500 hover:text-yellow-600"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+            title={counterpart.is_starred ? "Unstar" : "Star"}
+          >
+            <Star className={cn("h-5 w-5", counterpart.is_starred && "fill-current")} />
+          </button>
+          <a
+            href={`https://reddit.com/u/${counterpart.external_username}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 text-xs"
+            title="View Reddit profile"
+          >
+            <ExternalLink className="h-4 w-4" />
+            <span className="hidden sm:inline">Full Profile</span>
+          </a>
+          {redditComposeUrl && (
+            <a
+              href={redditComposeUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 text-xs"
+              title="Send message via Reddit"
+            >
+              <Send className="h-4 w-4" />
+              <span className="hidden sm:inline">Send via Reddit</span>
+            </a>
+          )}
+        </div>
       </div>
 
       {/* User Profile Panel */}

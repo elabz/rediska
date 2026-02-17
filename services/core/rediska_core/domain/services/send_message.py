@@ -329,6 +329,25 @@ class SendMessageService:
             synchronize_session=False,
         )
 
+        # Update contact_state on the counterpart ExternalAccount
+        message = self.db.query(Message).filter(Message.id == message_id).first()
+        if message:
+            conversation = (
+                self.db.query(Conversation)
+                .filter(Conversation.id == message.conversation_id)
+                .first()
+            )
+            if conversation:
+                account = (
+                    self.db.query(ExternalAccount)
+                    .filter(ExternalAccount.id == conversation.counterpart_account_id)
+                    .first()
+                )
+                if account and account.contact_state == "not_contacted":
+                    account.contact_state = "contacted"
+                    if not account.first_contacted_at:
+                        account.first_contacted_at = datetime.now(timezone.utc)
+
         # Mark associated job as done
         jobs = (
             self.db.query(Job)

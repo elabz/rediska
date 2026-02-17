@@ -37,6 +37,10 @@ class DirectoryEntryResponse(BaseModel):
     )
     created_at: datetime = Field(..., description="When account was created")
 
+    # Starred
+    is_starred: bool = Field(default=False, description="Whether account is starred")
+    starred_at: Optional[datetime] = Field(default=None, description="When starred")
+
     # Related data
     latest_summary: Optional[str] = Field(
         default=None, description="Latest profile summary"
@@ -70,3 +74,4 @@ class DirectoryCountsResponse(BaseModel):
     analyzed: int = Field(..., description="Count of analyzed accounts")
     contacted: int = Field(..., description="Count of contacted accounts")
     engaged: int = Field(..., description="Count of engaged accounts")
+    starred: int = Field(..., description="Count of starred accounts")

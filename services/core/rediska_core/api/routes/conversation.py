@@ -25,6 +25,8 @@ from rediska_core.api.schemas.conversation import (
     AttachmentInMessageResponse,
     ConversationDetailResponse,
     ConversationListResponse,
+    ConversationSearchHit,
+    ConversationSearchResponse,
     ConversationSummaryResponse,
     CounterpartResponse,
     InitiateByUsernameRequest,
@@ -271,6 +273,7 @@ async def list_conversations(
                     external_username=conv.counterpart_account.external_username,
                     external_user_id=conv.counterpart_account.external_user_id,
                     remote_status=conv.counterpart_account.remote_status,
+                    is_starred=conv.counterpart_account.is_starred,
                 ),
                 last_activity_at=last_message_time,
                 last_message_preview=preview,
@@ -303,6 +306,173 @@ async def list_conversations(
         next_cursor=next_cursor,
         has_more=has_more,
     )
+
+
+@router.get(
+    "/search",
+    response_model=ConversationSearchResponse,
+    summary="Search conversations by message content",
+    description="Full-text search across all message bodies using Elasticsearch. "
+                "Returns exact matches first (sorted by recency), then fuzzy matches.",
+)
+async def search_conversations(
+    current_user: CurrentUser,
+    db: DBSession,
+    q: str = Query(..., min_length=1, description="Search query"),
+    identity_id: Optional[int] = Query(None, description="Filter by identity ID"),
+):
+    """Search conversations by message content.
+
+    Two-pass search:
+    1. Exact matches (no fuzziness) — sorted by most recent first
+    2. Fuzzy matches — sorted by most recent first, excluding conversations
+       already found in pass 1
+    """
+    import logging
+    from rediska_core.config import get_settings
+    from rediska_core.domain.services.search import SearchService, SearchError
+
+    settings = get_settings()
+    search_service = SearchService(
+        es_url=settings.elastic_url,
+        es_api_key=getattr(settings, "elastic_api_key", None),
+    )
+
+    # Validate identity if provided
+    if identity_id is not None:
+        identity = db.query(Identity).filter_by(id=identity_id, is_active=True).first()
+        if not identity:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Identity not found",
+            )
+
+    # --- Pass 1: exact matches (no fuzziness) ---
+    exact_per_conv: dict[int, dict] = {}
+    try:
+        exact_results = search_service.text_search(
+            query=q, doc_types=["message"], identity_id=identity_id,
+            limit=500, fuzziness=None,
+        )
+        for hit in exact_results.get("hits", []):
+            conv_id = hit.get("source", {}).get("conversation_id")
+            if conv_id is None:
+                continue
+            if conv_id not in exact_per_conv or hit.get("score", 0) > exact_per_conv[conv_id].get("score", 0):
+                exact_per_conv[conv_id] = hit
+    except SearchError as e:
+        logging.error(f"Exact conversation search failed: {e}")
+
+    # --- Pass 2: fuzzy matches ---
+    fuzzy_per_conv: dict[int, dict] = {}
+    try:
+        fuzzy_results = search_service.text_search(
+            query=q, doc_types=["message"], identity_id=identity_id,
+            limit=500, fuzziness="AUTO",
+        )
+        for hit in fuzzy_results.get("hits", []):
+            conv_id = hit.get("source", {}).get("conversation_id")
+            if conv_id is None:
+                continue
+            # Only keep conversations NOT already found in exact pass
+            if conv_id in exact_per_conv:
+                continue
+            if conv_id not in fuzzy_per_conv or hit.get("score", 0) > fuzzy_per_conv[conv_id].get("score", 0):
+                fuzzy_per_conv[conv_id] = hit
+    except SearchError as e:
+        logging.error(f"Fuzzy conversation search failed: {e}")
+
+    all_conv_ids = list(exact_per_conv.keys()) + list(fuzzy_per_conv.keys())
+    if not all_conv_ids:
+        return ConversationSearchResponse(conversations=[], total=0)
+
+    # Load all matching conversations from DB in one query
+    convs = (
+        db.query(Conversation)
+        .options(joinedload(Conversation.counterpart_account))
+        .filter(Conversation.id.in_(all_conv_ids))
+        .filter(Conversation.deleted_at.is_(None))
+        .all()
+    )
+    conv_map = {c.id: c for c in convs}
+
+    # Check for failed messages
+    failed_conv_ids = set()
+    if all_conv_ids:
+        failed_rows = (
+            db.query(Message.conversation_id)
+            .filter(
+                Message.conversation_id.in_(all_conv_ids),
+                Message.remote_visibility == "send_failed",
+                Message.deleted_at.is_(None),
+            )
+            .distinct()
+            .all()
+        )
+        failed_conv_ids = {row[0] for row in failed_rows}
+
+    # Helper: build a ConversationSearchHit from a conversation + best hit
+    def build_hit(conv_id: int, best_hit: dict) -> Optional[ConversationSearchHit]:
+        conv = conv_map.get(conv_id)
+        if not conv:
+            return None
+
+        source = best_hit.get("source", {})
+        content = source.get("content", "")
+        snippet = content[:150] + "..." if len(content) > 150 else content
+
+        last_message = (
+            db.query(Message)
+            .filter_by(conversation_id=conv.id)
+            .filter(Message.deleted_at.is_(None))
+            .order_by(desc(Message.sent_at))
+            .first()
+        )
+        preview = None
+        last_message_time = last_message.sent_at if last_message else conv.last_activity_at
+        if last_message and last_message.body_text:
+            preview = last_message.body_text[:100] + "..." if len(last_message.body_text) > 100 else last_message.body_text
+
+        return ConversationSearchHit(
+            id=conv.id,
+            provider_id=conv.provider_id,
+            identity_id=conv.identity_id,
+            external_conversation_id=conv.external_conversation_id,
+            counterpart=CounterpartResponse(
+                id=conv.counterpart_account.id,
+                external_username=conv.counterpart_account.external_username,
+                external_user_id=conv.counterpart_account.external_user_id,
+                remote_status=conv.counterpart_account.remote_status,
+                is_starred=conv.counterpart_account.is_starred,
+            ),
+            last_activity_at=last_message_time,
+            last_message_preview=preview,
+            unread_count=0,
+            has_failed_messages=conv.id in failed_conv_ids,
+            archived_at=conv.archived_at,
+            created_at=conv.created_at,
+            matching_snippet=snippet,
+        )
+
+    # Build exact results sorted by most recent first
+    exact_hits = []
+    for conv_id, best_hit in exact_per_conv.items():
+        hit = build_hit(conv_id, best_hit)
+        if hit:
+            exact_hits.append(hit)
+    exact_hits.sort(key=lambda h: h.last_activity_at or h.created_at, reverse=True)
+
+    # Build fuzzy results sorted by most recent first
+    fuzzy_hits = []
+    for conv_id, best_hit in fuzzy_per_conv.items():
+        hit = build_hit(conv_id, best_hit)
+        if hit:
+            fuzzy_hits.append(hit)
+    fuzzy_hits.sort(key=lambda h: h.last_activity_at or h.created_at, reverse=True)
+
+    # Exact first, then fuzzy
+    result = exact_hits + fuzzy_hits
+    return ConversationSearchResponse(conversations=result, total=len(result))
 
 
 @router.get(
@@ -363,6 +533,7 @@ async def get_conversation(
             external_username=conversation.counterpart_account.external_username,
             external_user_id=conversation.counterpart_account.external_user_id,
             remote_status=conversation.counterpart_account.remote_status,
+            is_starred=conversation.counterpart_account.is_starred,
         ),
         last_activity_at=conversation.last_activity_at,
         counterpart_last_post_title=last_post[0] if last_post else None,
@@ -1156,6 +1327,7 @@ async def initiate_conversation_from_lead(
         external_username=author_external_account.external_username,
         external_user_id=author_external_account.external_user_id,
         remote_status=author_external_account.remote_status,
+        is_starred=author_external_account.is_starred,
     )
 
     return ConversationSummaryResponse(
@@ -1285,6 +1457,7 @@ async def initiate_conversation_by_username(
         external_username=external_account.external_username,
         external_user_id=external_account.external_user_id,
         remote_status=external_account.remote_status,
+        is_starred=external_account.is_starred,
     )
 
     return ConversationSummaryResponse(

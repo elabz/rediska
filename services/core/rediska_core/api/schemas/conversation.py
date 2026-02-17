@@ -27,6 +27,7 @@ class CounterpartResponse(BaseModel):
     external_username: str
     external_user_id: Optional[str] = None
     remote_status: str = "unknown"
+    is_starred: bool = False
 
 
 class ConversationSummaryResponse(BaseModel):
@@ -45,6 +46,32 @@ class ConversationSummaryResponse(BaseModel):
     has_failed_messages: bool = False
     archived_at: Optional[datetime] = None
     created_at: datetime
+
+
+class ConversationSearchHit(BaseModel):
+    """Response schema for a conversation search result."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    provider_id: str
+    identity_id: int
+    external_conversation_id: str
+    counterpart: CounterpartResponse
+    last_activity_at: Optional[datetime] = None
+    last_message_preview: Optional[str] = None
+    unread_count: int = 0
+    has_failed_messages: bool = False
+    archived_at: Optional[datetime] = None
+    created_at: datetime
+    matching_snippet: Optional[str] = None
+
+
+class ConversationSearchResponse(BaseModel):
+    """Response schema for conversation search results."""
+
+    conversations: list[ConversationSearchHit]
+    total: int = 0
 
 
 class ConversationDetailResponse(BaseModel):

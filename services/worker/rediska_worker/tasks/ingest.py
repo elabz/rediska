@@ -660,11 +660,53 @@ def analyze_reddit_user(
                     if p.body_text or p.title
                 ]
 
+                # Fallback to stored ProfileItems if API returned no posts
+                if not posts_for_summary:
+                    stored_posts = (
+                        session.query(ProfileItem)
+                        .filter(
+                            ProfileItem.account_id == account.id,
+                            ProfileItem.item_type == "post",
+                            ProfileItem.deleted_at.is_(None),
+                        )
+                        .all()
+                    )
+                    posts_for_summary = [
+                        ProfileItemLike("post", p.text_content or "", p.item_created_at)
+                        for p in stored_posts
+                        if p.text_content
+                    ]
+                    if posts_for_summary:
+                        logger.info(
+                            f"Using {len(posts_for_summary)} stored profile_items as fallback for u/{username}"
+                        )
+
                 comments_for_summary = [
                     ProfileItemLike("comment", c.body_text or "", c.created_at)
                     for c in comments
                     if c.body_text
                 ]
+
+                # Fallback to stored ProfileItems if API returned no comments
+                if not comments_for_summary:
+                    stored_comments = (
+                        session.query(ProfileItem)
+                        .filter(
+                            ProfileItem.account_id == account.id,
+                            ProfileItem.item_type == "comment",
+                            ProfileItem.deleted_at.is_(None),
+                        )
+                        .all()
+                    )
+                    comments_for_summary = [
+                        ProfileItemLike("comment", c.text_content or "", c.item_created_at)
+                        for c in stored_comments
+                        if c.text_content
+                    ]
+                    if comments_for_summary:
+                        logger.info(
+                            f"Using {len(comments_for_summary)} stored comment items as fallback for u/{username}"
+                        )
 
                 # Run summaries
                 interests_result, character_result = await asyncio.gather(
@@ -686,12 +728,13 @@ def analyze_reddit_user(
         )
 
         # Store ProfileSnapshot
+        NO_POSTS_PLACEHOLDER = "No posts available for analysis."
         summary_text_parts = []
         signals = {}
-        if interests_result.success and interests_result.summary:
+        if interests_result.success and interests_result.summary and interests_result.summary != NO_POSTS_PLACEHOLDER:
             summary_text_parts.append(f"Interests: {interests_result.summary}")
             signals["interests_summary"] = interests_result.summary
-        if character_result.success and character_result.summary:
+        if character_result.success and character_result.summary and character_result.summary != NO_POSTS_PLACEHOLDER:
             summary_text_parts.append(f"Character: {character_result.summary}")
             signals["character_summary"] = character_result.summary
 

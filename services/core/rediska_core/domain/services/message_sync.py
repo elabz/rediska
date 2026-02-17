@@ -452,6 +452,23 @@ class MessageSyncService:
         self.db.add(message)
         self.db.flush()
 
+        # Update engagement_state when receiving a new incoming message
+        # from a contacted account
+        if direction == "in":
+            account = (
+                self.db.query(ExternalAccount)
+                .filter(ExternalAccount.id == conversation.counterpart_account_id)
+                .first()
+            )
+            if (
+                account
+                and account.contact_state == "contacted"
+                and account.engagement_state == "not_engaged"
+            ):
+                account.engagement_state = "engaged"
+                account.first_inbound_after_contact_at = sent_at
+                self.db.flush()
+
         # Update conversation last_activity_at
         # Compare as naive datetimes since MySQL DATETIME columns don't store timezone
         sent_at_naive = sent_at.replace(tzinfo=None) if sent_at.tzinfo else sent_at

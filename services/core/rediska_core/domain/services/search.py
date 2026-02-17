@@ -53,7 +53,7 @@ class SearchError(Exception):
 
 
 DEFAULT_LIMIT = 20
-MAX_LIMIT = 100
+MAX_LIMIT = 500
 DEFAULT_KNN_K = 20
 DEFAULT_KNN_CANDIDATES = 100
 
@@ -151,6 +151,9 @@ class SearchService:
         if identity_id is not None:
             filters["identity_id"] = identity_id
 
+        if doc_types:
+            filters["doc_type"] = doc_types
+
         # Exclude deleted by default
         if not include_deleted:
             filters["local_deleted"] = False
@@ -172,6 +175,7 @@ class SearchService:
         offset: int = 0,
         limit: int = DEFAULT_LIMIT,
         include_highlights: bool = False,
+        fuzziness: Optional[str] = "AUTO",
     ) -> dict[str, Any]:
         """Perform BM25 text search.
 
@@ -185,6 +189,8 @@ class SearchService:
             offset: Pagination offset.
             limit: Maximum results to return.
             include_highlights: Whether to include highlights.
+            fuzziness: Fuzziness setting ("AUTO", "0", "1", "2").
+                       None for exact matching only.
 
         Returns:
             Dict with total, hits, and max_score.
@@ -206,14 +212,15 @@ class SearchService:
         )
 
         # Build query with multi_match for content and title
-        es_query = {
+        es_query: dict[str, Any] = {
             "multi_match": {
                 "query": query,
                 "fields": ["content^2", "title^3"],
                 "type": "best_fields",
-                "fuzziness": "AUTO",
             }
         }
+        if fuzziness is not None:
+            es_query["multi_match"]["fuzziness"] = fuzziness
 
         try:
             result = self.es_client.search(

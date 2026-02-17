@@ -25,7 +25,7 @@ Usage:
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import asc, desc, func
@@ -62,6 +62,10 @@ class DirectoryEntry:
     first_contacted_at: Optional[datetime]
     first_inbound_after_contact_at: Optional[datetime]
     created_at: datetime
+
+    # Starred
+    is_starred: bool = False
+    starred_at: Optional[datetime] = None
 
     # Related data
     latest_summary: Optional[str] = None
@@ -238,6 +242,80 @@ class DirectoryService:
         return query.scalar() or 0
 
     # =========================================================================
+    # STARRED DIRECTORY
+    # =========================================================================
+
+    def list_starred(
+        self,
+        provider_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+        search: Optional[str] = None,
+        sort_by: Optional[str] = None,
+    ) -> list[DirectoryEntry]:
+        """List starred accounts."""
+        query = self.db.query(ExternalAccount).filter(
+            ExternalAccount.is_starred == True,
+            ExternalAccount.deleted_at.is_(None),
+        )
+
+        if provider_id:
+            query = query.filter(ExternalAccount.provider_id == provider_id)
+
+        query = self._apply_search(query, search)
+        query = self._apply_sort(query, sort_by, ExternalAccount.starred_at)
+        query = query.offset(offset).limit(limit)
+
+        accounts = query.all()
+        return [self._to_directory_entry(account) for account in accounts]
+
+    def count_starred(self, provider_id: Optional[str] = None, search: Optional[str] = None) -> int:
+        """Count starred accounts."""
+        query = self.db.query(func.count(ExternalAccount.id)).filter(
+            ExternalAccount.is_starred == True,
+            ExternalAccount.deleted_at.is_(None),
+        )
+
+        if provider_id:
+            query = query.filter(ExternalAccount.provider_id == provider_id)
+
+        query = self._apply_search(query, search)
+        return query.scalar() or 0
+
+    def toggle_star(self, account_id: int) -> dict:
+        """Toggle starred state for an account.
+
+        Returns:
+            Dict with new state: {"is_starred": bool, "starred_at": datetime | None}
+        """
+        account = (
+            self.db.query(ExternalAccount)
+            .filter(
+                ExternalAccount.id == account_id,
+                ExternalAccount.deleted_at.is_(None),
+            )
+            .first()
+        )
+
+        if not account:
+            return {"error": "Account not found"}
+
+        if account.is_starred:
+            account.is_starred = False
+            account.starred_at = None
+        else:
+            account.is_starred = True
+            account.starred_at = datetime.now(timezone.utc)
+
+        self.db.flush()
+
+        starred_at = account.starred_at
+        return {
+            "is_starred": account.is_starred,
+            "starred_at": starred_at.isoformat() if starred_at else None,
+        }
+
+    # =========================================================================
     # HELPER METHODS
     # =========================================================================
 
@@ -277,6 +355,8 @@ class DirectoryService:
             first_contacted_at=account.first_contacted_at,
             first_inbound_after_contact_at=account.first_inbound_after_contact_at,
             created_at=account.created_at,
+            is_starred=account.is_starred,
+            starred_at=account.starred_at,
             latest_summary=latest_summary,
             lead_count=lead_count,
         )

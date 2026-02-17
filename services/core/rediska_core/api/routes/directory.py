@@ -48,6 +48,8 @@ def _entry_to_response(entry) -> DirectoryEntryResponse:
         first_contacted_at=entry.first_contacted_at,
         first_inbound_after_contact_at=entry.first_inbound_after_contact_at,
         created_at=entry.created_at,
+        is_starred=entry.is_starred,
+        starred_at=entry.starred_at,
         latest_summary=entry.latest_summary,
         lead_count=entry.lead_count,
     )
@@ -171,6 +173,72 @@ async def list_engaged(
 
 
 # =============================================================================
+# STARRED DIRECTORY
+# =============================================================================
+
+
+@router.get(
+    "/starred",
+    response_model=DirectoryListResponse,
+    summary="List starred accounts",
+    description="List accounts that have been starred/favorited.",
+)
+async def list_starred(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+    provider_id: Optional[str] = Query(default=None, description="Filter by provider"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
+    limit: int = Query(default=20, ge=1, le=100, description="Maximum results"),
+    search: Optional[str] = Query(default=None, description="Search by username or summary"),
+    sort_by: Optional[str] = Query(default=None, description="Sort: newest, oldest, alphabetical"),
+):
+    """List starred accounts."""
+    service = DirectoryService(db=db)
+
+    entries = service.list_starred(
+        provider_id=provider_id,
+        limit=limit,
+        offset=offset,
+        search=search,
+        sort_by=sort_by,
+    )
+    total = service.count_starred(provider_id=provider_id, search=search)
+
+    return DirectoryListResponse(
+        entries=[_entry_to_response(e) for e in entries],
+        total=total,
+        directory_type="starred",
+    )
+
+
+# =============================================================================
+# STAR TOGGLE
+# =============================================================================
+
+
+@router.post(
+    "/{account_id}/star",
+    summary="Toggle star on an account",
+    description="Toggle the starred/favorite state of an account.",
+)
+async def toggle_star(
+    account_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    """Toggle star on an account."""
+    service = DirectoryService(db=db)
+    result = service.toggle_star(account_id)
+
+    if "error" in result:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=result["error"])
+
+    db.commit()
+    return result
+
+
+# =============================================================================
 # COUNTS
 # =============================================================================
 
@@ -193,4 +261,5 @@ async def get_counts(
         analyzed=service.count_analyzed(provider_id=provider_id),
         contacted=service.count_contacted(provider_id=provider_id),
         engaged=service.count_engaged(provider_id=provider_id),
+        starred=service.count_starred(provider_id=provider_id),
     )

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   ChevronDown,
   ChevronUp,
+  ExternalLink,
   FileText,
   Loader2,
 } from 'lucide-react';
@@ -104,27 +105,38 @@ export function PostsPanel({ accountId, className }: PostsPanelProps) {
             </p>
           ) : (
             <div className="divide-y divide-border">
-              {posts.map((post) => (
-                <div key={post.id} className="py-2 first:pt-0 last:pb-0">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-0.5">
-                    {post.subreddit && (
-                      <span>r/{post.subreddit}</span>
+              {posts.map((post) => {
+                const postId = post.external_item_id.replace(/^t3_/, '');
+                const postUrl = `https://www.reddit.com/comments/${postId}`;
+                return (
+                  <a
+                    key={post.id}
+                    href={postUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block py-2 first:pt-0 last:pb-0 hover:bg-muted/50 -mx-1 px-1 rounded transition-colors group"
+                  >
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-0.5">
+                      {post.subreddit && (
+                        <span>r/{post.subreddit}</span>
+                      )}
+                      {post.item_created_at && (
+                        <>
+                          {post.subreddit && <span className="text-muted-foreground/50">·</span>}
+                          <span>{formatRelativeTime(post.item_created_at)}</span>
+                        </>
+                      )}
+                      <ExternalLink className="h-3 w-3 ml-auto opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </div>
+                    {post.link_title && (
+                      <p className="text-xs font-medium mb-0.5 line-clamp-1">{post.link_title}</p>
                     )}
-                    {post.item_created_at && (
-                      <>
-                        {post.subreddit && <span className="text-muted-foreground/50">·</span>}
-                        <span>{formatRelativeTime(post.item_created_at)}</span>
-                      </>
-                    )}
-                  </div>
-                  {post.link_title && (
-                    <p className="text-xs font-medium mb-0.5 line-clamp-1">{post.link_title}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground line-clamp-2">
-                    {post.text_content || '(No content)'}
-                  </p>
-                </div>
-              ))}
+                    <p className="text-xs text-muted-foreground line-clamp-2">
+                      {post.text_content || '(No content)'}
+                    </p>
+                  </a>
+                );
+              })}
             </div>
           )}
         </div>

@@ -485,7 +485,10 @@ class ElasticsearchClient:
         if filters:
             for field, value in filters.items():
                 if value is not None:
-                    filter_clauses.append({"term": {field: value}})
+                    if isinstance(value, list):
+                        filter_clauses.append({"terms": {field: value}})
+                    else:
+                        filter_clauses.append({"term": {field: value}})
 
         body = {
             "query": {
@@ -555,7 +558,10 @@ class ElasticsearchClient:
         if filters:
             for field, value in filters.items():
                 if value is not None:
-                    filter_clauses.append({"term": {field: value}})
+                    if isinstance(value, list):
+                        filter_clauses.append({"terms": {field: value}})
+                    else:
+                        filter_clauses.append({"term": {field: value}})
 
         body = {
             "knn": {

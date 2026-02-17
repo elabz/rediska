@@ -13,6 +13,7 @@ import {
   AlertCircle,
   Search,
   ArrowUpDown,
+  Star,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -42,6 +43,8 @@ interface DirectoryEntry {
   first_contacted_at: string | null;
   first_inbound_after_contact_at: string | null;
   created_at: string;
+  is_starred: boolean;
+  starred_at: string | null;
   latest_summary: string | null;
   lead_count: number;
 }
@@ -56,9 +59,10 @@ interface DirectoryCounts {
   analyzed: number;
   contacted: number;
   engaged: number;
+  starred: number;
 }
 
-type DirectoryTab = 'analyzed' | 'contacted' | 'engaged';
+type DirectoryTab = 'analyzed' | 'contacted' | 'engaged' | 'starred';
 type SortOption = 'newest' | 'oldest' | 'alphabetical';
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
@@ -71,6 +75,7 @@ const TABS: { key: DirectoryTab; label: string; icon: React.ComponentType<{ clas
   { key: 'analyzed', label: 'Analyzed', icon: Sparkles },
   { key: 'contacted', label: 'Contacted', icon: MessageSquare },
   { key: 'engaged', label: 'Engaged', icon: CheckCircle2 },
+  { key: 'starred', label: 'Starred', icon: Star },
 ];
 
 function formatDate(dateString: string): string {
@@ -91,7 +96,13 @@ function formatDate(dateString: string): string {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function DirectoryEntryCard({ entry }: { entry: DirectoryEntry }) {
+function DirectoryEntryCard({
+  entry,
+  onToggleStar,
+}: {
+  entry: DirectoryEntry;
+  onToggleStar: (id: number) => void;
+}) {
   const redditProfileUrl = `https://reddit.com/u/${entry.external_username}`;
 
   return (
@@ -152,6 +163,21 @@ function DirectoryEntryCard({ entry }: { entry: DirectoryEntry }) {
 
           {/* Actions */}
           <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                onToggleStar(entry.id);
+              }}
+              className={cn(
+                "p-1 rounded transition-colors",
+                entry.is_starred
+                  ? "text-yellow-500 hover:text-yellow-600"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              title={entry.is_starred ? "Unstar" : "Star"}
+            >
+              <Star className={cn("h-4 w-4", entry.is_starred && "fill-current")} />
+            </button>
             <ContactButton
               username={entry.external_username}
               providerId={entry.provider_id}
@@ -175,7 +201,7 @@ function DirectoryEntryCard({ entry }: { entry: DirectoryEntry }) {
 export default function DirectoriesPage() {
   const [activeTab, setActiveTab] = useState<DirectoryTab>('analyzed');
   const [entries, setEntries] = useState<DirectoryEntry[]>([]);
-  const [counts, setCounts] = useState<DirectoryCounts>({ analyzed: 0, contacted: 0, engaged: 0 });
+  const [counts, setCounts] = useState<DirectoryCounts>({ analyzed: 0, contacted: 0, engaged: 0, starred: 0 });
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -295,6 +321,36 @@ export default function DirectoriesPage() {
     setOffset(0);
     fetchDirectory(activeTab, 0, searchQuery, newSort);
   };
+
+  const handleToggleStar = useCallback(async (accountId: number) => {
+    try {
+      const response = await fetch(`/api/core/directories/${accountId}/star`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        console.error('Failed to toggle star');
+        return;
+      }
+
+      const result = await response.json();
+
+      // Update the entry in the local list
+      setEntries((prev) =>
+        prev.map((e) =>
+          e.id === accountId
+            ? { ...e, is_starred: result.is_starred, starred_at: result.starred_at }
+            : e
+        )
+      );
+
+      // Refresh counts
+      fetchCounts();
+    } catch (err) {
+      console.error('Failed to toggle star:', err);
+    }
+  }, [fetchCounts]);
 
   const refresh = () => {
     fetchCounts();
@@ -453,13 +509,15 @@ export default function DirectoriesPage() {
       {/* Content */}
       {entries.length === 0 ? (
         <EmptyState
-          icon={activeTab === 'analyzed' ? '🔬' : activeTab === 'contacted' ? '💬' : '🤝'}
+          icon={activeTab === 'analyzed' ? '🔬' : activeTab === 'contacted' ? '💬' : activeTab === 'starred' ? '⭐' : '🤝'}
           title={`No ${activeTab} contacts`}
           description={
             activeTab === 'analyzed'
               ? "No profiles have been analyzed yet. Save leads and analyze them to populate this directory."
               : activeTab === 'contacted'
               ? "No contacts have been made yet. Reach out to analyzed leads to populate this directory."
+              : activeTab === 'starred'
+              ? "No contacts have been starred yet. Star contacts to quickly find them later."
               : "No contacts have responded yet. Engaged contacts will appear here when they reply."
           }
         />
@@ -467,7 +525,7 @@ export default function DirectoriesPage() {
         <>
           <div className="space-y-3">
             {entries.map((entry) => (
-              <DirectoryEntryCard key={entry.id} entry={entry} />
+              <DirectoryEntryCard key={entry.id} entry={entry} onToggleStar={handleToggleStar} />
             ))}
           </div>
 

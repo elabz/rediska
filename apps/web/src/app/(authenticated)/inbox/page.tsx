@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback, Suspense } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { AlertTriangle, Loader2, MessageSquare, Paperclip, RefreshCw, Reply, Search, X } from 'lucide-react';
+import { AlertTriangle, Loader2, MessageSquare, Paperclip, RefreshCw, Reply, Search, Star, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -13,12 +13,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components';
 import { IdentityFilter, IdentityBadge } from '@/components/identity';
 import { useIdentities } from '@/hooks/useIdentities';
+import { cn } from '@/lib/utils';
 
 interface Counterpart {
   id: number;
   external_username: string;
   external_user_id: string | null;
   remote_status: string;
+  is_starred: boolean;
 }
 
 interface Conversation {
@@ -41,6 +43,15 @@ interface ConversationsResponse {
   has_more: boolean;
 }
 
+interface SearchConversation extends Conversation {
+  matching_snippet: string | null;
+}
+
+interface SearchResponse {
+  conversations: SearchConversation[];
+  total: number;
+}
+
 function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase();
 }
@@ -48,7 +59,9 @@ function getInitials(username: string): string {
 function formatRelativeTime(dateString: string | null): string {
   if (!dateString) return '';
 
-  const date = new Date(dateString);
+  // Backend returns naive UTC datetimes (no Z suffix) — ensure JS parses as UTC
+  const normalized = dateString.endsWith('Z') || dateString.includes('+') ? dateString : dateString + 'Z';
+  const date = new Date(normalized);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);
@@ -81,7 +94,17 @@ function ConversationSkeleton() {
   );
 }
 
-function ConversationItem({ conversation, identity }: { conversation: Conversation; identity?: { provider_id: string; display_name: string; external_username: string } }) {
+function ConversationItem({
+  conversation,
+  identity,
+  onToggleStar,
+  matchingSnippet,
+}: {
+  conversation: Conversation;
+  identity?: { provider_id: string; display_name: string; external_username: string };
+  onToggleStar: (accountId: number) => void;
+  matchingSnippet?: string | null;
+}) {
   const { counterpart, last_message_preview, last_activity_at, unread_count, has_failed_messages } = conversation;
 
   return (
@@ -116,20 +139,45 @@ function ConversationItem({ conversation, identity }: { conversation: Conversati
             )}
           </div>
 
-          <p className="text-sm text-muted-foreground truncate mt-0.5">
-            {last_message_preview || 'No messages yet'}
-          </p>
+          {matchingSnippet ? (
+            <p className="text-sm text-muted-foreground truncate mt-0.5 flex items-center gap-1.5">
+              <Search className="h-3 w-3 shrink-0 text-primary" />
+              <span className="truncate">{matchingSnippet}</span>
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground truncate mt-0.5">
+              {last_message_preview || 'No messages yet'}
+            </p>
+          )}
         </div>
 
-        <div className="flex flex-col items-end gap-1 shrink-0">
-          <span className="text-xs text-muted-foreground">
-            {formatRelativeTime(last_activity_at)}
-          </span>
-          {unread_count > 0 && (
-            <Badge className="h-5 min-w-5 justify-center text-xs">
-              {unread_count}
-            </Badge>
-          )}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleStar(counterpart.id);
+            }}
+            className={cn(
+              "p-1 rounded transition-colors",
+              counterpart.is_starred
+                ? "text-yellow-500 hover:text-yellow-600"
+                : "text-muted-foreground/40 hover:text-muted-foreground"
+            )}
+            title={counterpart.is_starred ? "Unstar" : "Star"}
+          >
+            <Star className={cn("h-4 w-4", counterpart.is_starred && "fill-current")} />
+          </button>
+          <div className="flex flex-col items-end gap-1">
+            <span className="text-xs text-muted-foreground">
+              {formatRelativeTime(last_activity_at)}
+            </span>
+            {unread_count > 0 && (
+              <Badge className="h-5 min-w-5 justify-center text-xs">
+                {unread_count}
+              </Badge>
+            )}
+          </div>
         </div>
       </div>
     </Link>
@@ -153,6 +201,9 @@ function InboxContent() {
   const [hasMore, setHasMore] = useState(false);
   const [totalCount, setTotalCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchConversation[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [identityFilter, setIdentityFilter] = useState<number | null>(null);
   const [hasAttachmentsFilter, setHasAttachmentsFilter] = useState(initialAttachments);
   const [hasRepliesFilter, setHasRepliesFilter] = useState(initialReplies);
@@ -193,33 +244,105 @@ function InboxContent() {
     return map;
   }, [identities]);
 
-  // Filter conversations based on search query and identity
+  // Filter conversations by identity (only for non-search mode)
   const filteredConversations = useMemo(() => {
-    let filtered = conversations;
+    if (identityFilter === null) return conversations;
+    return conversations.filter(conv => conv.identity_id === identityFilter);
+  }, [conversations, identityFilter]);
 
-    // Filter by identity
-    if (identityFilter !== null) {
-      filtered = filtered.filter(conv => conv.identity_id === identityFilter);
+  // Backend search
+  const searchConversations = useCallback(async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults(null);
+      setSearchLoading(false);
+      return;
     }
 
-    // Filter by search query
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter((conv) => {
-        // Search in username
-        if (conv.counterpart.external_username.toLowerCase().includes(query)) {
-          return true;
-        }
-        // Search in message preview
-        if (conv.last_message_preview?.toLowerCase().includes(query)) {
-          return true;
-        }
-        return false;
+    setSearchLoading(true);
+    try {
+      const params = new URLSearchParams({ q: query.trim() });
+      if (identityFilter !== null) {
+        params.set('identity_id', String(identityFilter));
+      }
+      const response = await fetch(`/api/core/conversations/search?${params.toString()}`, {
+        credentials: 'include',
       });
+      if (!response.ok) {
+        setSearchResults([]);
+        return;
+      }
+      const data: SearchResponse = await response.json();
+      setSearchResults(data.conversations);
+    } catch {
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
     }
+  }, [identityFilter]);
 
-    return filtered;
-  }, [conversations, searchQuery, identityFilter]);
+  // Debounced search input handler
+  const handleSearchChange = useCallback((value: string) => {
+    setSearchQuery(value);
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    if (!value.trim()) {
+      setSearchResults(null);
+      setSearchLoading(false);
+      return;
+    }
+    setSearchLoading(true);
+    searchTimeoutRef.current = setTimeout(() => {
+      searchConversations(value);
+    }, 400);
+  }, [searchConversations]);
+
+  // Clear search
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    setSearchResults(null);
+    setSearchLoading(false);
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+  }, []);
+
+  // Re-trigger search when identity filter changes while searching
+  useEffect(() => {
+    if (searchQuery.trim()) {
+      searchConversations(searchQuery);
+    }
+  }, [identityFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Determine which conversations to display
+  const isSearching = searchResults !== null;
+  const displayConversations = isSearching ? searchResults : filteredConversations;
+
+  const handleToggleStar = useCallback(async (accountId: number) => {
+    try {
+      const response = await fetch(`/api/core/directories/${accountId}/star`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        console.error('Failed to toggle star');
+        return;
+      }
+
+      const result = await response.json();
+
+      // Update the counterpart's is_starred in local state
+      const updateStar = (conv: Conversation) =>
+        conv.counterpart.id === accountId
+          ? { ...conv, counterpart: { ...conv.counterpart, is_starred: result.is_starred } }
+          : conv;
+      setConversations((prev) => prev.map(updateStar));
+      setSearchResults((prev) => prev ? prev.map(updateStar) as SearchConversation[] : null);
+    } catch (err) {
+      console.error('Failed to toggle star:', err);
+    }
+  }, []);
 
   const fetchConversations = useCallback(async (isRefresh = false, cursor?: string) => {
     if (cursor) {
@@ -397,31 +520,39 @@ function InboxContent() {
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           type="text"
-          placeholder="Search conversations by username or message..."
+          placeholder="Search all messages..."
           value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
+          onChange={(e) => handleSearchChange(e.target.value)}
           className="pl-10 pr-10"
         />
         {searchQuery && (
-          <button
-            onClick={() => setSearchQuery('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            {searchLoading && (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            )}
+            <button
+              onClick={clearSearch}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         )}
       </div>
 
-      {filteredConversations.length === 0 && searchQuery ? (
+      {isSearching && displayConversations.length === 0 && !searchLoading ? (
         <Card className="p-8">
           <div className="text-center">
             <Search className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <p className="text-muted-foreground">
-              No conversations matching &quot;{searchQuery}&quot;
+              No messages matching &quot;{searchQuery}&quot;
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Searched through all messages across all conversations
             </p>
             <Button
               variant="link"
-              onClick={() => setSearchQuery('')}
+              onClick={clearSearch}
               className="mt-2"
             >
               Clear search
@@ -460,16 +591,18 @@ function InboxContent() {
       ) : (
         <>
           <Card className="overflow-hidden">
-            {filteredConversations.map((conversation) => (
+            {displayConversations.map((conversation) => (
               <ConversationItem
                 key={conversation.id}
                 conversation={conversation}
                 identity={identities.length > 1 ? identityMap[conversation.identity_id] : undefined}
+                onToggleStar={handleToggleStar}
+                matchingSnippet={isSearching ? (conversation as SearchConversation).matching_snippet : undefined}
               />
             ))}
           </Card>
 
-          {hasMore && !searchQuery && (
+          {hasMore && !isSearching && (
             <div className="flex justify-center mt-4">
               <Button
                 variant="outline"
@@ -489,8 +622,8 @@ function InboxContent() {
           )}
 
           <p className="text-sm text-muted-foreground text-center mt-4">
-            {searchQuery ? (
-              <>Showing {filteredConversations.length} of {conversations.length} conversation{conversations.length !== 1 ? 's' : ''}</>
+            {isSearching ? (
+              <>Found {displayConversations.length} conversation{displayConversations.length !== 1 ? 's' : ''} matching &quot;{searchQuery}&quot;</>
             ) : (
               <>
                 Showing {conversations.length} conversation{conversations.length !== 1 ? 's' : ''}
