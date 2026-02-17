@@ -86,39 +86,32 @@ class MultiAgentAnalysisService:
         rec = None
         for field in ["recommendation", "suitability_recommendation", "final_recommendation"]:
             if field in meta_output and meta_output[field]:
-                rec = meta_output[field]
-                break
-
-        # Also check nested structures
-        if not rec and "suitability_recommendation" in meta_output:
-            nested = meta_output["suitability_recommendation"]
-            if isinstance(nested, dict):
-                rec = nested.get("overall_suitability") or nested.get("recommendation")
-                # If no explicit recommendation, infer from score
-                if not rec and "overall_suitability_score" in nested:
-                    score = nested.get("overall_suitability_score", 0.5)
-                    try:
-                        score = float(score)
-                        if score >= 0.7:
+                val = meta_output[field]
+                if isinstance(val, dict):
+                    # Extract recommendation from nested dict
+                    rec = val.get("overall_suitability") or val.get("recommendation")
+                    if not rec and field == "final_recommendation":
+                        suitable = val.get("suitable_for_leads")
+                        if suitable is True:
                             rec = "PASS"
-                        elif score <= 0.3:
+                        elif suitable is False:
                             rec = "FAIL"
-                        else:
-                            rec = "NEEDS_REVIEW"
-                    except (ValueError, TypeError):
-                        pass
-            else:
-                rec = nested
-        if not rec and "final_recommendation" in meta_output:
-            nested = meta_output["final_recommendation"]
-            if isinstance(nested, dict):
-                rec = nested.get("suitable_for_leads")
-                if rec is True:
-                    rec = "PASS"
-                elif rec is False:
-                    rec = "FAIL"
-            else:
-                rec = nested
+                    # If no explicit recommendation, infer from score
+                    if not rec and "overall_suitability_score" in val:
+                        try:
+                            score = float(val["overall_suitability_score"])
+                            if score >= 0.7:
+                                rec = "PASS"
+                            elif score <= 0.3:
+                                rec = "FAIL"
+                            else:
+                                rec = "NEEDS_REVIEW"
+                        except (ValueError, TypeError):
+                            pass
+                else:
+                    rec = val
+                if rec:
+                    break
 
         # Normalize recommendation values
         if rec:

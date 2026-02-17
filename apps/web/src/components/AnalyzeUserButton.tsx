@@ -15,6 +15,7 @@ interface AnalyzeUserButtonProps {
   variant?: 'button' | 'dropdown-item' | 'icon';
   size?: 'sm' | 'default' | 'lg' | 'icon';
   className?: string;
+  hideViewButton?: boolean;
   onAnalysisQueued?: (taskId: string) => void;
   onError?: (error: string) => void;
 }
@@ -25,6 +26,7 @@ export function AnalyzeUserButton({
   variant = 'button',
   size = 'sm',
   className,
+  hideViewButton = false,
   onAnalysisQueued,
   onError,
 }: AnalyzeUserButtonProps) {
@@ -116,22 +118,24 @@ export function AnalyzeUserButton({
             <Sparkles className="h-3 w-3" />
           )}
         </Button>
-        <Link
-          href={profileLink}
-          onClick={(e) => e.stopPropagation()}
-          title={accountId ? `View u/${username}'s profile` : 'View analyzed accounts'}
-        >
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            asChild
+        {!hideViewButton && (
+          <Link
+            href={profileLink}
+            onClick={(e) => e.stopPropagation()}
+            title={accountId ? `View u/${username}'s profile` : 'View analyzed accounts'}
           >
-            <span>
-              <Eye className="h-3 w-3" />
-            </span>
-          </Button>
-        </Link>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              asChild
+            >
+              <span>
+                <Eye className="h-3 w-3" />
+              </span>
+            </Button>
+          </Link>
+        )}
       </span>
     );
   }

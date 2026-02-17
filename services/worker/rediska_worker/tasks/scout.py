@@ -725,46 +725,15 @@ def analyze_and_decide(
         try:
             dimension_results, meta_result = asyncio.run(run_multi_agent_analysis())
 
-            # Extract recommendation from meta-analysis
+            # Extract and normalize recommendation from meta-analysis
+            # Use the same normalization as the lead analysis path to handle
+            # nested LLM output structures (e.g. suitability_recommendation.confidence)
             meta_output = meta_result.get("parsed_output", {}) or {}
+            normalized = analysis_service._normalize_meta_output(meta_output)
 
-            # Normalize the recommendation (handle various LLM output formats)
-            recommendation = None
-            for field in ["recommendation", "suitability_recommendation", "final_recommendation"]:
-                if field in meta_output and meta_output[field]:
-                    rec = meta_output[field]
-                    if isinstance(rec, dict):
-                        rec = rec.get("overall_suitability") or rec.get("recommendation")
-                    recommendation = rec
-                    break
-
-            # Map common values to our expected values
-            if recommendation:
-                recommendation = recommendation.lower().strip()
-                if recommendation in ["pass", "suitable", "yes", "true", "approved"]:
-                    recommendation = "suitable"
-                elif recommendation in ["fail", "not_recommended", "no", "false", "rejected"]:
-                    recommendation = "not_recommended"
-                else:
-                    recommendation = "needs_review"
-            else:
-                recommendation = "needs_review"
-
-            # Extract confidence
-            confidence = None
-            for field in ["confidence", "confidence_score", "overall_confidence"]:
-                if field in meta_output and meta_output[field] is not None:
-                    try:
-                        confidence = float(meta_output[field])
-                        break
-                    except (ValueError, TypeError):
-                        pass
-
-            if confidence is None:
-                confidence = 0.5  # Default confidence if not provided
-
-            # Extract reasoning
-            reasoning = meta_output.get("reasoning") or meta_output.get("recommendation_reasoning") or ""
+            recommendation = normalized.get("recommendation", "needs_review")
+            confidence = normalized.get("confidence", 0.5)
+            reasoning = normalized.get("reasoning", "")
 
             logger.info(
                 f"Multi-agent analysis for u/{author_username}: "

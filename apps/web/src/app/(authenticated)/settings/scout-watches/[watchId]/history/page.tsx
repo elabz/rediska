@@ -19,6 +19,7 @@ import {
   Target,
   AlertTriangle,
   Flame,
+  Eye,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -131,6 +132,7 @@ export default function ScoutWatchHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showOnlyWithNewPosts, setShowOnlyWithNewPosts] = useState(false);
+  const [showOnlyWithLeads, setShowOnlyWithLeads] = useState(false);
 
   // Run detail state
   const [expandedRunId, setExpandedRunId] = useState<number | null>(null);
@@ -158,7 +160,11 @@ export default function ScoutWatchHistoryPage() {
     }
   }, [watchId]);
 
-  const fetchRuns = useCallback(async (newOffset: number = 0, onlyWithNewPosts: boolean = showOnlyWithNewPosts) => {
+  const fetchRuns = useCallback(async (
+    newOffset: number = 0,
+    onlyWithNewPosts: boolean = showOnlyWithNewPosts,
+    onlyWithLeads: boolean = showOnlyWithLeads,
+  ) => {
     setLoading(true);
     setError(null);
 
@@ -169,6 +175,9 @@ export default function ScoutWatchHistoryPage() {
       });
       if (onlyWithNewPosts) {
         params.set('has_new_posts', 'true');
+      }
+      if (onlyWithLeads) {
+        params.set('has_leads', 'true');
       }
 
       const response = await fetch(
@@ -189,7 +198,7 @@ export default function ScoutWatchHistoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [watchId, showOnlyWithNewPosts]);
+  }, [watchId, showOnlyWithNewPosts, showOnlyWithLeads]);
 
   const fetchRunDetail = async (runId: number) => {
     if (runDetails[runId]) {
@@ -294,8 +303,8 @@ export default function ScoutWatchHistoryPage() {
   }, [fetchWatch]);
 
   useEffect(() => {
-    fetchRuns(0, showOnlyWithNewPosts);
-  }, [showOnlyWithNewPosts]); // eslint-disable-line react-hooks/exhaustive-deps
+    fetchRuns(0, showOnlyWithNewPosts, showOnlyWithLeads);
+  }, [showOnlyWithNewPosts, showOnlyWithLeads]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return 'Never';
@@ -398,15 +407,27 @@ export default function ScoutWatchHistoryPage() {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Switch
-            id="filter-new-posts"
-            checked={showOnlyWithNewPosts}
-            onCheckedChange={setShowOnlyWithNewPosts}
-          />
-          <Label htmlFor="filter-new-posts" className="text-sm">
-            Only runs with new posts
-          </Label>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="filter-new-posts"
+              checked={showOnlyWithNewPosts}
+              onCheckedChange={setShowOnlyWithNewPosts}
+            />
+            <Label htmlFor="filter-new-posts" className="text-sm">
+              Only runs with new posts
+            </Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="filter-leads"
+              checked={showOnlyWithLeads}
+              onCheckedChange={setShowOnlyWithLeads}
+            />
+            <Label htmlFor="filter-leads" className="text-sm">
+              Only runs with leads
+            </Label>
+          </div>
         </div>
       </div>
 
@@ -527,7 +548,39 @@ export default function ScoutWatchHistoryPage() {
                                           <AnalyzeUserButton
                                             username={post.post_author}
                                             variant="icon"
+                                            hideViewButton
                                           />
+                                          {post.lead_id ? (
+                                            <Link
+                                              href={`/leads/${post.lead_id}`}
+                                              onClick={(e) => e.stopPropagation()}
+                                              title="View lead analysis"
+                                            >
+                                              <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-6 w-6"
+                                                asChild
+                                              >
+                                                <span>
+                                                  <Eye className="h-3 w-3" />
+                                                </span>
+                                              </Button>
+                                            </Link>
+                                          ) : (post.analysis_dimensions || post.analysis_recommendation) ? (
+                                            <Button
+                                              variant="ghost"
+                                              size="icon"
+                                              className="h-6 w-6"
+                                              title="View analysis details"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setExpandedPostId(expandedPostId === post.id ? null : post.id);
+                                              }}
+                                            >
+                                              <Eye className="h-3 w-3" />
+                                            </Button>
+                                          ) : null}
                                           <ContactButton
                                             username={post.post_author}
                                             variant="icon"
