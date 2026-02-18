@@ -717,19 +717,17 @@ def analyze_and_decide(
                     dimension_results=dimension_results,
                 )
 
-                return dimension_results, meta_result
+                # Normalize here while analysis_service is still in scope
+                meta_output = meta_result.get("parsed_output", {}) or {}
+                normalized = analysis_service._normalize_meta_output(meta_output)
+
+                return dimension_results, meta_result, meta_output, normalized
 
             finally:
                 await inference_client.close()
 
         try:
-            dimension_results, meta_result = asyncio.run(run_multi_agent_analysis())
-
-            # Extract and normalize recommendation from meta-analysis
-            # Use the same normalization as the lead analysis path to handle
-            # nested LLM output structures (e.g. suitability_recommendation.confidence)
-            meta_output = meta_result.get("parsed_output", {}) or {}
-            normalized = analysis_service._normalize_meta_output(meta_output)
+            dimension_results, meta_result, meta_output, normalized = asyncio.run(run_multi_agent_analysis())
 
             recommendation = normalized.get("recommendation", "needs_review")
             confidence = normalized.get("confidence", 0.5)
