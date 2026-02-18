@@ -557,6 +557,104 @@ def analyze_and_decide(
             }
 
         # =================================================================
+        # STEP 2b: Store discovery post and fetched content as ProfileItems
+        # =================================================================
+        # This ensures the Content section always has data, even if the
+        # separate analyze_reddit_user task fails or the Reddit API returns
+        # nothing for the user's post history.
+        from rediska_core.domain.models import ExternalAccount, ProfileItem
+
+        account = db.query(ExternalAccount).filter_by(
+            provider_id="reddit",
+            external_username=author_username,
+        ).first()
+
+        if not account:
+            account = ExternalAccount(
+                provider_id="reddit",
+                external_username=author_username,
+                external_user_id=post_data.get("author_external_id"),
+                remote_status="active",
+            )
+            db.add(account)
+            db.flush()
+
+        # Always store the discovery post — the post where the contact was found
+        discovery_ext_id = post_data.get("external_post_id")
+        if discovery_ext_id:
+            existing_discovery = db.query(ProfileItem).filter_by(
+                account_id=account.id,
+                item_type="post",
+                external_item_id=discovery_ext_id,
+            ).first()
+            if not existing_discovery:
+                disc_created_at = post_data.get("post_created_at")
+                if isinstance(disc_created_at, str):
+                    disc_created_at = datetime.fromisoformat(
+                        disc_created_at.replace("Z", "+00:00")
+                    )
+
+                disc_text = f"{post_data.get('title', '')}\n\n{post_data.get('body_text', '')}".strip()
+                db.add(ProfileItem(
+                    account_id=account.id,
+                    item_type="post",
+                    external_item_id=discovery_ext_id,
+                    item_created_at=disc_created_at,
+                    text_content=disc_text or None,
+                    subreddit=post_data.get("source_location"),
+                    remote_visibility="visible",
+                ))
+
+        # Store fetched posts as ProfileItems
+        for p in user_posts:
+            if not p.external_id:
+                continue
+            existing = db.query(ProfileItem).filter_by(
+                account_id=account.id,
+                item_type="post",
+                external_item_id=p.external_id,
+            ).first()
+            if not existing:
+                db.add(ProfileItem(
+                    account_id=account.id,
+                    item_type="post",
+                    external_item_id=p.external_id,
+                    item_created_at=p.created_at,
+                    text_content=f"{p.title or ''}\n\n{p.body_text or ''}".strip() or None,
+                    subreddit=p.location,
+                    remote_visibility="visible",
+                ))
+
+        # Store fetched comments as ProfileItems
+        for c in user_comments:
+            if not c.external_id:
+                continue
+            existing = db.query(ProfileItem).filter_by(
+                account_id=account.id,
+                item_type="comment",
+                external_item_id=c.external_id,
+            ).first()
+            if not existing:
+                db.add(ProfileItem(
+                    account_id=account.id,
+                    item_type="comment",
+                    external_item_id=c.external_id,
+                    item_created_at=c.created_at,
+                    text_content=c.body_text,
+                    subreddit=c.location,
+                    link_title=c.title,
+                    link_id=c.raw_data.get("link_id") if c.raw_data else None,
+                    remote_visibility="visible",
+                ))
+
+        db.flush()
+        db.commit()
+
+        logger.info(
+            f"Stored profile items for u/{author_username}: account_id={account.id}"
+        )
+
+        # =================================================================
         # STEP 3: Update status to summarizing
         # =================================================================
         scout_post.analysis_status = "summarizing"
@@ -657,6 +755,12 @@ def analyze_and_decide(
                 )
 
                 # Build input context for agents (without requiring a LeadPost)
+                # Check if the discovery post is already in user_posts
+                discovery_post_id = post_data.get("external_post_id")
+                discovery_in_fetched = any(
+                    p.external_id == discovery_post_id for p in user_posts
+                )
+
                 items_by_type = {
                     "post": [
                         {
@@ -675,6 +779,17 @@ def analyze_and_decide(
                         if c.body_text
                     ],
                 }
+
+                # Always include the discovery post in analysis input —
+                # this is the post where the contact was found and may not
+                # appear in the user's recent post history
+                if not discovery_in_fetched:
+                    disc_text = f"{post_data.get('title', '')}\n\n{post_data.get('body_text', '')}".strip()
+                    if disc_text:
+                        items_by_type["post"].insert(0, {
+                            "text": disc_text,
+                            "created_at": post_data.get("post_created_at"),
+                        })
 
                 input_context = {
                     "lead": {
