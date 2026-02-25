@@ -89,3 +89,34 @@ class DeleteMessageResponse(BaseModel):
     message: str = Field(..., description="Success message")
     message_id: int = Field(..., description="ID of deleted message")
     job_cancelled: bool = Field(..., description="Whether associated job was cancelled")
+
+
+class RemoteDeleteBatchRequest(BaseModel):
+    """Request to delete messages from Reddit (single conversation scope)."""
+
+    message_ids: Optional[list[int]] = Field(
+        default=None,
+        description="Specific message IDs to delete. Ignored if all=True.",
+    )
+    all: bool = Field(
+        default=False,
+        description="If True, delete all deletable outgoing messages in the conversation.",
+    )
+
+
+class RemoteDeleteResultItem(BaseModel):
+    """Result for a single message remote delete attempt."""
+
+    message_id: int
+    success: bool
+    error: Optional[str] = None
+
+
+class RemoteDeleteBatchResponse(BaseModel):
+    """Response for batch remote delete operation."""
+
+    total: int = Field(..., description="Total messages processed")
+    deleted: int = Field(..., description="Successfully deleted count")
+    failed: int = Field(..., description="Failed delete count")
+    skipped: int = Field(..., description="Skipped (not eligible) count")
+    results: list[RemoteDeleteResultItem] = Field(default_factory=list)

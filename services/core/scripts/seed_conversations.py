@@ -6,6 +6,7 @@ Run this inside the container:
 """
 
 import random
+import secrets
 from datetime import datetime, timedelta
 
 from rediska_core.infra.db import get_sync_session_factory
@@ -23,6 +24,7 @@ FAKE_USERS = [
     {"username": "CryptoWatcher2024", "user_id": "t2_ghi789"},
     {"username": "StartupFounderX", "user_id": "t2_jkl012"},
     {"username": "MLResearcher99", "user_id": "t2_mno345"},
+    {"username": "DeleteTestUser00", "user_id": "t2_del001"},
 ]
 
 # Sample conversation messages
@@ -79,6 +81,26 @@ CONVERSATIONS = [
     },
 ]
 
+# Special conversation for testing the delete feature
+DELETE_TEST_CONVERSATION = {
+    "username": "DeleteTestUser00",
+    "messages": [
+        {"direction": "in", "text": "Hey, just testing the delete feature."},
+        {"direction": "out", "text": "First outgoing message - should be deletable from Reddit.", "visibility": "visible"},
+        {"direction": "out", "text": "Second outgoing - also deletable.", "visibility": "visible"},
+        {"direction": "in", "text": "Got it, looks good."},
+        {"direction": "out", "text": "Third outgoing - already deleted by author.", "visibility": "deleted_by_author"},
+        {"direction": "out", "text": "Fourth outgoing - no external ID (edge case).", "visibility": "visible", "no_external_id": True},
+        {"direction": "out", "text": "Fifth outgoing - deletable.", "visibility": "visible"},
+        {"direction": "in", "text": "All good, wrapping up."},
+    ],
+}
+
+
+def _make_external_message_id() -> str:
+    """Generate a Reddit-format external message ID (t4_ prefix + hex)."""
+    return f"t4_{secrets.token_hex(4)}"
+
 
 def seed_conversations():
     """Create test conversations and messages."""
@@ -97,7 +119,9 @@ def seed_conversations():
         # Create external accounts and conversations
         base_time = datetime.utcnow() - timedelta(days=7)
 
-        for conv_data in CONVERSATIONS:
+        all_conversations = CONVERSATIONS + [DELETE_TEST_CONVERSATION]
+
+        for conv_data in all_conversations:
             username = conv_data["username"]
             user_info = next((u for u in FAKE_USERS if u["username"] == username), None)
             if not user_info:
@@ -135,7 +159,7 @@ def seed_conversations():
             if not conversation:
                 conversation = Conversation(
                     provider_id="reddit",
-                    external_conversation_id=f"conv_{username.lower()}_{random.randint(1000, 9999)}",
+                    external_conversation_id=f"[TEST]_conv_{username.lower()}_{random.randint(1000, 9999)}",
                     counterpart_account_id=ext_account.id,
                     identity_id=identity.id,
                 )
@@ -156,15 +180,24 @@ def seed_conversations():
                 for msg_data in conv_data["messages"]:
                     msg_time += timedelta(minutes=random.randint(5, 120))
 
+                    # Determine external_message_id
+                    if msg_data.get("no_external_id"):
+                        ext_id = None
+                    else:
+                        ext_id = _make_external_message_id()
+
+                    # Determine remote_visibility
+                    visibility = msg_data.get("visibility", "visible")
+
                     message = Message(
                         provider_id="reddit",
-                        external_message_id=f"msg_{random.randint(100000, 999999)}",
+                        external_message_id=ext_id,
                         conversation_id=conversation.id,
                         identity_id=identity.id if msg_data["direction"] == "out" else None,
                         direction=msg_data["direction"],
                         sent_at=msg_time,
                         body_text=msg_data["text"],
-                        remote_visibility="visible",
+                        remote_visibility=visibility,
                     )
                     session.add(message)
 

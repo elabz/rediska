@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle, Star } from 'lucide-react';
+import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle, Star, Download, ShieldOff } from 'lucide-react';
 import { PostsPanel } from '@/components/PostsPanel';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
@@ -66,6 +66,7 @@ interface Message {
   remote_visibility: string;
   send_error: string | null;
   identity_id: number | null;
+  external_message_id?: string | null;
   created_at: string;
   attachments?: Attachment[];
 }
@@ -158,16 +159,20 @@ function MessageBubble({
   redditComposeUrl,
   onDelete,
   onRetry,
+  onRemoteDelete,
   isDeleting,
   isRetrying,
+  isRemoteDeleting,
 }: {
   message: Message;
   counterpartUsername: string;
   redditComposeUrl?: string;
   onDelete?: (messageId: number) => void;
   onRetry?: (messageId: number) => void;
+  onRemoteDelete?: (messageId: number) => void;
   isDeleting?: boolean;
   isRetrying?: boolean;
+  isRemoteDeleting?: boolean;
 }) {
   const isOutgoing = message.direction === 'out';
   const isSystem = message.direction === 'system';
@@ -176,6 +181,7 @@ function MessageBubble({
   const isFailed = message.remote_visibility === 'send_failed';
   const canDelete = isOutgoing && (isPending || isFailed) && onDelete;
   const canRetry = isOutgoing && isFailed && onRetry;
+  const canRemoteDelete = isOutgoing && message.remote_visibility === 'visible' && !!message.external_message_id && onRemoteDelete;
 
   const imageAttachments = (message.attachments || []).filter(att => att.mime_type.startsWith('image/'));
 
@@ -281,17 +287,17 @@ function MessageBubble({
             </Badge>
           )}
 
-          {/* Action buttons for pending/failed messages */}
-          {(canDelete || canRetry || (isFailed && redditComposeUrl)) && (
+          {/* Action buttons for pending/failed/deletable messages */}
+          {(canDelete || canRetry || canRemoteDelete || (isFailed && redditComposeUrl)) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-5 w-5 p-0"
-                  disabled={isDeleting || isRetrying}
+                  disabled={isDeleting || isRetrying || isRemoteDeleting}
                 >
-                  {(isDeleting || isRetrying) ? (
+                  {(isDeleting || isRetrying || isRemoteDeleting) ? (
                     <Loader2 className="h-3 w-3 animate-spin" />
                   ) : (
                     <MoreVertical className="h-3 w-3" />
@@ -313,6 +319,15 @@ function MessageBubble({
                       <ExternalLink className="h-4 w-4 mr-2" />
                       Send via Reddit
                     </a>
+                  </DropdownMenuItem>
+                )}
+                {canRemoteDelete && (
+                  <DropdownMenuItem
+                    onClick={() => onRemoteDelete(message.id)}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <ShieldOff className="h-4 w-4 mr-2" />
+                    Delete from Reddit
                   </DropdownMenuItem>
                 )}
                 {canDelete && (
@@ -384,6 +399,11 @@ export default function ConversationDetailPage() {
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [galleryExpanded, setGalleryExpanded] = useState(false);
+  // Remote delete state
+  const [remoteDeleteTarget, setRemoteDeleteTarget] = useState<number | null>(null);
+  const [remoteDeletingMessages, setRemoteDeletingMessages] = useState<Set<number>>(new Set());
+  const [showBatchDeleteDialog, setShowBatchDeleteDialog] = useState(false);
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -706,6 +726,84 @@ export default function ConversationDetailPage() {
     }
   }, [conversationId, startFastPolling]);
 
+  // Remote delete a single message from Reddit
+  const remoteDeleteMessage = useCallback(async (messageId: number) => {
+    setRemoteDeletingMessages(prev => { const next = new Set(prev); next.add(messageId); return next; });
+    setRemoteDeleteTarget(null);
+
+    try {
+      const response = await fetch(
+        `/api/core/conversations/${conversationId}/messages/${messageId}/remote-delete`,
+        { method: 'POST', credentials: 'include' }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to delete from Reddit');
+      }
+
+      // Update local state
+      setMessages(prev => prev.map(m =>
+        m.id === messageId ? { ...m, remote_visibility: 'deleted_by_author' } : m
+      ));
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete from Reddit');
+    } finally {
+      setRemoteDeletingMessages(prev => { const next = new Set(prev); next.delete(messageId); return next; });
+    }
+  }, [conversationId]);
+
+  // Batch delete all outgoing messages from Reddit (scrub conversation)
+  const scrubConversation = useCallback(async () => {
+    setBatchDeleting(true);
+    try {
+      const response = await fetch(
+        `/api/core/conversations/${conversationId}/messages/remote-delete-batch`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ all: true }),
+        }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Failed to scrub conversation');
+      }
+
+      const result = await response.json();
+
+      // Update all affected messages in local state
+      setMessages(prev => prev.map(m => {
+        const item = result.results?.find((r: { message_id: number; success: boolean }) => r.message_id === m.id);
+        if (item?.success) {
+          return { ...m, remote_visibility: 'deleted_by_author' };
+        }
+        return m;
+      }));
+
+      setShowBatchDeleteDialog(false);
+
+      if (result.failed > 0) {
+        setDeleteError(`Scrub partially completed: ${result.deleted} deleted, ${result.failed} failed`);
+      }
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Failed to scrub conversation');
+    } finally {
+      setBatchDeleting(false);
+    }
+  }, [conversationId]);
+
+  // Count of messages eligible for scrub
+  const scrubEligibleCount = useMemo(() => {
+    return messages.filter(m =>
+      m.direction === 'out' &&
+      m.remote_visibility === 'visible' &&
+      !!m.external_message_id
+    ).length;
+  }, [messages]);
+
   // Handle attachment file selection
   const handleAttachmentSelect = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -977,6 +1075,15 @@ export default function ConversationDetailPage() {
             <Star className={cn("h-5 w-5", counterpart.is_starred && "fill-current")} />
           </button>
           <a
+            href={`/api/core/conversations/${conversationId}/export`}
+            download
+            className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 text-xs"
+            title="Export conversation as HTML"
+          >
+            <Download className="h-4 w-4" />
+            <span className="hidden sm:inline">Export</span>
+          </a>
+          <a
             href={`https://reddit.com/u/${counterpart.external_username}`}
             target="_blank"
             rel="noopener noreferrer"
@@ -997,6 +1104,16 @@ export default function ConversationDetailPage() {
               <Send className="h-4 w-4" />
               <span className="hidden sm:inline">Send via Reddit</span>
             </a>
+          )}
+          {scrubEligibleCount > 0 && (
+            <button
+              onClick={() => setShowBatchDeleteDialog(true)}
+              className="text-destructive/70 hover:text-destructive transition-colors flex items-center gap-1 text-xs"
+              title="Delete all your messages from Reddit"
+            >
+              <ShieldOff className="h-4 w-4" />
+              <span className="hidden sm:inline">Scrub</span>
+            </button>
           )}
         </div>
       </div>
@@ -1135,8 +1252,10 @@ export default function ConversationDetailPage() {
                 redditComposeUrl={redditComposeUrl}
                 onDelete={setMessageToDelete}
                 onRetry={retryMessage}
+                onRemoteDelete={setRemoteDeleteTarget}
                 isDeleting={deletingMessages.has(msg.id)}
                 isRetrying={retryingMessages.has(msg.id)}
+                isRemoteDeleting={remoteDeletingMessages.has(msg.id)}
               />
             ))}
             <div ref={messagesEndRef} />
@@ -1263,7 +1382,7 @@ export default function ConversationDetailPage() {
         </p>
       </div>
 
-      {/* Delete confirmation dialog */}
+      {/* Delete confirmation dialog (local pending messages) */}
       <Dialog open={messageToDelete !== null} onOpenChange={(open) => !open && setMessageToDelete(null)}>
         <DialogContent>
           <DialogHeader>
@@ -1292,6 +1411,76 @@ export default function ConversationDetailPage() {
                 </>
               ) : (
                 'Delete'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remote delete confirmation dialog (single message from Reddit) */}
+      <Dialog open={remoteDeleteTarget !== null} onOpenChange={(open) => !open && setRemoteDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete from Reddit?</DialogTitle>
+            <DialogDescription>
+              This will delete this message from Reddit. Your local copy will be preserved but marked as deleted. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRemoteDeleteTarget(null)}
+              disabled={remoteDeleteTarget !== null && remoteDeletingMessages.has(remoteDeleteTarget)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => remoteDeleteTarget && remoteDeleteMessage(remoteDeleteTarget)}
+              disabled={remoteDeleteTarget !== null && remoteDeletingMessages.has(remoteDeleteTarget)}
+            >
+              {remoteDeleteTarget !== null && remoteDeletingMessages.has(remoteDeleteTarget) ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete from Reddit'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Scrub conversation confirmation dialog (batch delete from Reddit) */}
+      <Dialog open={showBatchDeleteDialog} onOpenChange={setShowBatchDeleteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Scrub this conversation?</DialogTitle>
+            <DialogDescription>
+              This will delete <strong>{scrubEligibleCount}</strong> of your outgoing messages from Reddit. Local copies will be preserved but marked as deleted. This cannot be undone on Reddit.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowBatchDeleteDialog(false)}
+              disabled={batchDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={scrubConversation}
+              disabled={batchDeleting}
+            >
+              {batchDeleting ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Scrubbing...
+                </>
+              ) : (
+                `Scrub ${scrubEligibleCount} messages`
               )}
             </Button>
           </DialogFooter>

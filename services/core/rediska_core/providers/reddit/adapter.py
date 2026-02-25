@@ -18,6 +18,7 @@ Usage:
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -38,6 +39,14 @@ from rediska_core.providers.base import (
     RemoteVisibility,
     SendMessageResult,
 )
+
+
+@dataclass
+class DeleteMessageResult:
+    """Result of a Reddit message delete attempt."""
+
+    success: bool
+    error_message: Optional[str] = None
 
 
 # =============================================================================
@@ -771,6 +780,53 @@ class RedditAdapter(ProviderAdapter):
                 error_message=str(e),
                 is_ambiguous=True,
             )
+
+    async def delete_message(self, fullname: str) -> DeleteMessageResult:
+        """Delete a private message from Reddit.
+
+        Uses Reddit's /api/del_msg endpoint.
+
+        Args:
+            fullname: The Reddit fullname of the message (e.g. "t4_abc123").
+                      If the t4_ prefix is missing, it will be added automatically.
+
+        Returns:
+            DeleteMessageResult with success status.
+        """
+        # Ensure t4_ prefix (Reddit thing-name format for messages)
+        if not fullname.startswith("t4_"):
+            fullname = f"t4_{fullname}"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.BASE_URL}/api/del_msg",
+                    headers=self._get_headers(),
+                    data={"id": fullname},
+                )
+
+            # Handle 401 with token refresh
+            if response.status_code == 401:
+                await self._refresh_access_token()
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.BASE_URL}/api/del_msg",
+                        headers=self._get_headers(),
+                        data={"id": fullname},
+                    )
+
+            if response.status_code != 200:
+                return DeleteMessageResult(
+                    success=False,
+                    error_message=f"HTTP {response.status_code}: {response.text[:200]}",
+                )
+
+            return DeleteMessageResult(success=True)
+
+        except httpx.TimeoutException:
+            return DeleteMessageResult(success=False, error_message="Request timed out")
+        except Exception as e:
+            return DeleteMessageResult(success=False, error_message=str(e))
 
     # =========================================================================
     # MAPPING HELPERS

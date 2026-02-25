@@ -36,6 +36,9 @@ from rediska_core.api.schemas.conversation import (
 from rediska_core.api.schemas.message import (
     DeleteMessageResponse,
     PendingMessageResponse,
+    RemoteDeleteBatchRequest,
+    RemoteDeleteBatchResponse,
+    RemoteDeleteResultItem,
     SendMessageRequest,
     SendMessageResponse,
     SyncJobResponse,
@@ -639,6 +642,7 @@ async def list_messages(
             remote_visibility=msg.remote_visibility,
             send_error=msg.send_error,
             identity_id=msg.identity_id,
+            external_message_id=msg.external_message_id,
             created_at=msg.created_at,
             attachments=[
                 AttachmentInMessageResponse(
@@ -1014,6 +1018,369 @@ async def delete_pending_message(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied",
         )
+
+
+@router.get(
+    "/{conversation_id}/export",
+    summary="Export conversation as HTML",
+    description="Download a self-contained HTML file of the conversation.",
+)
+async def export_conversation_html(
+    conversation_id: int,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Export a conversation as a self-contained HTML file."""
+    from datetime import datetime, timezone
+    from fastapi.responses import HTMLResponse
+    from html import escape
+
+    # Load conversation with counterpart
+    conversation = (
+        db.query(Conversation)
+        .options(joinedload(Conversation.counterpart_account))
+        .filter_by(id=conversation_id)
+        .filter(Conversation.deleted_at.is_(None))
+        .first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    identity = db.query(Identity).filter_by(id=conversation.identity_id, is_active=True).first()
+    if not identity:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Load ALL messages ordered by sent_at ASC, excluding soft-deleted
+    messages = (
+        db.query(Message)
+        .filter_by(conversation_id=conversation_id)
+        .filter(Message.deleted_at.is_(None))
+        .order_by(Message.sent_at, Message.id)
+        .all()
+    )
+
+    # Eager-load attachments
+    message_ids = [m.id for m in messages]
+    attachments_by_msg: dict[int, list[Attachment]] = {}
+    if message_ids:
+        all_atts = (
+            db.query(Attachment)
+            .filter(Attachment.message_id.in_(message_ids))
+            .filter(Attachment.remote_visibility != "removed")
+            .all()
+        )
+        for att in all_atts:
+            attachments_by_msg.setdefault(att.message_id, []).append(att)
+
+    counterpart_username = conversation.counterpart_account.external_username
+    identity_name = identity.display_name or "You"
+    export_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    filename_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    # Build message HTML
+    messages_html = ""
+    for msg in messages:
+        ts = msg.sent_at
+        iso_ts = ts.isoformat() + "Z" if ts else ""
+        time_display = ts.strftime("%I:%M %p") if ts else ""
+        date_display = ts.strftime("%b %d, %Y") if ts else ""
+        full_display = f"{date_display} {time_display}"
+
+        body = escape(msg.body_text or "")
+        body = body.replace("\n", "<br>")
+
+        atts = attachments_by_msg.get(msg.id, [])
+        att_html = ""
+        for att in atts:
+            att_html += f'<div class="att">[{escape(att.mime_type)} attachment, {att.size_bytes} bytes]</div>'
+
+        # Status badges
+        badge = ""
+        if msg.remote_visibility == "deleted_by_author":
+            badge = '<span class="badge badge-del">Deleted</span>'
+        elif msg.remote_visibility == "unknown":
+            badge = '<span class="badge badge-pending">Pending</span>'
+        elif msg.remote_visibility == "send_failed":
+            badge = '<span class="badge badge-fail">Failed</span>'
+
+        if msg.direction == "system":
+            messages_html += f'<div class="msg system"><div class="pill">{body}</div></div>\n'
+        elif msg.direction == "out":
+            messages_html += f'''<div class="msg out">
+  <div class="sender">You ({escape(identity_name)})</div>
+  <div class="bubble out-bubble">{body}{att_html}</div>
+  <div class="meta"><span class="ts" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">{full_display}</span><span class="iso" style="display:none">{iso_ts}</span> {badge}</div>
+</div>\n'''
+        else:
+            messages_html += f'''<div class="msg in">
+  <div class="sender">u/{escape(counterpart_username)}</div>
+  <div class="bubble in-bubble">{body}{att_html}</div>
+  <div class="meta"><span class="ts" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">{full_display}</span><span class="iso" style="display:none">{iso_ts}</span> {badge}</div>
+</div>\n'''
+
+    html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conversation with u/{escape(counterpart_username)}</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #1a1a1a; max-width: 800px; margin: 0 auto; padding: 20px; }}
+.header {{ background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+.header h1 {{ font-size: 1.25rem; margin-bottom: 4px; }}
+.header .info {{ font-size: 0.85rem; color: #666; }}
+.messages {{ display: flex; flex-direction: column; gap: 12px; }}
+.msg {{ display: flex; flex-direction: column; max-width: 75%; }}
+.msg.out {{ align-self: flex-end; align-items: flex-end; }}
+.msg.in {{ align-self: flex-start; align-items: flex-start; }}
+.msg.system {{ align-self: center; }}
+.sender {{ font-size: 0.75rem; color: #888; margin-bottom: 2px; padding: 0 4px; }}
+.bubble {{ padding: 10px 14px; border-radius: 16px; font-size: 0.9rem; line-height: 1.45; word-break: break-word; }}
+.out-bubble {{ background: #3b82f6; color: #fff; border-bottom-right-radius: 4px; }}
+.in-bubble {{ background: #e5e7eb; color: #1a1a1a; border-bottom-left-radius: 4px; }}
+.pill {{ background: #e5e7eb; padding: 6px 16px; border-radius: 999px; font-size: 0.8rem; color: #666; }}
+.meta {{ font-size: 0.75rem; color: #999; margin-top: 3px; padding: 0 4px; }}
+.ts {{ cursor: pointer; }}
+.ts:hover {{ text-decoration: underline; }}
+.iso {{ font-size: 0.7rem; color: #aaa; margin-top: 2px; }}
+.att {{ font-size: 0.8rem; margin-top: 6px; padding: 4px 8px; background: rgba(0,0,0,0.1); border-radius: 4px; }}
+.badge {{ font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }}
+.badge-del {{ background: #e5e7eb; color: #666; }}
+.badge-pending {{ background: #fef3c7; color: #92400e; }}
+.badge-fail {{ background: #fee2e2; color: #dc2626; }}
+.footer {{ text-align: center; font-size: 0.8rem; color: #999; margin-top: 30px; padding: 20px; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Conversation with u/{escape(counterpart_username)}</h1>
+  <div class="info">Identity: {escape(identity_name)} &middot; {len(messages)} messages &middot; Exported {export_date}</div>
+</div>
+<div class="messages">
+{messages_html}
+</div>
+<div class="footer">Exported from Rediska on {export_date}</div>
+</body>
+</html>'''
+
+    # Audit log
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="conversation.export",
+        result="ok",
+        entity_type="conversation",
+        entity_id=conversation_id,
+        request_json={"conversation_id": conversation_id, "message_count": len(messages)},
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    filename = f"conversation-{counterpart_username}-{filename_date}.html"
+    return HTMLResponse(
+        content=html,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/{conversation_id}/messages/{message_id}/remote-delete",
+    summary="Delete a single message from Reddit",
+    description="Delete an outgoing message from Reddit. Local copy is preserved as deleted_by_author.",
+)
+async def remote_delete_message(
+    conversation_id: int,
+    message_id: int,
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Delete a single outgoing message from Reddit."""
+    from datetime import datetime, timezone
+
+    # Load the message
+    msg = (
+        db.query(Message)
+        .filter_by(id=message_id, conversation_id=conversation_id)
+        .filter(Message.deleted_at.is_(None))
+        .first()
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    # Validate: must be outgoing
+    if msg.direction != "out":
+        raise HTTPException(status_code=400, detail="Can only delete outgoing messages")
+
+    # Validate: must be visible
+    if msg.remote_visibility != "visible":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Message remote_visibility is '{msg.remote_visibility}', expected 'visible'",
+        )
+
+    # Validate: must have external_message_id
+    if not msg.external_message_id:
+        raise HTTPException(status_code=400, detail="Message has no external ID, cannot delete from Reddit")
+
+    # Get Reddit adapter
+    from rediska_core.api.routes.leads import get_reddit_adapter
+    adapter = get_reddit_adapter(db)
+    if not adapter:
+        raise HTTPException(status_code=503, detail="Reddit adapter unavailable (check credentials)")
+
+    # Call Reddit delete
+    result = await adapter.delete_message(msg.external_message_id)
+
+    if not result.success:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Reddit API error: {result.error_message}",
+        )
+
+    # Update local record
+    msg.remote_visibility = "deleted_by_author"
+    msg.remote_deleted_at = datetime.now(timezone.utc)
+
+    # Audit log
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="message.remote_delete",
+        result="ok",
+        entity_type="message",
+        entity_id=message_id,
+        request_json={
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "external_message_id": msg.external_message_id,
+        },
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return {"message": "Message deleted from Reddit", "message_id": message_id}
+
+
+@router.post(
+    "/{conversation_id}/messages/remote-delete-batch",
+    summary="Batch delete messages from Reddit (scrub conversation)",
+    description="Delete multiple outgoing messages from Reddit in one conversation.",
+)
+async def remote_delete_batch(
+    conversation_id: int,
+    current_user: CurrentUser,
+    db: DBSession,
+    body: RemoteDeleteBatchRequest,
+):
+    """Batch delete outgoing messages from Reddit within a single conversation."""
+    from datetime import datetime, timezone
+    import asyncio
+
+    # Verify conversation exists
+    conversation = db.query(Conversation).filter_by(id=conversation_id).first()
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Get eligible messages
+    if body.all:
+        # All deletable outgoing messages in this conversation
+        candidates = (
+            db.query(Message)
+            .filter_by(conversation_id=conversation_id, direction="out", remote_visibility="visible")
+            .filter(Message.deleted_at.is_(None))
+            .filter(Message.external_message_id.isnot(None))
+            .order_by(Message.sent_at)
+            .all()
+        )
+    elif body.message_ids:
+        candidates = (
+            db.query(Message)
+            .filter(
+                Message.id.in_(body.message_ids),
+                Message.conversation_id == conversation_id,
+            )
+            .filter(Message.deleted_at.is_(None))
+            .all()
+        )
+    else:
+        raise HTTPException(status_code=400, detail="Provide message_ids or set all=True")
+
+    if not candidates:
+        return RemoteDeleteBatchResponse(total=0, deleted=0, failed=0, skipped=0, results=[])
+
+    # Get Reddit adapter
+    from rediska_core.api.routes.leads import get_reddit_adapter
+    adapter = get_reddit_adapter(db)
+    if not adapter:
+        raise HTTPException(status_code=503, detail="Reddit adapter unavailable (check credentials)")
+
+    results: list[RemoteDeleteResultItem] = []
+    deleted_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for msg in candidates:
+        # Skip non-eligible
+        if msg.direction != "out" or msg.remote_visibility != "visible" or not msg.external_message_id:
+            results.append(RemoteDeleteResultItem(
+                message_id=msg.id,
+                success=False,
+                error="Not eligible for remote delete",
+            ))
+            skipped_count += 1
+            continue
+
+        # Call Reddit delete
+        delete_result = await adapter.delete_message(msg.external_message_id)
+
+        if delete_result.success:
+            msg.remote_visibility = "deleted_by_author"
+            msg.remote_deleted_at = datetime.now(timezone.utc)
+            deleted_count += 1
+            results.append(RemoteDeleteResultItem(message_id=msg.id, success=True))
+        else:
+            failed_count += 1
+            results.append(RemoteDeleteResultItem(
+                message_id=msg.id,
+                success=False,
+                error=delete_result.error_message,
+            ))
+
+        # Rate limit delay between deletes (1 second)
+        if msg != candidates[-1]:
+            await asyncio.sleep(1)
+
+    # Audit log
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="message.remote_delete_batch",
+        result="ok",
+        entity_type="conversation",
+        entity_id=conversation_id,
+        request_json={
+            "conversation_id": conversation_id,
+            "all": body.all,
+            "message_ids": body.message_ids,
+        },
+        response_json={
+            "total": len(candidates),
+            "deleted": deleted_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+        },
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return RemoteDeleteBatchResponse(
+        total=len(candidates),
+        deleted=deleted_count,
+        failed=failed_count,
+        skipped=skipped_count,
+        results=results,
+    )
 
 
 @router.post(
