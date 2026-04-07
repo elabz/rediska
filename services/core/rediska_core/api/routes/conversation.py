@@ -479,6 +479,167 @@ async def search_conversations(
 
 
 @router.get(
+    "/export-dataset",
+    summary="Export conversations as fine-tuning dataset",
+    description="Download a ChatML JSONL file for fine-tuning with Unsloth or similar tools.",
+)
+async def export_dataset(
+    current_user: CurrentUser,
+    db: DBSession,
+    format: str = Query("chatml", description="Export format (chatml)"),
+    identity_id: Optional[int] = Query(None, description="Filter by identity"),
+    system_prompt: str = Query(
+        "You are having a private conversation on Reddit.",
+        description="System prompt to prepend",
+    ),
+    max_tokens: int = Query(4096, description="Max sequence length hint"),
+    test_only: bool = Query(False, description="Only export [TEST] conversations"),
+    list_id: Optional[int] = Query(None, description="Filter by conversation list ID"),
+):
+    """Export conversations as a ChatML JSONL dataset for fine-tuning."""
+    from datetime import datetime, timezone
+    from fastapi.responses import StreamingResponse
+    from rediska_core.domain.models import ConversationListMember
+    import json as _json
+    import io
+
+    # Query conversations
+    conv_query = (
+        db.query(Conversation)
+        .filter(Conversation.deleted_at.is_(None))
+    )
+    if identity_id is not None:
+        conv_query = conv_query.filter(Conversation.identity_id == identity_id)
+    if test_only:
+        conv_query = conv_query.filter(Conversation.external_conversation_id.like("[TEST]%"))
+    if list_id is not None:
+        conv_query = conv_query.filter(
+            Conversation.id.in_(
+                db.query(ConversationListMember.conversation_id)
+                .filter(ConversationListMember.list_id == list_id)
+            )
+        )
+
+    all_conversations = conv_query.order_by(Conversation.id).all()
+
+    output_lines = []
+    conv_count = 0
+
+    for conv in all_conversations:
+        # Load valid messages
+        msg_query = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == conv.id,
+                Message.deleted_at.is_(None),
+                Message.send_error.is_(None),
+                Message.body_text.isnot(None),
+                Message.body_text != "",
+                Message.remote_visibility.in_(["visible", "unknown"]),
+            )
+            .order_by(Message.sent_at, Message.id)
+        )
+        raw_messages = msg_query.all()
+
+        if not raw_messages:
+            continue
+
+        # Thread-aware ordering: group by thread, order threads by earliest message
+        has_threads = any(m.thread_external_id for m in raw_messages)
+        if has_threads:
+            from collections import OrderedDict
+            threads: dict[str, list] = OrderedDict()
+            no_thread: list = []
+            for m in raw_messages:
+                tid = m.thread_external_id or ""
+                if tid:
+                    threads.setdefault(tid, []).append(m)
+                else:
+                    no_thread.append(m)
+            sorted_threads = sorted(threads.values(), key=lambda msgs: msgs[0].sent_at)
+            ordered_messages = []
+            for thread_msgs in sorted_threads:
+                ordered_messages.extend(thread_msgs)
+            ordered_messages.extend(no_thread)
+        else:
+            ordered_messages = raw_messages
+
+        # Map roles and filter
+        turns = []
+        for m in ordered_messages:
+            if m.direction == "system":
+                continue
+            role = "assistant" if m.direction == "out" else "user"
+            text = (m.body_text or "").strip()
+            if not text:
+                continue
+            turns.append({"role": role, "content": text})
+
+        if not turns:
+            continue
+
+        # Merge consecutive same-role messages
+        merged = [turns[0]]
+        for t in turns[1:]:
+            if t["role"] == merged[-1]["role"]:
+                merged[-1]["content"] += "\n\n" + t["content"]
+            else:
+                merged.append(t)
+
+        # Ensure starts with user
+        if merged[0]["role"] != "user":
+            merged.insert(0, {"role": "user", "content": "[conversation initiated]"})
+
+        # Ensure ends with assistant — drop trailing user turns
+        while merged and merged[-1]["role"] == "user":
+            merged.pop()
+
+        if not merged:
+            continue
+
+        # Need at least one user-assistant exchange
+        has_user = any(t["role"] == "user" for t in merged)
+        has_assistant = any(t["role"] == "assistant" for t in merged)
+        if not has_user or not has_assistant:
+            continue
+
+        # Prepend system prompt
+        chatml_messages = [{"role": "system", "content": system_prompt}] + merged
+
+        output_lines.append(_json.dumps({"conversations": chatml_messages}, ensure_ascii=False))
+        conv_count += 1
+
+    # Audit log
+    audit_entry = AuditLog(
+        ts=datetime.now(timezone.utc),
+        actor="user",
+        action_type="dataset.export",
+        result="ok",
+        entity_type="conversation",
+        entity_id=0,
+        request_json={
+            "format": format,
+            "conversation_count": conv_count,
+            "test_only": test_only,
+            "identity_id": identity_id,
+            "list_id": list_id,
+        },
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    content = "\n".join(output_lines) + ("\n" if output_lines else "")
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    filename = f"dataset-{date_str}.jsonl"
+
+    return StreamingResponse(
+        io.BytesIO(content.encode("utf-8")),
+        media_type="application/jsonl",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get(
     "/{conversation_id}",
     response_model=ConversationDetailResponse,
     summary="Get a conversation",
@@ -643,6 +804,8 @@ async def list_messages(
             send_error=msg.send_error,
             identity_id=msg.identity_id,
             external_message_id=msg.external_message_id,
+            thread_external_id=msg.thread_external_id,
+            parent_external_message_id=msg.parent_external_message_id,
             created_at=msg.created_at,
             attachments=[
                 AttachmentInMessageResponse(
@@ -1077,14 +1240,27 @@ async def export_conversation_html(
     export_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     filename_date = datetime.now(timezone.utc).strftime("%Y%m%d")
 
+    # Collect unique dates for calendar
+    date_set = set()
+    for msg in messages:
+        if msg.sent_at:
+            date_set.add(msg.sent_at.strftime("%Y-%m-%d"))
+
     # Build message HTML
     messages_html = ""
+    prev_date = None
     for msg in messages:
         ts = msg.sent_at
         iso_ts = ts.isoformat() + "Z" if ts else ""
         time_display = ts.strftime("%I:%M %p") if ts else ""
         date_display = ts.strftime("%b %d, %Y") if ts else ""
+        date_key = ts.strftime("%Y-%m-%d") if ts else ""
         full_display = f"{date_display} {time_display}"
+
+        # Insert date separator
+        if date_key and date_key != prev_date:
+            messages_html += f'<div class="date-sep" id="date-{date_key}"><span>{date_display}</span></div>\n'
+            prev_date = date_key
 
         body = escape(msg.body_text or "")
         body = body.replace("\n", "<br>")
@@ -1103,20 +1279,32 @@ async def export_conversation_html(
         elif msg.remote_visibility == "send_failed":
             badge = '<span class="badge badge-fail">Failed</span>'
 
+        # Threading data attributes
+        thread_id = escape(msg.thread_external_id or "")
+        parent_id = escape(msg.parent_external_message_id or "")
+        thread_attrs = f' data-thread="{thread_id}" data-parent="{parent_id}"' if thread_id else ""
+
+        # Thread indicator CSS class
+        thread_cls = " threaded" if thread_id else ""
+
         if msg.direction == "system":
-            messages_html += f'<div class="msg system"><div class="pill">{body}</div></div>\n'
+            messages_html += f'<div class="msg system" data-date="{date_key}" data-text=""{thread_attrs}><div class="pill">{body}</div></div>\n'
         elif msg.direction == "out":
-            messages_html += f'''<div class="msg out">
+            messages_html += f'''<div class="msg out{thread_cls}" data-date="{date_key}" data-text=""{thread_attrs}>
   <div class="sender">You ({escape(identity_name)})</div>
   <div class="bubble out-bubble">{body}{att_html}</div>
   <div class="meta"><span class="ts" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">{full_display}</span><span class="iso" style="display:none">{iso_ts}</span> {badge}</div>
 </div>\n'''
         else:
-            messages_html += f'''<div class="msg in">
+            messages_html += f'''<div class="msg in{thread_cls}" data-date="{date_key}" data-text=""{thread_attrs}>
   <div class="sender">u/{escape(counterpart_username)}</div>
   <div class="bubble in-bubble">{body}{att_html}</div>
   <div class="meta"><span class="ts" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">{full_display}</span><span class="iso" style="display:none">{iso_ts}</span> {badge}</div>
 </div>\n'''
+
+    # Serialize dates as JSON for JS calendar
+    import json as _json
+    dates_json = _json.dumps(sorted(date_set))
 
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -1125,42 +1313,262 @@ async def export_conversation_html(
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Conversation with u/{escape(counterpart_username)}</title>
 <style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #1a1a1a; max-width: 800px; margin: 0 auto; padding: 20px; }}
-.header {{ background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-.header h1 {{ font-size: 1.25rem; margin-bottom: 4px; }}
-.header .info {{ font-size: 0.85rem; color: #666; }}
-.messages {{ display: flex; flex-direction: column; gap: 12px; }}
-.msg {{ display: flex; flex-direction: column; max-width: 75%; }}
-.msg.out {{ align-self: flex-end; align-items: flex-end; }}
-.msg.in {{ align-self: flex-start; align-items: flex-start; }}
-.msg.system {{ align-self: center; }}
-.sender {{ font-size: 0.75rem; color: #888; margin-bottom: 2px; padding: 0 4px; }}
-.bubble {{ padding: 10px 14px; border-radius: 16px; font-size: 0.9rem; line-height: 1.45; word-break: break-word; }}
-.out-bubble {{ background: #3b82f6; color: #fff; border-bottom-right-radius: 4px; }}
-.in-bubble {{ background: #e5e7eb; color: #1a1a1a; border-bottom-left-radius: 4px; }}
-.pill {{ background: #e5e7eb; padding: 6px 16px; border-radius: 999px; font-size: 0.8rem; color: #666; }}
-.meta {{ font-size: 0.75rem; color: #999; margin-top: 3px; padding: 0 4px; }}
-.ts {{ cursor: pointer; }}
-.ts:hover {{ text-decoration: underline; }}
-.iso {{ font-size: 0.7rem; color: #aaa; margin-top: 2px; }}
-.att {{ font-size: 0.8rem; margin-top: 6px; padding: 4px 8px; background: rgba(0,0,0,0.1); border-radius: 4px; }}
-.badge {{ font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }}
-.badge-del {{ background: #e5e7eb; color: #666; }}
-.badge-pending {{ background: #fef3c7; color: #92400e; }}
-.badge-fail {{ background: #fee2e2; color: #dc2626; }}
-.footer {{ text-align: center; font-size: 0.8rem; color: #999; margin-top: 30px; padding: 20px; }}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#1a1a1a;margin:0;padding:0}}
+.app-header{{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #e5e7eb;padding:12px 20px;display:flex;align-items:center;gap:12px}}
+.app-header h1{{font-size:1.1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0}}
+.header-spacer{{flex:1}}
+.cal-toggle{{background:none;border:1px solid #d1d5db;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:0.85rem;display:flex;align-items:center;gap:4px;color:#374151;white-space:nowrap}}
+.cal-toggle:hover{{background:#f3f4f6}}
+.cal-toggle svg{{width:16px;height:16px}}
+.search-box{{display:flex;align-items:center;border:1px solid #d1d5db;border-radius:8px;padding:4px 10px;gap:6px;min-width:200px;max-width:320px}}
+.search-box svg{{width:16px;height:16px;color:#9ca3af;flex-shrink:0}}
+.search-box input{{border:none;outline:none;font-size:0.85rem;width:100%;background:transparent}}
+.search-info{{font-size:0.75rem;color:#6b7280;white-space:nowrap;display:none}}
+.search-info.active{{display:block}}
+.search-nav{{display:none;gap:2px}}
+.search-nav.active{{display:flex}}
+.search-nav button{{background:none;border:none;cursor:pointer;padding:2px;color:#6b7280;font-size:1rem;line-height:1}}
+.search-nav button:hover{{color:#374151}}
+.content-wrap{{max-width:800px;margin:0 auto;padding:20px}}
+.conv-info{{background:#fff;border-radius:12px;padding:16px 20px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);font-size:0.85rem;color:#666}}
+.messages{{display:flex;flex-direction:column;gap:12px}}
+.msg{{display:flex;flex-direction:column;max-width:75%;transition:opacity 0.15s}}
+.msg.out{{align-self:flex-end;align-items:flex-end}}
+.msg.in{{align-self:flex-start;align-items:flex-start}}
+.msg.system{{align-self:center}}
+.msg.search-hidden{{display:none}}
+.msg.search-dim{{opacity:0.2}}
+.sender{{font-size:0.75rem;color:#888;margin-bottom:2px;padding:0 4px}}
+.bubble{{padding:10px 14px;border-radius:16px;font-size:0.9rem;line-height:1.45;word-break:break-word}}
+.out-bubble{{background:#3b82f6;color:#fff;border-bottom-right-radius:4px}}
+.in-bubble{{background:#e5e7eb;color:#1a1a1a;border-bottom-left-radius:4px}}
+.pill{{background:#e5e7eb;padding:6px 16px;border-radius:999px;font-size:0.8rem;color:#666}}
+.meta{{font-size:0.75rem;color:#999;margin-top:3px;padding:0 4px}}
+.ts{{cursor:pointer}}.ts:hover{{text-decoration:underline}}
+.iso{{font-size:0.7rem;color:#aaa;margin-top:2px}}
+.att{{font-size:0.8rem;margin-top:6px;padding:4px 8px;background:rgba(0,0,0,0.1);border-radius:4px}}
+.badge{{font-size:0.7rem;padding:1px 6px;border-radius:4px;margin-left:4px}}
+.badge-del{{background:#e5e7eb;color:#666}}
+.badge-pending{{background:#fef3c7;color:#92400e}}
+.badge-fail{{background:#fee2e2;color:#dc2626}}
+.date-sep{{text-align:center;margin:16px 0 8px;font-size:0.8rem;color:#9ca3af}}
+.date-sep span{{background:#f5f5f5;padding:2px 12px;border-radius:999px}}
+.msg.threaded{{border-left:3px solid #d1d5db;padding-left:8px;margin-left:4px}}
+.msg.threaded.out{{border-left:none;border-right:3px solid #93c5fd;padding-left:0;padding-right:8px;margin-left:0;margin-right:4px}}
+mark{{background:#fde68a;color:inherit;border-radius:2px;padding:0 1px}}
+.footer{{text-align:center;font-size:0.8rem;color:#999;margin-top:30px;padding:20px}}
+/* Calendar panel */
+.cal-overlay{{display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:200}}
+.cal-overlay.open{{display:flex}}
+.cal-backdrop{{position:absolute;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.2)}}
+.cal-panel{{position:relative;width:280px;background:#fff;height:100%;box-shadow:4px 0 20px rgba(0,0,0,0.12);padding:16px;overflow-y:auto;animation:slideIn 0.2s ease}}
+@keyframes slideIn{{from{{transform:translateX(-100%)}}to{{transform:translateX(0)}}}}
+.cal-head{{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}}
+.cal-head button{{background:none;border:none;cursor:pointer;font-size:1.2rem;color:#374151;padding:4px 8px;border-radius:4px}}
+.cal-head button:hover{{background:#f3f4f6}}
+.cal-head span{{font-size:0.95rem;font-weight:600}}
+.cal-grid{{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center}}
+.cal-grid .day-label{{font-size:0.7rem;color:#9ca3af;padding:4px 0;font-weight:500}}
+.cal-grid .day{{font-size:0.8rem;padding:6px 2px;border-radius:6px;cursor:default;color:#9ca3af;position:relative}}
+.cal-grid .day.has-msg{{color:#1a1a1a;cursor:pointer;font-weight:500}}
+.cal-grid .day.has-msg:hover{{background:#eff6ff}}
+.cal-grid .day.has-msg::after{{content:'';position:absolute;bottom:2px;left:50%;transform:translateX(-50%);width:4px;height:4px;background:#3b82f6;border-radius:50%}}
+.cal-grid .day.today{{background:#eff6ff;font-weight:600}}
+.cal-close{{position:absolute;top:12px;right:12px;background:none;border:none;cursor:pointer;font-size:1.1rem;color:#6b7280}}
 </style>
 </head>
 <body>
-<div class="header">
-  <h1>Conversation with u/{escape(counterpart_username)}</h1>
-  <div class="info">Identity: {escape(identity_name)} &middot; {len(messages)} messages &middot; Exported {export_date}</div>
+<div class="app-header">
+  <button class="cal-toggle" onclick="toggleCal()" title="Calendar navigation">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+    Cal
+  </button>
+  <h1>u/{escape(counterpart_username)}</h1>
+  <div class="header-spacer"></div>
+  <div class="search-box">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" id="searchInput" placeholder="Search messages..." oninput="doSearch(this.value)" onkeydown="searchKey(event)">
+    <span class="search-info" id="searchInfo"></span>
+    <div class="search-nav" id="searchNav">
+      <button onclick="searchPrev()" title="Previous">&uarr;</button>
+      <button onclick="searchNext()" title="Next">&darr;</button>
+    </div>
+  </div>
 </div>
-<div class="messages">
+
+<div class="cal-overlay" id="calOverlay">
+  <div class="cal-backdrop" onclick="toggleCal()"></div>
+  <div class="cal-panel">
+    <button class="cal-close" onclick="toggleCal()">&times;</button>
+    <div class="cal-head">
+      <button onclick="calPrev()">&lsaquo;</button>
+      <span id="calTitle"></span>
+      <button onclick="calNext()">&rsaquo;</button>
+    </div>
+    <div class="cal-grid" id="calGrid"></div>
+  </div>
+</div>
+
+<div class="content-wrap">
+  <div class="conv-info">
+    Identity: {escape(identity_name)} &middot; {len(messages)} messages &middot; Exported {export_date}
+  </div>
+  <div class="messages" id="messagesContainer">
 {messages_html}
+  </div>
+  <div class="footer">Exported from Rediska on {export_date}</div>
 </div>
-<div class="footer">Exported from Rediska on {export_date}</div>
+
+<script>
+(function(){{
+/* Calendar */
+var MSG_DATES={dates_json};
+var dateSet=new Set(MSG_DATES);
+var calMonth,calYear;
+var now=new Date();
+/* Start at earliest message date or today */
+if(MSG_DATES.length>0){{var p=MSG_DATES[0].split('-');calYear=+p[0];calMonth=+p[1]-1}}
+else{{calYear=now.getFullYear();calMonth=now.getMonth()}}
+
+window.toggleCal=function(){{
+  var o=document.getElementById('calOverlay');
+  o.classList.toggle('open');
+  if(o.classList.contains('open'))renderCal();
+}};
+window.calPrev=function(){{calMonth--;if(calMonth<0){{calMonth=11;calYear--}}renderCal()}};
+window.calNext=function(){{calMonth++;if(calMonth>11){{calMonth=0;calYear++}}renderCal()}};
+
+function pad(n){{return n<10?'0'+n:''+n}}
+function renderCal(){{
+  document.getElementById('calTitle').textContent=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][calMonth]+' '+calYear;
+  var g=document.getElementById('calGrid');
+  g.innerHTML='';
+  var labels=['Su','Mo','Tu','We','Th','Fr','Sa'];
+  for(var i=0;i<7;i++){{var d=document.createElement('div');d.className='day-label';d.textContent=labels[i];g.appendChild(d)}}
+  var first=new Date(calYear,calMonth,1).getDay();
+  var dim=new Date(calYear,calMonth+1,0).getDate();
+  var todayStr=now.getFullYear()+'-'+pad(now.getMonth()+1)+'-'+pad(now.getDate());
+  for(var i=0;i<first;i++){{var e=document.createElement('div');e.className='day';g.appendChild(e)}}
+  for(var d=1;d<=dim;d++){{
+    var el=document.createElement('div');
+    el.className='day';
+    el.textContent=d;
+    var ds=calYear+'-'+pad(calMonth+1)+'-'+pad(d);
+    if(ds===todayStr)el.classList.add('today');
+    if(dateSet.has(ds)){{
+      el.classList.add('has-msg');
+      el.setAttribute('data-date',ds);
+      el.onclick=function(){{var t=document.getElementById('date-'+this.getAttribute('data-date'));if(t){{t.scrollIntoView({{behavior:'smooth',block:'start'}});toggleCal()}}}};
+    }}
+    g.appendChild(el);
+  }}
+}}
+
+/* Search */
+var allMsgs=document.querySelectorAll('.msg');
+var matchEls=[],matchIdx=-1;
+
+function highlightTextNodes(el,re){{
+  /* Walk text nodes and wrap matches in <mark> */
+  var walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,null,false);
+  var nodes=[];
+  while(walker.nextNode())nodes.push(walker.currentNode);
+  for(var i=0;i<nodes.length;i++){{
+    var node=nodes[i];
+    var text=node.nodeValue;
+    if(!re.test(text))continue;
+    re.lastIndex=0;
+    var frag=document.createDocumentFragment();
+    var lastIdx=0,match;
+    while((match=re.exec(text))!==null){{
+      if(match.index>lastIdx)frag.appendChild(document.createTextNode(text.slice(lastIdx,match.index)));
+      var mark=document.createElement('mark');
+      mark.textContent=match[0];
+      frag.appendChild(mark);
+      lastIdx=re.lastIndex;
+    }}
+    if(lastIdx<text.length)frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+    node.parentNode.replaceChild(frag,node);
+  }}
+}}
+
+function clearHighlights(el){{
+  var marks=el.querySelectorAll('mark');
+  for(var i=0;i<marks.length;i++){{
+    var m=marks[i];
+    var parent=m.parentNode;
+    parent.replaceChild(document.createTextNode(m.textContent),m);
+    parent.normalize();
+  }}
+}}
+
+window.doSearch=function(q){{
+  /* Clear previous highlights */
+  allMsgs.forEach(function(m){{
+    m.classList.remove('search-hidden','search-dim');
+    var bub=m.querySelector('.bubble,.pill');
+    if(bub)clearHighlights(bub);
+  }});
+  matchEls=[];matchIdx=-1;
+  var info=document.getElementById('searchInfo');
+  var nav=document.getElementById('searchNav');
+
+  if(!q.trim()){{info.classList.remove('active');nav.classList.remove('active');
+    /* Also un-hide date separators */
+    document.querySelectorAll('.date-sep').forEach(function(d){{d.style.display=''}});
+    return}}
+
+  var ql=q.trim().toLowerCase();
+  var re;
+  try{{re=new RegExp('('+q.replace(/[.*+?^${{}}()|[\\]\\\\]/g,'\\\\$&')+')','gi')}}catch(e){{return}}
+
+  allMsgs.forEach(function(m){{
+    var bub=m.querySelector('.bubble,.pill');
+    if(!bub){{m.classList.add('search-dim');return}}
+    /* Use textContent for matching — avoids HTML entity issues (&#x27; etc.) */
+    var txt=(bub.textContent||'').toLowerCase();
+    if(txt.indexOf(ql)!==-1){{
+      matchEls.push(m);
+      /* Highlight matches by walking text nodes */
+      highlightTextNodes(bub,re);
+    }}else{{
+      m.classList.add('search-dim');
+    }}
+  }});
+
+  /* Hide date separators that have no visible messages after them */
+  document.querySelectorAll('.date-sep').forEach(function(ds){{
+    var next=ds.nextElementSibling;
+    var hasVisible=false;
+    while(next&&!next.classList.contains('date-sep')){{
+      if(next.classList.contains('msg')&&!next.classList.contains('search-dim')&&!next.classList.contains('search-hidden'))hasVisible=true;
+      next=next.nextElementSibling;
+    }}
+    ds.style.display=hasVisible?'':'none';
+  }});
+
+  if(matchEls.length>0){{
+    matchIdx=0;scrollToMatch();
+    info.textContent='1/'+matchEls.length;
+  }}else{{
+    info.textContent='0 results';
+  }}
+  info.classList.add('active');
+  nav.classList.toggle('active',matchEls.length>1);
+}};
+
+function scrollToMatch(){{
+  if(matchIdx<0||matchIdx>=matchEls.length)return;
+  matchEls[matchIdx].scrollIntoView({{behavior:'smooth',block:'center'}});
+  document.getElementById('searchInfo').textContent=(matchIdx+1)+'/'+matchEls.length;
+}}
+
+window.searchNext=function(){{if(matchEls.length===0)return;matchIdx=(matchIdx+1)%matchEls.length;scrollToMatch()}};
+window.searchPrev=function(){{if(matchEls.length===0)return;matchIdx=(matchIdx-1+matchEls.length)%matchEls.length;scrollToMatch()}};
+window.searchKey=function(e){{if(e.key==='Enter'){{e.shiftKey?searchPrev():searchNext();e.preventDefault()}}}}
+}})();
+</script>
 </body>
 </html>'''
 

@@ -363,6 +363,8 @@ class MessageSyncService:
         body_text: str,
         sent_at: datetime,
         sender_username: Optional[str] = None,
+        thread_external_id: Optional[str] = None,
+        parent_external_message_id: Optional[str] = None,
     ) -> tuple[Message | None, bool]:
         """Create a message if it doesn't exist. Returns (message, is_new).
 
@@ -448,6 +450,8 @@ class MessageSyncService:
             sent_at=sent_at,
             body_text=body_text,
             remote_visibility="visible",
+            thread_external_id=thread_external_id,
+            parent_external_message_id=parent_external_message_id,
         )
         self.db.add(message)
         self.db.flush()
@@ -933,6 +937,7 @@ class MessageSyncService:
                         # Create message
                         sent_at = self._parse_reddit_timestamp(msg_data.get("created_utc"))
                         body_text = msg_data.get("body", "")
+                        parent_id = msg_data.get("parent_id", "")
                         message, is_new_msg = self._create_message_if_not_exists(
                             conversation=conversation,
                             identity=identity,
@@ -941,6 +946,8 @@ class MessageSyncService:
                             body_text=body_text,
                             sent_at=sent_at,
                             sender_username=author,
+                            thread_external_id=first_message_name or "",
+                            parent_external_message_id=parent_id,
                         )
 
                         if is_new_msg:

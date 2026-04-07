@@ -832,6 +832,23 @@ def analyze_and_decide(
                     dimension_results=dimension_results,
                 )
 
+                # Check if meta-analysis actually succeeded
+                if not meta_result.get("success"):
+                    # Log all dimension failures for debugging
+                    failed_dims = [
+                        dim for dim, res in dimension_results.items()
+                        if not res.get("success")
+                    ]
+                    if failed_dims:
+                        logger.error(
+                            f"Dimension agents failed: {failed_dims}. "
+                            f"Errors: {[dimension_results[d].get('error', 'unknown') for d in failed_dims]}"
+                        )
+                    logger.error(
+                        f"Meta-analysis failed: {meta_result.get('error', 'unknown')}. "
+                        f"Raw output: {str(meta_result.get('output', ''))[:500]}"
+                    )
+
                 # Normalize here while analysis_service is still in scope
                 meta_output = meta_result.get("parsed_output", {}) or {}
                 normalized = analysis_service._normalize_meta_output(meta_output)

@@ -3,13 +3,16 @@
 import { useEffect, useState, useMemo, useCallback, useRef, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { AlertTriangle, Loader2, MessageSquare, Paperclip, RefreshCw, Reply, Search, Star, X } from 'lucide-react';
+import { AlertTriangle, Database, List, Loader2, MessageSquare, Paperclip, Plus, RefreshCw, Reply, Search, Star, Trash2, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
 import { EmptyState } from '@/components';
 import { IdentityFilter, IdentityBadge } from '@/components/identity';
 import { useIdentities } from '@/hooks/useIdentities';
@@ -208,6 +211,21 @@ function InboxContent() {
   const [hasAttachmentsFilter, setHasAttachmentsFilter] = useState(initialAttachments);
   const [hasRepliesFilter, setHasRepliesFilter] = useState(initialReplies);
 
+  // Dataset export dialog
+  const [datasetDialogOpen, setDatasetDialogOpen] = useState(false);
+  const [datasetSystemPrompt, setDatasetSystemPrompt] = useState('You are having a private conversation on Reddit.');
+  const [datasetTestOnly, setDatasetTestOnly] = useState(false);
+  const [datasetExporting, setDatasetExporting] = useState(false);
+  const [datasetListId, setDatasetListId] = useState<number | null>(null);
+
+  // Conversation lists
+  const [conversationLists, setConversationLists] = useState<Array<{ id: number; name: string; conversation_count: number; created_at: string; updated_at: string }>>([]);
+  const [listFilter, setListFilter] = useState<number | null>(null);
+  const [listConvIds, setListConvIds] = useState<Set<number> | null>(null);
+  const [showListManager, setShowListManager] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  const [creatingList, setCreatingList] = useState(false);
+
   // Update URL when filters change
   const updateUrlParams = useCallback((attachments: boolean, replies: boolean) => {
     const params = new URLSearchParams();
@@ -235,6 +253,109 @@ function InboxContent() {
     updateUrlParams(false, false);
   }, [updateUrlParams]);
 
+  // Fetch conversation lists
+  const fetchLists = useCallback(async () => {
+    try {
+      const res = await fetch('/api/core/lists', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setConversationLists(data.lists || []);
+      }
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => { fetchLists(); }, [fetchLists]);
+
+  // When list filter changes, fetch conversation IDs for that list
+  useEffect(() => {
+    if (listFilter === null) {
+      setListConvIds(null);
+      return;
+    }
+    const fetchIds = async () => {
+      try {
+        const res = await fetch(`/api/core/lists/${listFilter}/conversation-ids`, { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setListConvIds(new Set(data.conversation_ids || []));
+        }
+      } catch { /* silent */ }
+    };
+    fetchIds();
+  }, [listFilter]);
+
+  const handleCreateList = useCallback(async () => {
+    if (!newListName.trim() || creatingList) return;
+    setCreatingList(true);
+    try {
+      const res = await fetch('/api/core/lists', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newListName.trim() }),
+      });
+      if (res.ok) {
+        setNewListName('');
+        await fetchLists();
+      }
+    } catch { /* silent */ }
+    finally { setCreatingList(false); }
+  }, [newListName, creatingList, fetchLists]);
+
+  const handleDeleteList = useCallback(async (listId: number) => {
+    try {
+      const res = await fetch(`/api/core/lists/${listId}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        if (listFilter === listId) setListFilter(null);
+        if (datasetListId === listId) setDatasetListId(null);
+        await fetchLists();
+      }
+    } catch { /* silent */ }
+  }, [listFilter, datasetListId, fetchLists]);
+
+  const handleDatasetExport = useCallback(async () => {
+    setDatasetExporting(true);
+    try {
+      const params = new URLSearchParams();
+      if (datasetSystemPrompt.trim()) {
+        params.set('system_prompt', datasetSystemPrompt.trim());
+      }
+      if (datasetTestOnly) {
+        params.set('test_only', 'true');
+      }
+      if (datasetListId !== null) {
+        params.set('list_id', String(datasetListId));
+      }
+      const response = await fetch(`/api/core/conversations/export-dataset?${params.toString()}`, {
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error('Export failed');
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition') || '';
+      const filenameMatch = disposition.match(/filename="?(.+?)"?$/);
+      const filename = filenameMatch ? filenameMatch[1] : 'dataset.jsonl';
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setDatasetDialogOpen(false);
+    } catch (err) {
+      console.error('Dataset export failed:', err);
+    } finally {
+      setDatasetExporting(false);
+    }
+  }, [datasetSystemPrompt, datasetTestOnly, datasetListId]);
+
   const { identities, loading: identitiesLoading } = useIdentities();
 
   // Build identity lookup map
@@ -244,11 +365,17 @@ function InboxContent() {
     return map;
   }, [identities]);
 
-  // Filter conversations by identity (only for non-search mode)
+  // Filter conversations by identity and list (only for non-search mode)
   const filteredConversations = useMemo(() => {
-    if (identityFilter === null) return conversations;
-    return conversations.filter(conv => conv.identity_id === identityFilter);
-  }, [conversations, identityFilter]);
+    let result = conversations;
+    if (identityFilter !== null) {
+      result = result.filter(conv => conv.identity_id === identityFilter);
+    }
+    if (listFilter !== null && listConvIds !== null) {
+      result = result.filter(conv => listConvIds.has(conv.id));
+    }
+    return result;
+  }, [conversations, identityFilter, listFilter, listConvIds]);
 
   // Backend search
   const searchConversations = useCallback(async (query: string) => {
@@ -467,19 +594,93 @@ function InboxContent() {
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Inbox</h1>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => fetchConversations(true)}
-          disabled={refreshing}
-        >
-          {refreshing ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCw className="h-4 w-4" />
-          )}
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setDatasetDialogOpen(true)}
+            title="Export dataset for fine-tuning"
+          >
+            <Database className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => fetchConversations(true)}
+            disabled={refreshing}
+          >
+            {refreshing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+          </Button>
+        </div>
       </div>
+
+      {/* Dataset Export Dialog */}
+      <Dialog open={datasetDialogOpen} onOpenChange={setDatasetDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Export Fine-Tuning Dataset</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="system-prompt">System Prompt</Label>
+              <textarea
+                id="system-prompt"
+                className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                value={datasetSystemPrompt}
+                onChange={(e) => setDatasetSystemPrompt(e.target.value)}
+              />
+            </div>
+            {conversationLists.length > 0 && (
+              <div className="space-y-2">
+                <Label>Filter by List</Label>
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={datasetListId ?? ''}
+                  onChange={(e) => setDatasetListId(e.target.value ? Number(e.target.value) : null)}
+                >
+                  <option value="">All conversations</option>
+                  {conversationLists.map(lst => (
+                    <option key={lst.id} value={lst.id}>{lst.name} ({lst.conversation_count})</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="test-only"
+                checked={datasetTestOnly}
+                onCheckedChange={(checked) => setDatasetTestOnly(checked === true)}
+              />
+              <Label htmlFor="test-only" className="text-sm font-normal cursor-pointer">
+                Test conversations only ([TEST] prefix)
+              </Label>
+            </div>
+            <div className="text-xs text-muted-foreground space-y-1">
+              <p>Format: ChatML JSONL (compatible with Unsloth, Axolotl)</p>
+              <p>Consecutive same-role messages are merged. Conversations start with user turn.</p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDatasetDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleDatasetExport} disabled={datasetExporting}>
+              {datasetExporting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Exporting...
+                </>
+              ) : (
+                'Export'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Identity Filter */}
       {identities.length > 1 && (
@@ -494,7 +695,7 @@ function InboxContent() {
       )}
 
       {/* Message Filters */}
-      <div className="flex gap-2 mb-4">
+      <div className="flex gap-2 mb-4 flex-wrap">
         <Button
           variant={hasAttachmentsFilter ? "default" : "outline"}
           size="sm"
@@ -513,7 +714,63 @@ function InboxContent() {
           <Reply className="h-3.5 w-3.5" />
           With Replies
         </Button>
+        {conversationLists.map(lst => (
+          <Button
+            key={lst.id}
+            variant={listFilter === lst.id ? "default" : "outline"}
+            size="sm"
+            onClick={() => setListFilter(listFilter === lst.id ? null : lst.id)}
+            className={listFilter === lst.id ? "gap-1.5 shadow-sm" : "gap-1.5"}
+          >
+            <List className="h-3.5 w-3.5" />
+            {lst.name}
+            <span className="text-xs opacity-70">({lst.conversation_count})</span>
+          </Button>
+        ))}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setShowListManager(!showListManager)}
+          className="gap-1.5 text-muted-foreground"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          List
+        </Button>
       </div>
+
+      {/* List Manager */}
+      {showListManager && (
+        <Card className="p-3 mb-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Input
+              value={newListName}
+              onChange={(e) => setNewListName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleCreateList()}
+              placeholder="New list name..."
+              className="flex-1 h-8 text-sm"
+            />
+            <Button size="sm" onClick={handleCreateList} disabled={!newListName.trim() || creatingList} className="h-8">
+              {creatingList ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Create'}
+            </Button>
+          </div>
+          {conversationLists.length > 0 && (
+            <div className="space-y-1">
+              {conversationLists.map(lst => (
+                <div key={lst.id} className="flex items-center justify-between text-sm px-1">
+                  <span>{lst.name} <span className="text-muted-foreground">({lst.conversation_count})</span></span>
+                  <button
+                    onClick={() => handleDeleteList(lst.id)}
+                    className="text-muted-foreground hover:text-destructive p-1"
+                    title="Delete list"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Search Field */}
       <div className="relative mb-4">

@@ -471,8 +471,16 @@ def get_inference_client() -> InferenceClient:
     if not settings.inference_url:
         raise RuntimeError("INFERENCE_URL not configured")
 
+    # Auto-prepend http:// if no protocol specified
+    base_url = settings.inference_url
+    if not base_url.startswith("http://") and not base_url.startswith("https://"):
+        logger.warning(
+            f"INFERENCE_URL '{base_url}' is missing protocol, prepending http://"
+        )
+        base_url = f"http://{base_url}"
+
     config = InferenceConfig(
-        base_url=settings.inference_url,
+        base_url=base_url,
         model_name=settings.inference_model or "default",
         timeout=settings.inference_timeout,
         api_key=settings.inference_api_key,

@@ -115,6 +115,8 @@ class MessageInConversationResponse(BaseModel):
     send_error: Optional[str] = None
     identity_id: Optional[int] = None
     external_message_id: Optional[str] = None
+    thread_external_id: Optional[str] = None
+    parent_external_message_id: Optional[str] = None
     created_at: datetime
     attachments: list[AttachmentInMessageResponse] = Field(default_factory=list)
 

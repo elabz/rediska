@@ -28,15 +28,18 @@ FAKE_USERS = [
 ]
 
 # Sample conversation messages
+# Threading: thread_id groups messages into threads, parent_id links to the direct parent
 CONVERSATIONS = [
     {
         "username": "TechEnthusiast42",
         "messages": [
-            {"direction": "in", "text": "Hey, saw your post about the AI tool you're building. Looks interesting!"},
-            {"direction": "out", "text": "Thanks! Yes, it's been a fun project. What aspect caught your attention?"},
-            {"direction": "in", "text": "The local-first approach. I'm tired of everything being cloud-only. Privacy matters."},
-            {"direction": "out", "text": "Exactly my thinking. All your data stays on your machine. No cloud sync unless you explicitly want it."},
-            {"direction": "in", "text": "That's perfect. Is there a beta I can try?"},
+            # Thread 1: AI tool discussion
+            {"direction": "in", "text": "Hey, saw your post about the AI tool you're building. Looks interesting!", "thread_id": "t4_thread_a1", "parent_id": "t4_thread_a1"},
+            {"direction": "out", "text": "Thanks! Yes, it's been a fun project. What aspect caught your attention?", "thread_id": "t4_thread_a1", "parent_id": "t4_msg_a1"},
+            {"direction": "in", "text": "The local-first approach. I'm tired of everything being cloud-only. Privacy matters.", "thread_id": "t4_thread_a1", "parent_id": "t4_msg_a2"},
+            # Thread 2: Beta access (separate thread)
+            {"direction": "out", "text": "Exactly my thinking. All your data stays on your machine. No cloud sync unless you explicitly want it.", "thread_id": "t4_thread_a2", "parent_id": "t4_thread_a2"},
+            {"direction": "in", "text": "That's perfect. Is there a beta I can try?", "thread_id": "t4_thread_a2", "parent_id": "t4_msg_a4"},
         ],
     },
     {
@@ -198,6 +201,8 @@ def seed_conversations():
                         sent_at=msg_time,
                         body_text=msg_data["text"],
                         remote_visibility=visibility,
+                        thread_external_id=msg_data.get("thread_id", ""),
+                        parent_external_message_id=msg_data.get("parent_id", ""),
                     )
                     session.add(message)
 

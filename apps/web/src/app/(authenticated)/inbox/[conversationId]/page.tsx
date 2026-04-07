@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle, Star, Download, ShieldOff } from 'lucide-react';
+import { ArrowLeft, Check, Loader2, List, Plus, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle, Star, Download, ShieldOff } from 'lucide-react';
 import { PostsPanel } from '@/components/PostsPanel';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
@@ -405,12 +405,20 @@ export default function ConversationDetailPage() {
   const [showBatchDeleteDialog, setShowBatchDeleteDialog] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
 
+  // Conversation lists state
+  const [availableLists, setAvailableLists] = useState<Array<{ id: number; name: string; conversation_count: number }>>([]);
+  const [conversationListIds, setConversationListIds] = useState<Set<number>>(new Set());
+  const [listsLoading, setListsLoading] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  const [showListDropdown, setShowListDropdown] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const fastPollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [isFastPolling, setIsFastPolling] = useState(false);
+  const listDropdownRef = useRef<HTMLDivElement>(null);
 
   // Filter messages based on search query
   const filteredMessages = useMemo(() => {
@@ -893,6 +901,94 @@ export default function ConversationDetailPage() {
     fetchData();
   }, [conversationId, fetchAllMessages]);
 
+  // Fetch conversation lists and check which ones this conversation belongs to
+  const fetchLists = useCallback(async () => {
+    try {
+      const res = await fetch('/api/core/lists', { credentials: 'include' });
+      if (!res.ok) return;
+      const data = await res.json();
+      setAvailableLists(data.lists || []);
+
+      // For each list, check if this conversation is in it
+      const memberOf = new Set<number>();
+      for (const lst of data.lists || []) {
+        const idsRes = await fetch(`/api/core/lists/${lst.id}/conversation-ids`, { credentials: 'include' });
+        if (idsRes.ok) {
+          const idsData = await idsRes.json();
+          if ((idsData.conversation_ids || []).includes(Number(conversationId))) {
+            memberOf.add(lst.id);
+          }
+        }
+      }
+      setConversationListIds(memberOf);
+    } catch {
+      // silent
+    }
+  }, [conversationId]);
+
+  useEffect(() => {
+    fetchLists();
+  }, [fetchLists]);
+
+  const toggleListMembership = useCallback(async (listId: number) => {
+    const isInList = conversationListIds.has(listId);
+    try {
+      const res = await fetch(`/api/core/lists/${listId}/conversations/${conversationId}`, {
+        method: isInList ? 'DELETE' : 'POST',
+        credentials: 'include',
+      });
+      if (res.ok) {
+        setConversationListIds(prev => {
+          const next = new Set(prev);
+          if (isInList) next.delete(listId);
+          else next.add(listId);
+          return next;
+        });
+      }
+    } catch {
+      // silent
+    }
+  }, [conversationId, conversationListIds]);
+
+  const createListAndAdd = useCallback(async () => {
+    if (!newListName.trim()) return;
+    setListsLoading(true);
+    try {
+      const res = await fetch('/api/core/lists', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newListName.trim() }),
+      });
+      if (res.ok) {
+        const created = await res.json();
+        // Add conversation to the new list
+        await fetch(`/api/core/lists/${created.id}/conversations/${conversationId}`, {
+          method: 'POST',
+          credentials: 'include',
+        });
+        setNewListName('');
+        await fetchLists();
+      }
+    } catch {
+      // silent
+    } finally {
+      setListsLoading(false);
+    }
+  }, [newListName, conversationId, fetchLists]);
+
+  // Close list dropdown on outside click
+  useEffect(() => {
+    if (!showListDropdown) return;
+    const handler = (e: MouseEvent) => {
+      if (listDropdownRef.current && !listDropdownRef.current.contains(e.target as Node)) {
+        setShowListDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showListDropdown]);
+
   useEffect(() => {
     if (!loading && messages.length > 0) {
       scrollToBottom();
@@ -1074,6 +1170,57 @@ export default function ConversationDetailPage() {
           >
             <Star className={cn("h-5 w-5", counterpart.is_starred && "fill-current")} />
           </button>
+          <div className="relative" ref={listDropdownRef}>
+            <button
+              onClick={() => setShowListDropdown(!showListDropdown)}
+              className={cn(
+                "p-1.5 rounded transition-colors text-muted-foreground hover:text-foreground",
+                conversationListIds.size > 0 && "text-blue-500"
+              )}
+              title="Manage lists"
+            >
+              <List className="h-5 w-5" />
+            </button>
+            {showListDropdown && (
+              <div className="absolute right-0 top-full mt-1 w-56 bg-popover border rounded-md shadow-lg z-50 p-1">
+                {availableLists.length === 0 && (
+                  <p className="text-xs text-muted-foreground px-2 py-1.5">No lists yet</p>
+                )}
+                {availableLists.map(lst => (
+                  <button
+                    key={lst.id}
+                    onClick={() => toggleListMembership(lst.id)}
+                    className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded hover:bg-muted transition-colors text-left"
+                  >
+                    <span className={cn("h-4 w-4 flex items-center justify-center rounded border", conversationListIds.has(lst.id) ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30")}>
+                      {conversationListIds.has(lst.id) && <Check className="h-3 w-3" />}
+                    </span>
+                    <span className="truncate flex-1">{lst.name}</span>
+                    <span className="text-xs text-muted-foreground">{lst.conversation_count}</span>
+                  </button>
+                ))}
+                <div className="border-t mt-1 pt-1">
+                  <div className="flex items-center gap-1 px-1">
+                    <input
+                      type="text"
+                      value={newListName}
+                      onChange={(e) => setNewListName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && createListAndAdd()}
+                      placeholder="New list..."
+                      className="flex-1 text-sm border rounded px-2 py-1 bg-background"
+                    />
+                    <button
+                      onClick={createListAndAdd}
+                      disabled={!newListName.trim() || listsLoading}
+                      className="p-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
           <a
             href={`/api/core/conversations/${conversationId}/export`}
             download

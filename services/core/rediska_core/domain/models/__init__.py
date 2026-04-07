@@ -421,6 +421,56 @@ class Conversation(Base):
         back_populates="conversations"
     )
     messages: Mapped[list["Message"]] = relationship(back_populates="conversation")
+    list_memberships: Mapped[list["ConversationListMember"]] = relationship(
+        back_populates="conversation"
+    )
+
+
+class ConversationList(Base):
+    """User-defined conversation lists (e.g. by topic)."""
+
+    __tablename__ = "conversation_lists"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    # Relationships
+    members: Mapped[list["ConversationListMember"]] = relationship(
+        back_populates="conversation_list", cascade="all, delete-orphan"
+    )
+
+
+class ConversationListMember(Base):
+    """Junction table: conversation <-> list membership."""
+
+    __tablename__ = "conversation_list_members"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    list_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("conversation_lists.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("list_id", "conversation_id", name="uq_list_conv"),
+        Index("idx_list_member_list", "list_id"),
+        Index("idx_list_member_conv", "conversation_id"),
+    )
+
+    # Relationships
+    conversation_list: Mapped["ConversationList"] = relationship(back_populates="members")
+    conversation: Mapped["Conversation"] = relationship(back_populates="list_memberships")
 
 
 class Message(Base):
@@ -460,6 +510,11 @@ class Message(Base):
     remote_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     send_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Threading: Reddit thread root ID and direct parent message ID
+    thread_external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    parent_external_message_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
@@ -469,6 +524,7 @@ class Message(Base):
         UniqueConstraint("provider_id", "external_message_id", name="uq_msg_ext"),
         Index("idx_msg_conv_time", "conversation_id", "sent_at"),
         Index("idx_msg_identity", "identity_id"),
+        Index("idx_msg_thread", "thread_external_id"),
     )
 
     # Relationships

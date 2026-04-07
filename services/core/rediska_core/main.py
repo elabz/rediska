@@ -27,6 +27,7 @@ from rediska_core.api.routes import attachment as attachment_routes
 from rediska_core.api.routes import audit as audit_routes
 from rediska_core.api.routes import auth as auth_routes
 from rediska_core.api.routes import conversation as conversation_routes
+from rediska_core.api.routes import conversation_lists as conversation_lists_routes
 from rediska_core.api.routes import directory as directory_routes
 from rediska_core.api.routes import identity as identity_routes
 from rediska_core.api.routes import leads as leads_routes
@@ -77,6 +78,7 @@ app.include_router(attachment_routes.router)
 app.include_router(audit_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(conversation_routes.router)
+app.include_router(conversation_lists_routes.router)
 app.include_router(directory_routes.router)
 app.include_router(identity_routes.router)
 app.include_router(leads_routes.router)
