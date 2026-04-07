@@ -197,6 +197,19 @@ function ImageLightbox({
   );
 }
 
+function getRedditUrl(item: ProfileItem): string | null {
+  if (!item.external_item_id) return null;
+  const id = item.external_item_id.replace(/^t[0-9]_/, '');
+  if (item.item_type === 'post') {
+    return `https://reddit.com/comments/${id}`;
+  }
+  if (item.item_type === 'comment' && item.link_id) {
+    const postId = item.link_id.replace(/^t[0-9]_/, '');
+    return `https://reddit.com/comments/${postId}/comment/${id}`;
+  }
+  return null;
+}
+
 function ProfileItemsList({
   items,
   itemType,
@@ -207,6 +220,16 @@ function ProfileItemsList({
   loading: boolean;
 }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set());
+
+  const toggleExpanded = (id: number) => {
+    setExpandedItems(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   if (loading) {
     return (
@@ -308,14 +331,43 @@ function ProfileItemsList({
                 </button>
               )}
               <div className="min-w-0 flex-1">
-                <p className="text-sm line-clamp-2">
+                <p
+                  className={cn(
+                    'text-sm whitespace-pre-wrap',
+                    !expandedItems.has(item.id) && 'line-clamp-2'
+                  )}
+                >
                   {item.text_content || '(No content)'}
                 </p>
-                {item.item_created_at && (
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {formatRelativeTime(item.item_created_at)}
-                  </p>
+                {item.text_content && item.text_content.length > 120 && (
+                  <button
+                    className="text-xs text-primary hover:underline mt-0.5"
+                    onClick={() => toggleExpanded(item.id)}
+                  >
+                    {expandedItems.has(item.id) ? 'Show less' : 'Show more'}
+                  </button>
                 )}
+                <div className="flex items-center gap-2 mt-1">
+                  {item.item_created_at && (
+                    <span className="text-xs text-muted-foreground">
+                      {formatRelativeTime(item.item_created_at)}
+                    </span>
+                  )}
+                  {(() => {
+                    const url = getRedditUrl(item);
+                    return url ? (
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-muted-foreground hover:text-primary flex items-center gap-0.5"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                        reddit
+                      </a>
+                    ) : null;
+                  })()}
+                </div>
               </div>
             </div>
           </div>
