@@ -125,6 +125,7 @@ celery -A rediska_worker.celery_app worker -l INFO
 ## Documentation
 
 - [CLAUDE.md](./CLAUDE.md) - Development guide for Claude Code
+- [docs/deploy.md](./docs/deploy.md) - Operator-facing deploy + migration + smoke-test guide
 - [Spec Pack](./prd/Rediska_Spec_Pack_v0.3.md) - Technical specifications
 - [Sprint Plan](./prd/Rediska_Sprint_Plan_v0.1.md) - Development roadmap
 - [Task Breakdown](./prd/Rediska_Task_Breakdown_v0.1.md) - Implementation checklist

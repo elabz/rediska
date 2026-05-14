@@ -116,6 +116,8 @@ rediska/
 
 ## Development Commands
 
+> For **production deployment** to a dedicated on-prem server (bring-up, smoke test, dev-to-prod migration, troubleshooting), see [docs/deploy.md](./docs/deploy.md). The commands below cover local development only.
+
 ### Docker Compose
 ```bash
 # Start all services
@@ -151,10 +153,13 @@ docker compose exec rediska-core alembic downgrade -1
 ```bash
 cd apps/web
 npm install
-npm run dev      # Development server
-npm run build    # Production build
-npm run lint     # Linting
+npm run dev          # Development server
+npm run build        # Production build
+npm run lint         # Linting (next/core-web-vitals + next/typescript preset)
+npm run lint -- --fix # Auto-fix lint findings where possible
 ```
+
+ESLint config: `apps/web/.eslintrc.json`. Lint must be clean before merging.
 
 ### Core API Development
 ```bash
@@ -413,6 +418,8 @@ See `prd/Rediska_Sprint_Plan_v0.2.md` for sprint objectives and acceptance crite
 ---
 
 ## Troubleshooting
+
+> Production-server troubleshooting (failure modes, where-to-look-first per smoke item, ES OOM, mkcert trust, etc.) lives in [docs/deploy.md §6](./docs/deploy.md#6-troubleshooting). The list below is the local-dev quick reference.
 
 ### Common Issues
 
