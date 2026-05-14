@@ -1,380 +1,23 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Check, Loader2, List, Plus, Send, AlertCircle, ExternalLink, ChevronUp, ChevronDown, ImageIcon, MoreVertical, Trash2, X, Paperclip, Search, Images, RefreshCw, AlertTriangle, Star, Download, ShieldOff } from 'lucide-react';
-import { PostsPanel } from '@/components/PostsPanel';
+import { AlertCircle, ArrowLeft, X } from 'lucide-react';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { cn } from '@/lib/utils';
-
-interface Counterpart {
-  id: number;
-  external_username: string;
-  external_user_id: string | null;
-  remote_status: string;
-  is_starred: boolean;
-}
-
-interface ConversationDetail {
-  id: number;
-  provider_id: string;
-  identity_id: number;
-  external_conversation_id: string;
-  counterpart: Counterpart;
-  last_activity_at: string | null;
-  counterpart_last_post_title: string | null;
-  archived_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface Attachment {
-  id: number;
-  mime_type: string;
-  size_bytes: number;
-  width_px: number | null;
-  height_px: number | null;
-}
-
-interface Message {
-  id: number;
-  direction: 'in' | 'out' | 'system';
-  body_text: string | null;
-  sent_at: string;
-  remote_visibility: string;
-  send_error: string | null;
-  identity_id: number | null;
-  external_message_id?: string | null;
-  created_at: string;
-  attachments?: Attachment[];
-}
-
-interface MessagesResponse {
-  messages: Message[];
-  next_cursor: string | null;
-  has_more: boolean;
-}
-
-function getInitials(username: string): string {
-  return username.slice(0, 2).toUpperCase();
-}
-
-function normalizeUtc(s: string): string {
-  return s.endsWith('Z') || s.includes('+') ? s : s + 'Z';
-}
-
-function formatMessageTime(dateString: string): string {
-  const date = new Date(normalizeUtc(dateString));
-  const now = new Date();
-  const isToday = date.toDateString() === now.toDateString();
-
-  if (isToday) {
-    return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  }
-
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) {
-    return `Yesterday ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
-  }
-
-  // Include year for all other dates
-  return date.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  });
-}
-
-/**
- * Translates Reddit API error codes into human-readable explanations.
- */
-function getSendErrorExplanation(error: string | null): string {
-  if (!error) return 'Message could not be delivered.';
-
-  const errorLower = error.toLowerCase();
-
-  if (errorLower.includes('not_whitelisted_by_user_message') || errorLower.includes("can't send a message to that user")) {
-    return 'This user has their privacy settings configured to only accept messages from whitelisted users. You are not on their whitelist.';
-  }
-  if (errorLower.includes('user_blocked')) {
-    return 'This user has blocked you. You cannot send messages to them.';
-  }
-  if (errorLower.includes('user_muted')) {
-    return 'This user has muted you. They will not receive your messages.';
-  }
-  if (errorLower.includes('no_user') || errorLower.includes('user_doesnt_exist')) {
-    return 'This user account no longer exists or has been deleted.';
-  }
-  if (errorLower.includes('user_is_suspended')) {
-    return 'This user\'s account has been suspended by Reddit.';
-  }
-  if (errorLower.includes('ratelimit') || errorLower.includes('rate_limit')) {
-    return 'Reddit rate limit reached. Please wait a few minutes and try resending.';
-  }
-  if (errorLower.includes('invalid_permission')) {
-    return 'Your Reddit account does not have permission to send messages. This may be due to low karma or a new account.';
-  }
-  if (errorLower.includes('no credential') || errorLower.includes('no_credential')) {
-    return 'No Reddit credentials found for this identity. Please re-authenticate in Settings.';
-  }
-  if (errorLower.includes('thread_locked')) {
-    return 'This conversation thread has been locked and no longer accepts new messages.';
-  }
-  if (errorLower.includes('gold_required')) {
-    return 'This action requires Reddit Premium (Gold).';
-  }
-
-  // Fallback: show the raw error
-  return error;
-}
-
-function MessageBubble({
-  message,
-  counterpartUsername,
-  redditComposeUrl,
-  onDelete,
-  onRetry,
-  onRemoteDelete,
-  isDeleting,
-  isRetrying,
-  isRemoteDeleting,
-}: {
-  message: Message;
-  counterpartUsername: string;
-  redditComposeUrl?: string;
-  onDelete?: (messageId: number) => void;
-  onRetry?: (messageId: number) => void;
-  onRemoteDelete?: (messageId: number) => void;
-  isDeleting?: boolean;
-  isRetrying?: boolean;
-  isRemoteDeleting?: boolean;
-}) {
-  const isOutgoing = message.direction === 'out';
-  const isSystem = message.direction === 'system';
-  const [imageErrors, setImageErrors] = useState<Set<number>>(new Set());
-  const isPending = message.remote_visibility === 'unknown';
-  const isFailed = message.remote_visibility === 'send_failed';
-  const canDelete = isOutgoing && (isPending || isFailed) && onDelete;
-  const canRetry = isOutgoing && isFailed && onRetry;
-  const canRemoteDelete = isOutgoing && message.remote_visibility === 'visible' && !!message.external_message_id && onRemoteDelete;
-
-  const imageAttachments = (message.attachments || []).filter(att => att.mime_type.startsWith('image/'));
-
-  if (isSystem) {
-    return (
-      <div className="flex justify-center my-4">
-        <div className="bg-muted px-4 py-2 rounded-full text-sm text-muted-foreground">
-          {message.body_text}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className={cn(
-      "flex gap-3 mb-4 group",
-      isOutgoing ? "flex-row-reverse" : "flex-row"
-    )}>
-      {!isOutgoing && (
-        <Avatar className="h-8 w-8 shrink-0">
-          <AvatarFallback className="bg-muted text-xs">
-            {getInitials(counterpartUsername)}
-          </AvatarFallback>
-        </Avatar>
-      )}
-
-      <div className={cn(
-        "flex flex-col max-w-[75%]",
-        isOutgoing ? "items-end" : "items-start"
-      )}>
-        {/* Image attachments */}
-        {imageAttachments.length > 0 && (
-          <div className={cn(
-            "flex flex-wrap gap-2 mb-2",
-            isOutgoing ? "justify-end" : "justify-start"
-          )}>
-            {imageAttachments.map((att) => (
-              <div key={att.id} className="relative">
-                {imageErrors.has(att.id) ? (
-                  <div className="w-48 h-32 bg-muted rounded-lg flex items-center justify-center">
-                    <div className="text-center text-muted-foreground">
-                      <ImageIcon className="h-8 w-8 mx-auto mb-1" />
-                      <span className="text-xs">Image unavailable</span>
-                    </div>
-                  </div>
-                ) : (
-                  <a
-                    href={`/api/core/attachments/${att.id}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={`/api/core/attachments/${att.id}`}
-                      alt="Attachment"
-                      className="max-w-[300px] max-h-[300px] rounded-lg object-contain cursor-pointer hover:opacity-90 transition-opacity"
-                      style={{
-                        width: att.width_px ? Math.min(att.width_px, 300) : 'auto',
-                        height: att.height_px ? Math.min(att.height_px, 300) : 'auto',
-                      }}
-                      onError={() => setImageErrors(prev => { const next = new Set(prev); next.add(att.id); return next; })}
-                    />
-                  </a>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Message body */}
-        {message.body_text && (
-          <div className={cn(
-            "px-4 py-2.5 rounded-2xl",
-            isOutgoing
-              ? "bg-primary text-primary-foreground rounded-br-sm"
-              : "bg-muted rounded-bl-sm"
-          )}>
-            <p className="text-sm whitespace-pre-wrap break-words">
-              {message.body_text}
-            </p>
-          </div>
-        )}
-
-        <div className="flex items-center gap-2 mt-1 px-1">
-          <span className="text-xs text-muted-foreground">
-            {formatMessageTime(message.sent_at)}
-          </span>
-          {message.remote_visibility === 'unknown' && (
-            <Badge variant="outline" className="text-xs h-5 px-1.5">
-              Pending
-            </Badge>
-          )}
-          {message.remote_visibility === 'send_failed' && (
-            <Badge variant="destructive" className="text-xs h-5 px-1.5">
-              <AlertTriangle className="h-3 w-3 mr-1" />
-              Failed
-            </Badge>
-          )}
-          {message.remote_visibility === 'deleted_by_author' && (
-            <Badge variant="secondary" className="text-xs h-5 px-1.5">
-              Deleted
-            </Badge>
-          )}
-
-          {/* Action buttons for pending/failed/deletable messages */}
-          {(canDelete || canRetry || canRemoteDelete || (isFailed && redditComposeUrl)) && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-5 w-5 p-0"
-                  disabled={isDeleting || isRetrying || isRemoteDeleting}
-                >
-                  {(isDeleting || isRetrying || isRemoteDeleting) ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <MoreVertical className="h-3 w-3" />
-                  )}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
-                {canRetry && (
-                  <DropdownMenuItem
-                    onClick={() => onRetry(message.id)}
-                  >
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    Resend
-                  </DropdownMenuItem>
-                )}
-                {isFailed && redditComposeUrl && (
-                  <DropdownMenuItem asChild>
-                    <a href={redditComposeUrl} target="_blank" rel="noopener noreferrer">
-                      <ExternalLink className="h-4 w-4 mr-2" />
-                      Send via Reddit
-                    </a>
-                  </DropdownMenuItem>
-                )}
-                {canRemoteDelete && (
-                  <DropdownMenuItem
-                    onClick={() => onRemoteDelete(message.id)}
-                    className="text-destructive focus:text-destructive"
-                  >
-                    <ShieldOff className="h-4 w-4 mr-2" />
-                    Delete from Reddit
-                  </DropdownMenuItem>
-                )}
-                {canDelete && (
-                  <DropdownMenuItem
-                    onClick={() => onDelete(message.id)}
-                    className="text-destructive focus:text-destructive"
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    Delete
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-
-        {/* Error explanation for failed messages */}
-        {isFailed && message.send_error && (
-          <div className="mt-1.5 px-3 py-2 rounded-lg bg-destructive/10 border border-destructive/20 max-w-full">
-            <p className="text-xs text-destructive">
-              {getSendErrorExplanation(message.send_error)}
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function MessagesSkeleton() {
-  return (
-    <div className="space-y-4 p-4">
-      {[1, 2, 3, 4, 5].map((i) => (
-        <div key={i} className={cn(
-          "flex gap-3",
-          i % 2 === 0 ? "flex-row-reverse" : "flex-row"
-        )}>
-          {i % 2 !== 0 && <Skeleton className="h-8 w-8 rounded-full" />}
-          <Skeleton className={cn(
-            "h-16 rounded-2xl",
-            i % 2 === 0 ? "w-48" : "w-64"
-          )} />
-        </div>
-      ))}
-    </div>
-  );
-}
+import type { ConversationDetail, Message } from './_types';
+import { MessagesSkeleton } from './_components/MessagesSkeleton';
+import { ConversationHeader } from './_components/ConversationHeader';
+import { MessageList, type MessageListHandle } from './_components/MessageList';
+import { ComposeBox } from './_components/ComposeBox';
+import { DeleteMessageDialog } from './_components/DeleteMessageDialog';
+import { RemoteDeleteDialog } from './_components/RemoteDeleteDialog';
+import { ScrubConversationDialog } from './_components/ScrubConversationDialog';
+import { useMessages } from './_hooks/useMessages';
+import { useMessageActions } from './_hooks/useMessageActions';
 
 export default function ConversationDetailPage() {
   const params = useParams();
@@ -382,675 +25,78 @@ export default function ConversationDetailPage() {
   const conversationId = params.conversationId as string;
 
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [messageText, setMessageText] = useState('');
-  const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [deletingMessages, setDeletingMessages] = useState<Set<number>>(new Set());
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [conversationLoading, setConversationLoading] = useState(true);
+  const [conversationError, setConversationError] = useState<string | null>(null);
   const [messageToDelete, setMessageToDelete] = useState<number | null>(null);
-  const [retryingMessages, setRetryingMessages] = useState<Set<number>>(new Set());
-  const [attachmentIds, setAttachmentIds] = useState<number[]>([]);
-  const [uploadingAttachment, setUploadingAttachment] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [galleryExpanded, setGalleryExpanded] = useState(false);
-  // Remote delete state
   const [remoteDeleteTarget, setRemoteDeleteTarget] = useState<number | null>(null);
-  const [remoteDeletingMessages, setRemoteDeletingMessages] = useState<Set<number>>(new Set());
   const [showBatchDeleteDialog, setShowBatchDeleteDialog] = useState(false);
-  const [batchDeleting, setBatchDeleting] = useState(false);
 
-  // Conversation lists state
-  const [availableLists, setAvailableLists] = useState<Array<{ id: number; name: string; conversation_count: number }>>([]);
-  const [conversationListIds, setConversationListIds] = useState<Set<number>>(new Set());
-  const [listsLoading, setListsLoading] = useState(false);
-  const [newListName, setNewListName] = useState('');
-  const [showListDropdown, setShowListDropdown] = useState(false);
+  const messageListRef = useRef<MessageListHandle>(null);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const fastPollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const [isFastPolling, setIsFastPolling] = useState(false);
-  const listDropdownRef = useRef<HTMLDivElement>(null);
+  const {
+    messages,
+    setMessages,
+    loading: messagesLoading,
+    error: messagesError,
+    hasMore,
+    loadingOlder,
+    loadOlder,
+    startFastPoll,
+  } = useMessages(conversationId);
 
-  // Filter messages based on search query
-  const filteredMessages = useMemo(() => {
-    if (!searchQuery.trim()) {
-      return messages;
+  const {
+    deletingMessages,
+    retryingMessages,
+    remoteDeletingMessages,
+    batchDeleting,
+    actionError,
+    setActionError,
+    deleteMessage,
+    retryMessage,
+    remoteDeleteMessage,
+    scrubConversation,
+  } = useMessageActions({
+    conversationId,
+    setMessages,
+    startFastPoll,
+    onMessageDeleted: () => setMessageToDelete(null),
+    onRemoteDeleted: () => setRemoteDeleteTarget(null),
+    onScrubbed: () => setShowBatchDeleteDialog(false),
+  });
+
+  const loading = conversationLoading || messagesLoading;
+  const error = conversationError ?? messagesError;
+
+  const scrubEligibleCount = useMemo(
+    () => messages.filter(m => m.direction === 'out' && m.remote_visibility === 'visible' && !!m.external_message_id).length,
+    [messages]
+  );
+
+  const redditComposeUrl = useMemo(() => {
+    if (!conversation) return '';
+    const qs = new URLSearchParams({ to: conversation.counterpart.external_username });
+    if (conversation.counterpart_last_post_title) {
+      qs.set('subject', conversation.counterpart_last_post_title);
     }
-    const query = searchQuery.toLowerCase();
-    return messages.filter(msg =>
-      msg.body_text?.toLowerCase().includes(query)
-    );
-  }, [messages, searchQuery]);
+    return `https://www.reddit.com/message/compose/?${qs.toString()}`;
+  }, [conversation]);
+
+  const handleMessageSent = useCallback((optimisticMessage: Message) => {
+    setMessages(prev => [...prev, optimisticMessage]);
+    setTimeout(() => messageListRef.current?.scrollToBottom(), 100);
+    startFastPoll();
+  }, [setMessages, startFastPoll]);
 
-  // Collect all image attachments from all messages for gallery
-  const allImageAttachments = useMemo(() => {
-    const images: Array<{ attachment: Attachment; messageId: number; sentAt: string }> = [];
-    for (const msg of messages) {
-      for (const att of msg.attachments || []) {
-        if (att.mime_type.startsWith('image/')) {
-          images.push({
-            attachment: att,
-            messageId: msg.id,
-            sentAt: msg.sent_at,
-          });
-        }
-      }
-    }
-    // Sort by date, newest first for gallery
-    return images.sort((a, b) => new Date(normalizeUtc(b.sentAt)).getTime() - new Date(normalizeUtc(a.sentAt)).getTime());
-  }, [messages]);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  // Fetch a single page of messages with optional cursor for pagination
-  const fetchMessagesPage = useCallback(async (cursor?: string) => {
-    const params = new URLSearchParams({ limit: '100' });
-    if (cursor) {
-      params.set('cursor', cursor);
-    }
-
-    const response = await fetch(
-      `/api/core/conversations/${conversationId}/messages?${params.toString()}`,
-      { credentials: 'include' }
-    );
-
-    if (!response.ok) {
-      const data = await response.json();
-      throw new Error(data.detail || 'Failed to load messages');
-    }
-
-    return response.json() as Promise<MessagesResponse>;
-  }, [conversationId]);
-
-  // Fetch ALL messages by recursively loading all pages
-  const fetchAllMessages = useCallback(async (): Promise<{ messages: Message[]; nextCursor: string | null; hasMore: boolean }> => {
-    const allMessages: Message[] = [];
-    let cursor: string | undefined = undefined;
-    let hasMore = true;
-
-    // Keep fetching until we have all messages
-    while (hasMore) {
-      const page = await fetchMessagesPage(cursor);
-      allMessages.push(...page.messages);
-      cursor = page.next_cursor || undefined;
-      hasMore = page.has_more;
-
-      // Safety limit to prevent infinite loops (max 50 pages = 5000 messages)
-      if (allMessages.length > 5000) {
-        return {
-          messages: allMessages,
-          nextCursor: cursor || null,
-          hasMore: hasMore
-        };
-      }
-    }
-
-    return {
-      messages: allMessages,
-      nextCursor: null,
-      hasMore: false
-    };
-  }, [fetchMessagesPage]);
-
-  // Load older messages (used when safety limit was hit)
-  const loadOlderMessages = useCallback(async () => {
-    if (!nextCursor || loadingOlder) return;
-
-    setLoadingOlder(true);
-    try {
-      const msgsData = await fetchMessagesPage(nextCursor);
-      // Older messages (DESC order) - prepend to beginning after reversing
-      const olderMessages = msgsData.messages.reverse();
-      setMessages(prev => [...olderMessages, ...prev]);
-      setNextCursor(msgsData.next_cursor);
-      setHasMore(msgsData.has_more);
-    } catch (err) {
-      console.error('Failed to load older messages:', err);
-    } finally {
-      setLoadingOlder(false);
-    }
-  }, [nextCursor, loadingOlder, fetchMessagesPage]);
-
-  // Poll for message updates (new messages + status changes)
-  const pollMessages = useCallback(async () => {
-    if (loading) return;
-
-    try {
-      // Fetch fresh messages (just the first page for speed)
-      const msgsData = await fetchMessagesPage();
-      const freshMessages = msgsData.messages.reverse();
-
-      setMessages(prev => {
-        // Build a map of existing messages by ID
-        const existingMap = new Map(prev.map(m => [m.id, m]));
-
-        // Merge fresh messages, updating existing ones and adding new ones
-        const updated: Message[] = [];
-        const seenIds = new Set<number>();
-
-        // First, include all existing messages, updating them if fresh data exists
-        for (const existing of prev) {
-          const fresh = freshMessages.find(f => f.id === existing.id);
-          if (fresh) {
-            // Update with fresh data (including remote_visibility changes)
-            updated.push(fresh);
-          } else {
-            // Keep existing message
-            updated.push(existing);
-          }
-          seenIds.add(existing.id);
-        }
-
-        // Add any new messages that weren't in the existing list
-        for (const fresh of freshMessages) {
-          if (!seenIds.has(fresh.id)) {
-            updated.push(fresh);
-          }
-        }
-
-        // Sort by sent_at to maintain order
-        updated.sort((a, b) => new Date(normalizeUtc(a.sent_at)).getTime() - new Date(normalizeUtc(b.sent_at)).getTime());
-
-        return updated;
-      });
-    } catch (err) {
-      console.error('Failed to poll messages:', err);
-    }
-  }, [loading, fetchMessagesPage]);
-
-  // Check if there are any pending outgoing messages
-  const hasPendingMessages = useCallback(() => {
-    return messages.some(m => m.direction === 'out' && m.remote_visibility === 'unknown');
-  }, [messages]);
-
-  // Start fast polling (every 2 seconds for up to 30 seconds)
-  const startFastPolling = useCallback(() => {
-    // Clear any existing fast poll timeout
-    if (fastPollTimeoutRef.current) {
-      clearTimeout(fastPollTimeoutRef.current);
-    }
-
-    setIsFastPolling(true);
-
-    // Stop fast polling after 30 seconds
-    fastPollTimeoutRef.current = setTimeout(() => {
-      setIsFastPolling(false);
-    }, 30000);
-  }, []);
-
-  // Stop fast polling
-  const stopFastPolling = useCallback(() => {
-    if (fastPollTimeoutRef.current) {
-      clearTimeout(fastPollTimeoutRef.current);
-      fastPollTimeoutRef.current = null;
-    }
-    setIsFastPolling(false);
-  }, []);
-
-  // Send message
-  const sendMessage = useCallback(async () => {
-    if (!messageText.trim() || sending) return;
-
-    setSending(true);
-    setSendError(null);
-
-    try {
-      const response = await fetch(
-        `/api/core/conversations/${conversationId}/messages`,
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            body_text: messageText.trim(),
-            attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to send message');
-      }
-
-      const result = await response.json();
-
-      // Add optimistic message to the list
-      const optimisticMessage: Message = {
-        id: result.message_id,
-        direction: 'out',
-        body_text: messageText.trim(),
-        sent_at: new Date().toISOString(),
-        remote_visibility: 'unknown',
-        send_error: null,
-        identity_id: conversation?.identity_id || null,
-        created_at: new Date().toISOString(),
-      };
-
-      setMessages(prev => [...prev, optimisticMessage]);
-      setMessageText('');
-      setAttachmentIds([]);
-      setTimeout(scrollToBottom, 100);
-
-      // Start fast polling to catch status updates quickly
-      startFastPolling();
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : 'Failed to send message');
-    } finally {
-      setSending(false);
-    }
-  }, [messageText, sending, conversationId, conversation?.identity_id, attachmentIds, startFastPolling]);
-
-  // Delete message
-  const deleteMessage = useCallback(async (messageId: number) => {
-    // Add to deleting set
-    setDeletingMessages(prev => {
-      const next = new Set(prev);
-      next.add(messageId);
-      return next;
-    });
-
-    setDeleteError(null);
-
-    try {
-      const response = await fetch(
-        `/api/core/conversations/${conversationId}/messages/${messageId}`,
-        {
-          method: 'DELETE',
-          credentials: 'include',
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to delete message');
-      }
-
-      // Optimistically remove message from UI
-      setMessages(prev => prev.filter(m => m.id !== messageId));
-      setMessageToDelete(null);
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Failed to delete message');
-    } finally {
-      // Remove from deleting set
-      setDeletingMessages(prev => {
-        const next = new Set(prev);
-        next.delete(messageId);
-        return next;
-      });
-    }
-  }, [conversationId]);
-
-  // Retry sending a failed message
-  const retryMessage = useCallback(async (messageId: number) => {
-    setRetryingMessages(prev => {
-      const next = new Set(prev);
-      next.add(messageId);
-      return next;
-    });
-
-    try {
-      const response = await fetch(
-        `/api/core/conversations/${conversationId}/messages/${messageId}/retry`,
-        {
-          method: 'POST',
-          credentials: 'include',
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to resend message');
-      }
-
-      // Optimistically update message status back to pending
-      setMessages(prev => prev.map(m =>
-        m.id === messageId
-          ? { ...m, remote_visibility: 'unknown', send_error: null }
-          : m
-      ));
-
-      // Start fast polling to catch the status update
-      startFastPolling();
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : 'Failed to resend message');
-    } finally {
-      setRetryingMessages(prev => {
-        const next = new Set(prev);
-        next.delete(messageId);
-        return next;
-      });
-    }
-  }, [conversationId, startFastPolling]);
-
-  // Remote delete a single message from Reddit
-  const remoteDeleteMessage = useCallback(async (messageId: number) => {
-    setRemoteDeletingMessages(prev => { const next = new Set(prev); next.add(messageId); return next; });
-    setRemoteDeleteTarget(null);
-
-    try {
-      const response = await fetch(
-        `/api/core/conversations/${conversationId}/messages/${messageId}/remote-delete`,
-        { method: 'POST', credentials: 'include' }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to delete from Reddit');
-      }
-
-      // Update local state
-      setMessages(prev => prev.map(m =>
-        m.id === messageId ? { ...m, remote_visibility: 'deleted_by_author' } : m
-      ));
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Failed to delete from Reddit');
-    } finally {
-      setRemoteDeletingMessages(prev => { const next = new Set(prev); next.delete(messageId); return next; });
-    }
-  }, [conversationId]);
-
-  // Batch delete all outgoing messages from Reddit (scrub conversation)
-  const scrubConversation = useCallback(async () => {
-    setBatchDeleting(true);
-    try {
-      const response = await fetch(
-        `/api/core/conversations/${conversationId}/messages/remote-delete-batch`,
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ all: true }),
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to scrub conversation');
-      }
-
-      const result = await response.json();
-
-      // Update all affected messages in local state
-      setMessages(prev => prev.map(m => {
-        const item = result.results?.find((r: { message_id: number; success: boolean }) => r.message_id === m.id);
-        if (item?.success) {
-          return { ...m, remote_visibility: 'deleted_by_author' };
-        }
-        return m;
-      }));
-
-      setShowBatchDeleteDialog(false);
-
-      if (result.failed > 0) {
-        setDeleteError(`Scrub partially completed: ${result.deleted} deleted, ${result.failed} failed`);
-      }
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Failed to scrub conversation');
-    } finally {
-      setBatchDeleting(false);
-    }
-  }, [conversationId]);
-
-  // Count of messages eligible for scrub
-  const scrubEligibleCount = useMemo(() => {
-    return messages.filter(m =>
-      m.direction === 'out' &&
-      m.remote_visibility === 'visible' &&
-      !!m.external_message_id
-    ).length;
-  }, [messages]);
-
-  // Handle attachment file selection
-  const handleAttachmentSelect = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-
-    setUploadingAttachment(true);
-
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const formData = new FormData();
-        formData.append('file', file);
-
-        const response = await fetch(
-          `/api/core/conversations/${conversationId}/attachments`,
-          {
-            method: 'POST',
-            credentials: 'include',
-            body: formData,
-          }
-        );
-
-        if (!response.ok) {
-          const data = await response.json();
-          setSendError(data.detail || `Failed to upload ${file.name}`);
-          continue;
-        }
-
-        const data = await response.json();
-        setAttachmentIds(prev => [...prev, data.attachment_id]);
-      }
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : 'Failed to upload attachment');
-    } finally {
-      setUploadingAttachment(false);
-      // Reset file input
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    }
-  }, [conversationId]);
-
-  // Handle Enter key to send
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  }, [sendMessage]);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        // Fetch conversation details first
-        const convResponse = await fetch(`/api/core/conversations/${conversationId}`, { credentials: 'include' });
-
-        if (!convResponse.ok) {
-          if (convResponse.status === 404) {
-            throw new Error('Conversation not found');
-          }
-          if (convResponse.status === 401) {
-            throw new Error('Please log in to view this conversation');
-          }
-          const data = await convResponse.json();
-          throw new Error(data.detail || 'Failed to load conversation');
-        }
-
-        const convData: ConversationDetail = await convResponse.json();
-        setConversation(convData);
-
-        // Fetch ALL messages (auto-paginate through entire history)
-        const msgsData = await fetchAllMessages();
-
-        // Messages come in DESC order, reverse for display (oldest first)
-        setMessages(msgsData.messages.reverse());
-        setNextCursor(msgsData.nextCursor);
-        setHasMore(msgsData.hasMore);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'An error occurred');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-  }, [conversationId, fetchAllMessages]);
-
-  // Fetch conversation lists and check which ones this conversation belongs to
-  const fetchLists = useCallback(async () => {
-    try {
-      const res = await fetch('/api/core/lists', { credentials: 'include' });
-      if (!res.ok) return;
-      const data = await res.json();
-      setAvailableLists(data.lists || []);
-
-      // For each list, check if this conversation is in it
-      const memberOf = new Set<number>();
-      for (const lst of data.lists || []) {
-        const idsRes = await fetch(`/api/core/lists/${lst.id}/conversation-ids`, { credentials: 'include' });
-        if (idsRes.ok) {
-          const idsData = await idsRes.json();
-          if ((idsData.conversation_ids || []).includes(Number(conversationId))) {
-            memberOf.add(lst.id);
-          }
-        }
-      }
-      setConversationListIds(memberOf);
-    } catch {
-      // silent
-    }
-  }, [conversationId]);
-
-  useEffect(() => {
-    fetchLists();
-  }, [fetchLists]);
-
-  const toggleListMembership = useCallback(async (listId: number) => {
-    const isInList = conversationListIds.has(listId);
-    try {
-      const res = await fetch(`/api/core/lists/${listId}/conversations/${conversationId}`, {
-        method: isInList ? 'DELETE' : 'POST',
-        credentials: 'include',
-      });
-      if (res.ok) {
-        setConversationListIds(prev => {
-          const next = new Set(prev);
-          if (isInList) next.delete(listId);
-          else next.add(listId);
-          return next;
-        });
-      }
-    } catch {
-      // silent
-    }
-  }, [conversationId, conversationListIds]);
-
-  const createListAndAdd = useCallback(async () => {
-    if (!newListName.trim()) return;
-    setListsLoading(true);
-    try {
-      const res = await fetch('/api/core/lists', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newListName.trim() }),
-      });
-      if (res.ok) {
-        const created = await res.json();
-        // Add conversation to the new list
-        await fetch(`/api/core/lists/${created.id}/conversations/${conversationId}`, {
-          method: 'POST',
-          credentials: 'include',
-        });
-        setNewListName('');
-        await fetchLists();
-      }
-    } catch {
-      // silent
-    } finally {
-      setListsLoading(false);
-    }
-  }, [newListName, conversationId, fetchLists]);
-
-  // Close list dropdown on outside click
-  useEffect(() => {
-    if (!showListDropdown) return;
-    const handler = (e: MouseEvent) => {
-      if (listDropdownRef.current && !listDropdownRef.current.contains(e.target as Node)) {
-        setShowListDropdown(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showListDropdown]);
-
-  useEffect(() => {
-    if (!loading && messages.length > 0) {
-      scrollToBottom();
-    }
-  }, [loading]);
-
-  // Polling interval management
-  useEffect(() => {
-    if (loading) return;
-
-    // Determine polling interval: 2s for fast polling, 10s for normal
-    const interval = isFastPolling ? 2000 : 10000;
-
-    // Clear existing interval
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-    }
-
-    // Set up new polling interval
-    pollIntervalRef.current = setInterval(() => {
-      pollMessages();
-    }, interval);
-
-    // Cleanup on unmount or when interval changes
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-    };
-  }, [loading, isFastPolling, pollMessages]);
-
-  // Stop fast polling when all pending messages are resolved
-  useEffect(() => {
-    if (isFastPolling && !hasPendingMessages()) {
-      stopFastPolling();
-    }
-  }, [isFastPolling, hasPendingMessages, stopFastPolling]);
-
-  // Cleanup fast poll timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (fastPollTimeoutRef.current) {
-        clearTimeout(fastPollTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  // Star toggle
   const handleToggleStar = useCallback(async () => {
     if (!conversation) return;
-
     try {
       const response = await fetch(`/api/core/directories/${conversation.counterpart.id}/star`, {
         method: 'POST',
         credentials: 'include',
       });
-
       if (!response.ok) return;
-
       const result = await response.json();
-      setConversation((prev) =>
+      setConversation(prev =>
         prev ? { ...prev, counterpart: { ...prev.counterpart, is_starred: result.is_starred } } : prev
       );
     } catch (err) {
@@ -1058,16 +104,39 @@ export default function ConversationDetailPage() {
     }
   }, [conversation]);
 
-  // Build Reddit compose URL for failed message fallback
-  // Must be before early returns to satisfy React's rules of hooks
-  const redditComposeUrl = useMemo(() => {
-    if (!conversation) return '';
-    const params = new URLSearchParams({ to: conversation.counterpart.external_username });
-    if (conversation.counterpart_last_post_title) {
-      params.set('subject', conversation.counterpart_last_post_title);
+  useEffect(() => {
+    let cancelled = false;
+    const fetchConversation = async () => {
+      setConversationLoading(true);
+      setConversationError(null);
+      try {
+        const res = await fetch(`/api/core/conversations/${conversationId}`, { credentials: 'include' });
+        if (!res.ok) {
+          if (res.status === 404) throw new Error('Conversation not found');
+          if (res.status === 401) throw new Error('Please log in to view this conversation');
+          const data = await res.json();
+          throw new Error(data.detail || 'Failed to load conversation');
+        }
+        const data: ConversationDetail = await res.json();
+        if (!cancelled) setConversation(data);
+      } catch (err) {
+        if (!cancelled) setConversationError(err instanceof Error ? err.message : 'An error occurred');
+      } finally {
+        if (!cancelled) setConversationLoading(false);
+      }
+    };
+    fetchConversation();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (!loading && messages.length > 0) {
+      messageListRef.current?.scrollToBottom();
     }
-    return `https://www.reddit.com/message/compose/?${params.toString()}`;
-  }, [conversation]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
 
   if (loading) {
     return (
@@ -1105,12 +174,8 @@ export default function ConversationDetailPage() {
             <AlertCircle className="h-12 w-12 text-destructive mx-auto mb-4" />
             <p className="text-destructive mb-4">{error}</p>
             <div className="flex gap-2 justify-center">
-              <Button variant="outline" onClick={() => router.push('/inbox')}>
-                Back to Inbox
-              </Button>
-              <Button onClick={() => window.location.reload()}>
-                Try Again
-              </Button>
+              <Button variant="outline" onClick={() => router.push('/inbox')}>Back to Inbox</Button>
+              <Button onClick={() => window.location.reload()}>Try Again</Button>
             </div>
           </Card>
         </div>
@@ -1118,521 +183,86 @@ export default function ConversationDetailPage() {
     );
   }
 
-  if (!conversation) {
-    return null;
-  }
-
-  const { counterpart } = conversation;
+  if (!conversation) return null;
 
   return (
     <div className="flex flex-col h-[calc(100vh-10rem)] min-h-[400px] border border-border rounded-lg bg-card overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center gap-4 p-4 border-b border-border shrink-0">
-        <Link href="/inbox">
-          <Button variant="ghost" size="icon">
-            <ArrowLeft className="h-5 w-5" />
-          </Button>
-        </Link>
+      <ConversationHeader
+        conversation={conversation}
+        conversationId={conversationId}
+        redditComposeUrl={redditComposeUrl}
+        scrubEligibleCount={scrubEligibleCount}
+        onToggleStar={handleToggleStar}
+        onScrubRequest={() => setShowBatchDeleteDialog(true)}
+      />
 
-        <Avatar className="h-10 w-10">
-          <AvatarFallback className="bg-primary/10 text-primary">
-            {getInitials(counterpart.external_username)}
-          </AvatarFallback>
-        </Avatar>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold truncate">
-              u/{counterpart.external_username}
-            </span>
-            {counterpart.remote_status === 'deleted' && (
-              <Badge variant="secondary" className="text-xs">Deleted</Badge>
-            )}
-            {counterpart.remote_status === 'suspended' && (
-              <Badge variant="destructive" className="text-xs">Suspended</Badge>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {conversation.provider_id === 'reddit' ? 'Reddit' : conversation.provider_id}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleToggleStar}
-            className={cn(
-              "p-1.5 rounded transition-colors",
-              counterpart.is_starred
-                ? "text-yellow-500 hover:text-yellow-600"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            title={counterpart.is_starred ? "Unstar" : "Star"}
-          >
-            <Star className={cn("h-5 w-5", counterpart.is_starred && "fill-current")} />
-          </button>
-          <div className="relative" ref={listDropdownRef}>
-            <button
-              onClick={() => setShowListDropdown(!showListDropdown)}
-              className={cn(
-                "p-1.5 rounded transition-colors text-muted-foreground hover:text-foreground",
-                conversationListIds.size > 0 && "text-blue-500"
-              )}
-              title="Manage lists"
-            >
-              <List className="h-5 w-5" />
-            </button>
-            {showListDropdown && (
-              <div className="absolute right-0 top-full mt-1 w-56 bg-popover border rounded-md shadow-lg z-50 p-1">
-                {availableLists.length === 0 && (
-                  <p className="text-xs text-muted-foreground px-2 py-1.5">No lists yet</p>
-                )}
-                {availableLists.map(lst => (
-                  <button
-                    key={lst.id}
-                    onClick={() => toggleListMembership(lst.id)}
-                    className="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded hover:bg-muted transition-colors text-left"
-                  >
-                    <span className={cn("h-4 w-4 flex items-center justify-center rounded border", conversationListIds.has(lst.id) ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/30")}>
-                      {conversationListIds.has(lst.id) && <Check className="h-3 w-3" />}
-                    </span>
-                    <span className="truncate flex-1">{lst.name}</span>
-                    <span className="text-xs text-muted-foreground">{lst.conversation_count}</span>
-                  </button>
-                ))}
-                <div className="border-t mt-1 pt-1">
-                  <div className="flex items-center gap-1 px-1">
-                    <input
-                      type="text"
-                      value={newListName}
-                      onChange={(e) => setNewListName(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && createListAndAdd()}
-                      placeholder="New list..."
-                      className="flex-1 text-sm border rounded px-2 py-1 bg-background"
-                    />
-                    <button
-                      onClick={createListAndAdd}
-                      disabled={!newListName.trim() || listsLoading}
-                      className="p-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    >
-                      <Plus className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-          <a
-            href={`/api/core/conversations/${conversationId}/export`}
-            download
-            className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 text-xs"
-            title="Export conversation as HTML"
-          >
-            <Download className="h-4 w-4" />
-            <span className="hidden sm:inline">Export</span>
-          </a>
-          <a
-            href={`https://reddit.com/u/${counterpart.external_username}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 text-xs"
-            title="View Reddit profile"
-          >
-            <ExternalLink className="h-4 w-4" />
-            <span className="hidden sm:inline">Full Profile</span>
-          </a>
-          {redditComposeUrl && (
-            <a
-              href={redditComposeUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 text-xs"
-              title="Send message via Reddit"
-            >
-              <Send className="h-4 w-4" />
-              <span className="hidden sm:inline">Send via Reddit</span>
-            </a>
-          )}
-          {scrubEligibleCount > 0 && (
-            <button
-              onClick={() => setShowBatchDeleteDialog(true)}
-              className="text-destructive/70 hover:text-destructive transition-colors flex items-center gap-1 text-xs"
-              title="Delete all your messages from Reddit"
-            >
-              <ShieldOff className="h-4 w-4" />
-              <span className="hidden sm:inline">Scrub</span>
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* User Profile Panel */}
       <div className="px-4 pb-3 border-b border-border">
         <UserProfilePanel
-          username={counterpart.external_username}
-          accountId={counterpart.id}
+          username={conversation.counterpart.external_username}
+          accountId={conversation.counterpart.id}
           compact
         />
       </div>
 
-      {/* Messages */}
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto min-w-0 flex flex-col">
-        {/* Sticky header with gallery and search */}
-        <div className="sticky top-0 z-10 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80 border-b border-border">
-          {/* Collapsible picture gallery */}
-          {allImageAttachments.length > 0 && (
-            <div className="border-b border-border">
-              <button
-                onClick={() => setGalleryExpanded(!galleryExpanded)}
-                className="w-full px-4 py-2 flex items-center justify-between hover:bg-muted/50 transition-colors"
-              >
-                <div className="flex items-center gap-2">
-                  <Images className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm font-medium">
-                    {allImageAttachments.length} image{allImageAttachments.length !== 1 ? 's' : ''}
-                  </span>
-                </div>
-                {galleryExpanded ? (
-                  <ChevronUp className="h-4 w-4 text-muted-foreground" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                )}
-              </button>
-              {galleryExpanded && (
-                <div className="px-4 pb-3 max-h-64 overflow-y-auto">
-                  <div className="flex flex-wrap gap-2">
-                    {allImageAttachments.map(({ attachment: att }) => (
-                      <a
-                        key={att.id}
-                        href={`/api/core/attachments/${att.id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block shrink-0"
-                      >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={`/api/core/attachments/${att.id}`}
-                          alt="Gallery image"
-                          className="h-20 w-20 object-cover rounded-md hover:opacity-80 transition-opacity"
-                        />
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              )}
+      <MessageList
+        ref={messageListRef}
+        messages={messages}
+        conversation={conversation}
+        redditComposeUrl={redditComposeUrl}
+        hasMore={hasMore}
+        loadingOlder={loadingOlder}
+        onLoadOlder={loadOlder}
+        onDeleteMessage={setMessageToDelete}
+        onRetryMessage={retryMessage}
+        onRemoteDeleteMessage={setRemoteDeleteTarget}
+        deletingMessages={deletingMessages}
+        retryingMessages={retryingMessages}
+        remoteDeletingMessages={remoteDeletingMessages}
+      />
+
+      {actionError && (
+        <div className="mx-4 mt-4 rounded-lg border border-destructive bg-destructive/10 p-3">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-destructive">Action failed</p>
+              <p className="text-sm text-destructive/80 mt-1">{actionError}</p>
             </div>
-          )}
-
-          {/* Collapsible posts panel */}
-          {conversation && (
-            <div className="border-b border-border">
-              <PostsPanel accountId={conversation.counterpart.id} />
-            </div>
-          )}
-
-          {/* Search box */}
-          <div className="px-4 py-2">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                type="text"
-                placeholder="Search in conversation..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9 pr-8 h-9"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-            {searchQuery && (
-              <p className="text-xs text-muted-foreground mt-1">
-                {filteredMessages.length} of {messages.length} messages match
-              </p>
-            )}
-          </div>
-        </div>
-
-        <div className="p-4 flex-1">
-        {/* Load older messages button - only shown when safety limit (5000) was hit */}
-        {hasMore && !searchQuery && (
-          <div className="flex flex-col items-center gap-2 mb-4">
-            <p className="text-xs text-muted-foreground">
-              {messages.length.toLocaleString()} messages loaded
-            </p>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={loadOlderMessages}
-              disabled={loadingOlder}
-              className="text-muted-foreground"
-            >
-              {loadingOlder ? (
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-              ) : (
-                <ChevronUp className="h-4 w-4 mr-2" />
-              )}
-              {loadingOlder ? 'Loading...' : 'Load more messages'}
-            </Button>
-          </div>
-        )}
-
-        {messages.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <p className="text-muted-foreground">No messages yet</p>
-          </div>
-        ) : filteredMessages.length === 0 ? (
-          <div className="flex items-center justify-center h-32">
-            <p className="text-muted-foreground">No messages match your search</p>
-          </div>
-        ) : (
-          <>
-            {filteredMessages.map((msg) => (
-              <MessageBubble
-                key={msg.id}
-                message={msg}
-                counterpartUsername={counterpart.external_username}
-                redditComposeUrl={redditComposeUrl}
-                onDelete={setMessageToDelete}
-                onRetry={retryMessage}
-                onRemoteDelete={setRemoteDeleteTarget}
-                isDeleting={deletingMessages.has(msg.id)}
-                isRetrying={retryingMessages.has(msg.id)}
-                isRemoteDeleting={remoteDeletingMessages.has(msg.id)}
-              />
-            ))}
-            <div ref={messagesEndRef} />
-          </>
-        )}
-        </div>
-      </div>
-
-      {/* Compose Box */}
-      <div className="p-4 border-t border-border shrink-0">
-        {sendError && (
-          <div className="mb-2 p-2 bg-destructive/10 text-destructive text-sm rounded-md flex items-center gap-2">
-            <AlertCircle className="h-4 w-4 shrink-0" />
-            <span>{sendError}</span>
-            <button
-              onClick={() => setSendError(null)}
-              className="ml-auto text-xs underline"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-        {deleteError && (
-          <div className="mb-4 rounded-lg border border-destructive bg-destructive/10 p-3">
-            <div className="flex items-start gap-2">
-              <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <p className="text-sm font-medium text-destructive">
-                  Failed to delete message
-                </p>
-                <p className="text-sm text-destructive/80 mt-1">
-                  {deleteError}
-                </p>
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setDeleteError(null)}
-                className="h-6 w-6 p-0"
-              >
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-        )}
-        <div className="flex gap-2 max-w-full">
-          <Textarea
-            value={messageText}
-            onChange={(e) => setMessageText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={
-              counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'
-                ? `Cannot send to ${counterpart.remote_status} user`
-                : 'Type a message... (Enter to send, Shift+Enter for new line)'
-            }
-            className="min-h-[44px] max-h-60 resize-y flex-1 min-w-0"
-            disabled={sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
-            rows={1}
-          />
-          <div className="flex gap-1 shrink-0">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-11 w-11"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadingAttachment || sending}
-              title="Attach files"
-            >
-              {uploadingAttachment ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Paperclip className="h-4 w-4" />
-              )}
-            </Button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx"
-              className="hidden"
-              onChange={(e) => handleAttachmentSelect(e.target.files)}
-              disabled={uploadingAttachment || sending}
-            />
-            <Button
-              size="icon"
-              className="shrink-0 h-11 w-11"
-              onClick={sendMessage}
-              disabled={!messageText.trim() || sending || counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended'}
-              title={sending ? 'Sending...' : 'Send message'}
-            >
-              {sending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
+            <Button variant="ghost" size="sm" onClick={() => setActionError(null)} className="h-6 w-6 p-0">
+              <X className="h-4 w-4" />
             </Button>
           </div>
         </div>
+      )}
 
-        {/* Show uploaded attachments */}
-        {attachmentIds.length > 0 && (
-          <div className="mt-2 p-2 bg-muted rounded-md">
-            <p className="text-xs font-medium text-muted-foreground mb-1">
-              {attachmentIds.length} attachment{attachmentIds.length !== 1 ? 's' : ''} attached
-            </p>
-            <div className="flex gap-1 flex-wrap">
-              {attachmentIds.map((id) => (
-                <Badge key={id} variant="secondary" className="text-xs">
-                  Attachment #{id}
-                  <button
-                    onClick={() => setAttachmentIds(prev => prev.filter(aid => aid !== id))}
-                    className="ml-1 hover:text-destructive"
-                  >
-                    ✕
-                  </button>
-                </Badge>
-              ))}
-            </div>
-          </div>
-        )}
+      <ComposeBox
+        conversationId={conversationId}
+        counterpart={conversation.counterpart}
+        identityId={conversation.identity_id}
+        onSent={handleMessageSent}
+      />
 
-        <p className="text-xs text-muted-foreground mt-2 text-center">
-          Messages are queued and sent in the background
-        </p>
-      </div>
+      <DeleteMessageDialog
+        messageId={messageToDelete}
+        isDeleting={messageToDelete !== null && deletingMessages.has(messageToDelete)}
+        onCancel={() => setMessageToDelete(null)}
+        onConfirm={deleteMessage}
+      />
 
-      {/* Delete confirmation dialog (local pending messages) */}
-      <Dialog open={messageToDelete !== null} onOpenChange={(open) => !open && setMessageToDelete(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete Message?</DialogTitle>
-            <DialogDescription>
-              This will permanently delete this pending message. This action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setMessageToDelete(null)}
-              disabled={messageToDelete !== null && deletingMessages.has(messageToDelete)}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => messageToDelete && deleteMessage(messageToDelete)}
-              disabled={messageToDelete !== null && deletingMessages.has(messageToDelete)}
-            >
-              {messageToDelete !== null && deletingMessages.has(messageToDelete) ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Deleting...
-                </>
-              ) : (
-                'Delete'
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <RemoteDeleteDialog
+        messageId={remoteDeleteTarget}
+        isDeleting={remoteDeleteTarget !== null && remoteDeletingMessages.has(remoteDeleteTarget)}
+        onCancel={() => setRemoteDeleteTarget(null)}
+        onConfirm={remoteDeleteMessage}
+      />
 
-      {/* Remote delete confirmation dialog (single message from Reddit) */}
-      <Dialog open={remoteDeleteTarget !== null} onOpenChange={(open) => !open && setRemoteDeleteTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete from Reddit?</DialogTitle>
-            <DialogDescription>
-              This will delete this message from Reddit. Your local copy will be preserved but marked as deleted. This cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setRemoteDeleteTarget(null)}
-              disabled={remoteDeleteTarget !== null && remoteDeletingMessages.has(remoteDeleteTarget)}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => remoteDeleteTarget && remoteDeleteMessage(remoteDeleteTarget)}
-              disabled={remoteDeleteTarget !== null && remoteDeletingMessages.has(remoteDeleteTarget)}
-            >
-              {remoteDeleteTarget !== null && remoteDeletingMessages.has(remoteDeleteTarget) ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Deleting...
-                </>
-              ) : (
-                'Delete from Reddit'
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Scrub conversation confirmation dialog (batch delete from Reddit) */}
-      <Dialog open={showBatchDeleteDialog} onOpenChange={setShowBatchDeleteDialog}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Scrub this conversation?</DialogTitle>
-            <DialogDescription>
-              This will delete <strong>{scrubEligibleCount}</strong> of your outgoing messages from Reddit. Local copies will be preserved but marked as deleted. This cannot be undone on Reddit.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setShowBatchDeleteDialog(false)}
-              disabled={batchDeleting}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={scrubConversation}
-              disabled={batchDeleting}
-            >
-              {batchDeleting ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Scrubbing...
-                </>
-              ) : (
-                `Scrub ${scrubEligibleCount} messages`
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ScrubConversationDialog
+        open={showBatchDeleteDialog}
+        eligibleCount={scrubEligibleCount}
+        isScrubbing={batchDeleting}
+        onCancel={() => setShowBatchDeleteDialog(false)}
+        onConfirm={scrubConversation}
+      />
     </div>
   );
 }
