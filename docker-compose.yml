@@ -5,22 +5,10 @@ x-health-defaults: &health_defaults
   start_period: 30s
 
 services:
-  rediska-nginx:
-    image: nginx:1.27-alpine
-    container_name: rediska-nginx
-    depends_on:
-      rediska-web:
-        condition: service_started
-    ports:
-      - "443:443"
-    volumes:
-      - ./nginx/rediska.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
-    networks:
-      rediska-net:
-      laradock_frontend:
-        ipv4_address: 172.25.0.50
-    restart: unless-stopped
+  # rediska-nginx was retired in favour of the shared dev-proxy stack at
+  # ~/Web/dev-proxy/. The rediska.local vhost now lives in dev-proxy's
+  # nginx/conf.d/rediska.local.conf; dev-proxy attaches to rediska-net
+  # externally so it can reach rediska-web without any change here.
 
   rediska-web:
     build: ./apps/web
@@ -197,8 +185,6 @@ services:
 
 networks:
   rediska-net:
-  laradock_frontend:
-    external: true
 
 volumes:
   rediska_mysql_data:
