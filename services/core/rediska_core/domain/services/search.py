@@ -176,6 +176,7 @@ class SearchService:
         limit: int = DEFAULT_LIMIT,
         include_highlights: bool = False,
         fuzziness: Optional[str] = "AUTO",
+        phrase: bool = False,
     ) -> dict[str, Any]:
         """Perform BM25 text search.
 
@@ -190,7 +191,11 @@ class SearchService:
             limit: Maximum results to return.
             include_highlights: Whether to include highlights.
             fuzziness: Fuzziness setting ("AUTO", "0", "1", "2").
-                       None for exact matching only.
+                       None for exact matching only. Ignored when phrase=True.
+            phrase: When True, match the query as a single phrase (multi_match
+                    type=phrase). When False (default), tokenized best_fields
+                    matching, optionally with fuzziness. Phrase mode disables
+                    fuzziness.
 
         Returns:
             Dict with total, hits, and max_score.
@@ -216,10 +221,10 @@ class SearchService:
             "multi_match": {
                 "query": query,
                 "fields": ["content^2", "title^3"],
-                "type": "best_fields",
+                "type": "phrase" if phrase else "best_fields",
             }
         }
-        if fuzziness is not None:
+        if not phrase and fuzziness is not None:
             es_query["multi_match"]["fuzziness"] = fuzziness
 
         try:

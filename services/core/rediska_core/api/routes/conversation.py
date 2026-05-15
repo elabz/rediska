@@ -326,10 +326,11 @@ async def search_conversations(
 ):
     """Search conversations by message content.
 
-    Two-pass search:
-    1. Exact matches (no fuzziness) — sorted by most recent first
-    2. Fuzzy matches — sorted by most recent first, excluding conversations
-       already found in pass 1
+    Phrase-based search: the query is treated as a single phrase. Surrounding
+    double quotes are stripped (so `"hello world"` and `hello world` behave
+    identically). One ES pass (multi_match type=phrase) — no fuzzy fallback,
+    so that client-side highlighting of the same query always lines up with
+    the messages that produced the hit.
     """
     import logging
     from rediska_core.config import get_settings
@@ -350,41 +351,31 @@ async def search_conversations(
                 detail="Identity not found",
             )
 
-    # --- Pass 1: exact matches (no fuzziness) ---
+    # Strip surrounding double quotes — treat `"hello world"` the same as
+    # `hello world`. Quotes inside the phrase are preserved.
+    q_stripped = q.strip()
+    if len(q_stripped) >= 2 and q_stripped.startswith('"') and q_stripped.endswith('"'):
+        q_stripped = q_stripped[1:-1].strip()
+    if not q_stripped:
+        return ConversationSearchResponse(conversations=[], total=0)
+
+    # Phrase pass: messages whose body contains the query as a phrase.
     exact_per_conv: dict[int, dict] = {}
     try:
-        exact_results = search_service.text_search(
-            query=q, doc_types=["message"], identity_id=identity_id,
-            limit=500, fuzziness=None,
+        phrase_results = search_service.text_search(
+            query=q_stripped, doc_types=["message"], identity_id=identity_id,
+            limit=500, phrase=True,
         )
-        for hit in exact_results.get("hits", []):
+        for hit in phrase_results.get("hits", []):
             conv_id = hit.get("source", {}).get("conversation_id")
             if conv_id is None:
                 continue
             if conv_id not in exact_per_conv or hit.get("score", 0) > exact_per_conv[conv_id].get("score", 0):
                 exact_per_conv[conv_id] = hit
     except SearchError as e:
-        logging.error(f"Exact conversation search failed: {e}")
+        logging.error(f"Phrase conversation search failed: {e}")
 
-    # --- Pass 2: fuzzy matches ---
     fuzzy_per_conv: dict[int, dict] = {}
-    try:
-        fuzzy_results = search_service.text_search(
-            query=q, doc_types=["message"], identity_id=identity_id,
-            limit=500, fuzziness="AUTO",
-        )
-        for hit in fuzzy_results.get("hits", []):
-            conv_id = hit.get("source", {}).get("conversation_id")
-            if conv_id is None:
-                continue
-            # Only keep conversations NOT already found in exact pass
-            if conv_id in exact_per_conv:
-                continue
-            if conv_id not in fuzzy_per_conv or hit.get("score", 0) > fuzzy_per_conv[conv_id].get("score", 0):
-                fuzzy_per_conv[conv_id] = hit
-    except SearchError as e:
-        logging.error(f"Fuzzy conversation search failed: {e}")
-
     all_conv_ids = list(exact_per_conv.keys()) + list(fuzzy_per_conv.keys())
     if not all_conv_ids:
         return ConversationSearchResponse(conversations=[], total=0)

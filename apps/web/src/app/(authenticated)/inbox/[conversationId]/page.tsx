@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { AlertCircle, ArrowLeft, X } from 'lucide-react';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
@@ -22,6 +22,7 @@ import { useMessageActions } from './_hooks/useMessageActions';
 export default function ConversationDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const conversationId = params.conversationId as string;
 
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
@@ -30,8 +31,24 @@ export default function ConversationDetailPage() {
   const [messageToDelete, setMessageToDelete] = useState<number | null>(null);
   const [remoteDeleteTarget, setRemoteDeleteTarget] = useState<number | null>(null);
   const [showBatchDeleteDialog, setShowBatchDeleteDialog] = useState(false);
+  const [jumpFailed, setJumpFailed] = useState(false);
 
   const messageListRef = useRef<MessageListHandle>(null);
+
+  // Parse `?m=<id>` once on mount; positive integers only.
+  const initialJumpId = useRef<number | null>((() => {
+    const raw = searchParams?.get('m');
+    if (!raw) return null;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0 || String(parsed) !== raw.trim()) {
+      return null;
+    }
+    return parsed;
+  })());
+
+  // `?q=<query>` pre-fills the in-conversation SearchBox once on mount; the
+  // SearchBox state is the single source of truth from then on.
+  const initialQuery = searchParams?.get('q') ?? null;
 
   const {
     messages,
@@ -132,7 +149,16 @@ export default function ConversationDetailPage() {
   }, [conversationId]);
 
   useEffect(() => {
-    if (!loading && messages.length > 0) {
+    if (loading || messages.length === 0) return;
+    const targetId = initialJumpId.current;
+    if (targetId != null) {
+      initialJumpId.current = null;
+      const ok = messageListRef.current?.scrollToMessage(targetId) ?? false;
+      if (!ok) {
+        setJumpFailed(true);
+        messageListRef.current?.scrollToBottom();
+      }
+    } else {
       messageListRef.current?.scrollToBottom();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -218,6 +244,10 @@ export default function ConversationDetailPage() {
         deletingMessages={deletingMessages}
         retryingMessages={retryingMessages}
         remoteDeletingMessages={remoteDeletingMessages}
+        jumpFailed={jumpFailed}
+        onDismissJumpFailed={() => setJumpFailed(false)}
+        initialQuery={initialQuery}
+        initialJumpMessageId={initialJumpId.current}
       />
 
       {actionError && (

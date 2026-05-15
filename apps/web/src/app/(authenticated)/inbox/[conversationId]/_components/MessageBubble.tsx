@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Loader2, ExternalLink, ImageIcon, MoreVertical, Trash2, RefreshCw, AlertTriangle, ShieldOff } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import type { Message } from '../_types';
 import { getInitials, formatMessageTime } from '../_utils/timeFormat';
 import { getSendErrorExplanation } from '../_utils/sendErrors';
+import { buildPhrasePattern, extractPhrase } from '../_utils/searchTokens';
 
 export interface MessageBubbleProps {
   message: Message;
@@ -26,6 +27,43 @@ export interface MessageBubbleProps {
   isDeleting?: boolean;
   isRetrying?: boolean;
   isRemoteDeleting?: boolean;
+  highlightQuery?: string | null;
+  activeOccurrenceInBubble?: number | null;
+}
+
+function highlightMatches(
+  text: string,
+  query: string | null | undefined,
+  activeOccurrence: number | null | undefined
+): React.ReactNode {
+  if (!text) return text;
+  const phrase = extractPhrase(query);
+  const pattern = buildPhrasePattern(phrase);
+  if (!pattern) return text;
+  // With a single capturing group, String.split returns alternating
+  // [non-match, match, non-match, match, ...]. Odd indices are matches.
+  let occ = 0;
+  return text.split(pattern).map((part, i) => {
+    if (i % 2 === 1) {
+      const isActive = activeOccurrence != null && occ === activeOccurrence;
+      const current = occ;
+      occ++;
+      return (
+        <mark
+          key={i}
+          className={
+            isActive
+              ? 'rounded px-0.5 bg-[#FF2056] text-white ring-2 ring-[#FF2056]/40'
+              : 'rounded px-0.5 bg-[#FF2056]/85 text-white'
+          }
+          data-occurrence={current}
+        >
+          {part}
+        </mark>
+      );
+    }
+    return <Fragment key={i}>{part}</Fragment>;
+  });
 }
 
 export function MessageBubble({
@@ -38,6 +76,8 @@ export function MessageBubble({
   isDeleting,
   isRetrying,
   isRemoteDeleting,
+  highlightQuery,
+  activeOccurrenceInBubble,
 }: MessageBubbleProps) {
   const isOutgoing = message.direction === 'out';
   const isSystem = message.direction === 'system';
@@ -54,7 +94,7 @@ export function MessageBubble({
     return (
       <div className="flex justify-center my-4">
         <div className="bg-muted px-4 py-2 rounded-full text-sm text-muted-foreground">
-          {message.body_text}
+          {highlightMatches(message.body_text ?? '', highlightQuery, activeOccurrenceInBubble)}
         </div>
       </div>
     );
@@ -124,7 +164,7 @@ export function MessageBubble({
               : "bg-muted rounded-bl-sm"
           )}>
             <p className="text-sm whitespace-pre-wrap break-words">
-              {message.body_text}
+              {highlightMatches(message.body_text, highlightQuery, activeOccurrenceInBubble)}
             </p>
           </div>
         )}
