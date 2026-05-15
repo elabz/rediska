@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useCallback, useRef, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { AlertTriangle, Database, List, Loader2, MessageSquare, Paperclip, Plus, RefreshCw, Reply, Search, Star, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Database, List, Loader2, Paperclip, Plus, RefreshCw, Reply, Search, Star, Trash2, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -48,6 +48,7 @@ interface ConversationsResponse {
 
 interface SearchConversation extends Conversation {
   matching_snippet: string | null;
+  matching_message_id?: number | null;
 }
 
 interface SearchResponse {
@@ -102,16 +103,29 @@ function ConversationItem({
   identity,
   onToggleStar,
   matchingSnippet,
+  matchingMessageId,
+  searchQuery,
 }: {
   conversation: Conversation;
   identity?: { provider_id: string; display_name: string; external_username: string };
   onToggleStar: (accountId: number) => void;
   matchingSnippet?: string | null;
+  matchingMessageId?: number | null;
+  searchQuery?: string;
 }) {
   const { counterpart, last_message_preview, last_activity_at, unread_count, has_failed_messages } = conversation;
 
+  const hasJump =
+    matchingMessageId != null && Number.isInteger(matchingMessageId) && matchingMessageId > 0;
+  const trimmedQuery = searchQuery?.trim();
+  const href = hasJump
+    ? trimmedQuery
+      ? `/inbox/${conversation.id}?m=${matchingMessageId}&q=${encodeURIComponent(trimmedQuery)}`
+      : `/inbox/${conversation.id}?m=${matchingMessageId}`
+    : `/inbox/${conversation.id}`;
+
   return (
-    <Link href={`/inbox/${conversation.id}`}>
+    <Link href={href}>
       <div className="flex items-center gap-4 p-4 hover:bg-muted/50 transition-colors cursor-pointer border-b border-border last:border-b-0">
         <div className="relative">
           <Avatar className="h-12 w-12">
@@ -202,7 +216,6 @@ function InboxContent() {
   const [refreshing, setRefreshing] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
-  const [totalCount, setTotalCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchConversation[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -356,7 +369,7 @@ function InboxContent() {
     }
   }, [datasetSystemPrompt, datasetTestOnly, datasetListId]);
 
-  const { identities, loading: identitiesLoading } = useIdentities();
+  const { identities } = useIdentities();
 
   // Build identity lookup map
   const identityMap = useMemo(() => {
@@ -517,10 +530,6 @@ function InboxContent() {
 
       setNextCursor(data.next_cursor);
       setHasMore(data.has_more);
-      if (!cursor && data.conversations.length > 0) {
-        // Estimate total from first load
-        setTotalCount(data.has_more ? data.conversations.length + 1 : data.conversations.length);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -855,6 +864,8 @@ function InboxContent() {
                 identity={identities.length > 1 ? identityMap[conversation.identity_id] : undefined}
                 onToggleStar={handleToggleStar}
                 matchingSnippet={isSearching ? (conversation as SearchConversation).matching_snippet : undefined}
+                matchingMessageId={isSearching ? (conversation as SearchConversation).matching_message_id : undefined}
+                searchQuery={isSearching ? searchQuery : undefined}
               />
             ))}
           </Card>

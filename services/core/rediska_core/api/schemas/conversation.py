@@ -65,6 +65,7 @@ class ConversationSearchHit(BaseModel):
     archived_at: Optional[datetime] = None
     created_at: datetime
     matching_snippet: Optional[str] = None
+    matching_message_id: Optional[int] = None
 
 
 class ConversationSearchResponse(BaseModel):

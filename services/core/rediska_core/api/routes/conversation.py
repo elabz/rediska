@@ -424,6 +424,26 @@ async def search_conversations(
         content = source.get("content", "")
         snippet = content[:150] + "..." if len(content) > 150 else content
 
+        # Canonical source for the matching message id: source.entity_id.
+        # The indexer (services/core/.../indexing.py:message_to_document) writes
+        # entity_id = message.id into _source and uses f"message:{id}" as the ES
+        # _id. We prefer entity_id (no string parsing) and fall back to parsing
+        # the doc id only if entity_id is missing.
+        matching_message_id: Optional[int] = None
+        raw_entity_id = source.get("entity_id")
+        if raw_entity_id is not None:
+            try:
+                matching_message_id = int(raw_entity_id)
+            except (TypeError, ValueError):
+                matching_message_id = None
+        if matching_message_id is None:
+            raw_doc_id = best_hit.get("id")
+            if isinstance(raw_doc_id, str) and raw_doc_id.startswith("message:"):
+                try:
+                    matching_message_id = int(raw_doc_id.split(":", 1)[1])
+                except (TypeError, ValueError):
+                    matching_message_id = None
+
         last_message = (
             db.query(Message)
             .filter_by(conversation_id=conv.id)
@@ -455,6 +475,7 @@ async def search_conversations(
             archived_at=conv.archived_at,
             created_at=conv.created_at,
             matching_snippet=snippet,
+            matching_message_id=matching_message_id,
         )
 
     # Build exact results sorted by most recent first
