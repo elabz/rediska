@@ -463,6 +463,93 @@ def restore_test_local(self) -> dict:
                 pass
 
 
+@app.task(name="maintenance.merge_duplicate_author_leads", bind=True, max_retries=3)
+def merge_duplicate_author_leads(self, dry_run: bool = True) -> dict:
+    """Merge pre-existing duplicate-author leads onto one survivor each.
+
+    Operator-triggered one-time cleanup for leads created before author-level
+    dedupe existed. Defaults to a dry run that reports the plan without
+    mutating; losers are soft-deleted, never removed.
+
+    Args:
+        dry_run: When True (the default), report the plan without mutating.
+
+    Returns:
+        Dict with status, the merge report, and timestamps.
+    """
+    started_at = _now_utc()
+
+    try:
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import Session as SQLSession
+
+        from rediska_core.domain.models import Job
+        from rediska_core.domain.services.leads import LeadsService
+
+        dedupe_key = f"maintenance.merge_duplicate_author_leads:dry_run={dry_run}"
+
+        engine = create_engine(MYSQL_URL)
+        with SQLSession(engine) as session:
+            job = session.execute(
+                select(Job).where(Job.dedupe_key == dedupe_key)
+            ).scalar()
+            if not job:
+                job = Job(
+                    queue_name="maintenance",
+                    job_type="merge_duplicate_author_leads",
+                    payload_json={"dry_run": dry_run},
+                    dedupe_key=dedupe_key,
+                    status="running",
+                )
+                session.add(job)
+            else:
+                job.status = "running"
+                job.attempts = (job.attempts or 0) + 1
+            session.commit()
+
+            try:
+                report = LeadsService(session).merge_duplicate_author_leads(
+                    dry_run=dry_run
+                )
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                job.status = "failed"
+                job.last_error = str(exc)[:2000]
+                session.commit()
+                raise
+
+            job.status = "done"
+            session.commit()
+
+        completed_at = _now_utc()
+
+        return {
+            "status": "success",
+            "dry_run": dry_run,
+            "duplicate_groups": report["duplicate_groups"],
+            "leads_merged": report["leads_merged"],
+            "groups": report["groups"],
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "duration_seconds": int((completed_at - started_at).total_seconds()),
+        }
+
+    except Exception as exc:
+        completed_at = _now_utc()
+
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "dry_run": dry_run,
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+        }
+
+
 @app.task(name="maintenance.cleanup_scout_watch_history", bind=True, max_retries=3)
 def cleanup_scout_watch_history(self, retention_days: int = 3) -> dict:
     """Delete scout watch runs and posts older than retention_days.
@@ -489,8 +576,9 @@ def cleanup_scout_watch_history(self, retention_days: int = 3) -> dict:
         with SQLSession(engine) as session:
             service = ScoutWatchService(session)
 
-            # Delete old runs (posts cascade via FK)
-            deleted_count = service.delete_old_runs(retention_days=retention_days)
+            # Delete old runs. Posts carrying analysis output are detached and
+            # retained — analysis results are never deleted.
+            result = service.delete_old_runs(retention_days=retention_days)
 
             session.commit()
 
@@ -498,7 +586,9 @@ def cleanup_scout_watch_history(self, retention_days: int = 3) -> dict:
 
         return {
             "status": "success",
-            "runs_deleted": deleted_count,
+            "runs_deleted": result["runs_deleted"],
+            "posts_deleted": result["posts_deleted"],
+            "posts_retained": result["posts_retained"],
             "retention_days": retention_days,
             "started_at": started_at.isoformat(),
             "completed_at": completed_at.isoformat(),

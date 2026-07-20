@@ -212,10 +212,11 @@ def test_check_analysis_status_includes_metadata():
 # =============================================================================
 
 
-def test_cleanup_failed_analyses_deletes_old_failed(mock_db_session):
-    """Test that cleanup deletes old failed analyses."""
-    # Should delete analyses with status='failed' and created_at < cutoff
-    # Default cutoff: 72 hours ago
+def test_cleanup_failed_analyses_retains_old_failed(mock_db_session):
+    """Test that cleanup reports but never deletes old failed analyses."""
+    # Analysis results are retained permanently: a 'failed' analysis can still
+    # own completed AnalysisDimension rows, so deleting it discards LLM work.
+    # Should report the count with cleaned_up=0 and retained=True
 
 
 def test_cleanup_failed_analyses_preserves_recent(mock_db_session):
@@ -242,11 +243,9 @@ def test_cleanup_failed_analyses_returns_summary():
     # - max_age_hours: int
 
 
-def test_cleanup_failed_analyses_handles_cascade_delete():
-    """Test cleanup handles cascade deletes properly."""
-    # Should delete LeadAnalysis record
-    # Should cascade delete AnalysisDimension records
-    # Should maintain referential integrity
+def test_cleanup_failed_analyses_never_cascades_to_dimensions():
+    """Test cleanup leaves AnalysisDimension rows intact."""
+    # Nothing is deleted, so no cascade to AnalysisDimension can occur
 
 
 def test_cleanup_failed_analyses_large_dataset():

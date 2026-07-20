@@ -440,3 +440,303 @@ class TestUpdateLeadStatus:
             service.update_status(lead.id, "invalid_status")
 
         assert "Invalid status" in str(exc_info.value)
+
+
+# =============================================================================
+# AUTHOR-LEVEL DEDUPE TESTS
+# =============================================================================
+
+
+class TestGetActiveLeadForAuthor:
+    """Tests for author-level active lead lookup."""
+
+    def test_returns_none_when_author_has_no_leads(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """An author with no leads has no active lead."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        assert service.get_active_lead_for_author("reddit", setup_author_account.id) is None
+
+    def test_returns_saved_lead(self, db_session, setup_provider, setup_author_account):
+        """A saved lead is active."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+        lead = service.save_lead(
+            provider_id="reddit",
+            source_location="r/test",
+            external_post_id="active_1",
+            post_url="https://reddit.com/r/test/comments/active_1",
+            author_username="test_author",
+        )
+
+        found = service.get_active_lead_for_author("reddit", setup_author_account.id)
+        assert found is not None
+        assert found.id == lead.id
+
+    def test_ignored_lead_is_not_active(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """An ignored lead is a standing negative verdict, not an active lead."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+        lead = service.save_lead(
+            provider_id="reddit",
+            source_location="r/test",
+            external_post_id="ignored_1",
+            post_url="https://reddit.com/r/test/comments/ignored_1",
+            author_username="test_author",
+        )
+        service.update_status(lead.id, "ignored")
+
+        assert service.get_active_lead_for_author("reddit", setup_author_account.id) is None
+
+    def test_soft_deleted_lead_is_not_active(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """A locally deleted lead is not active."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+        lead = service.save_lead(
+            provider_id="reddit",
+            source_location="r/test",
+            external_post_id="deleted_1",
+            post_url="https://reddit.com/r/test/comments/deleted_1",
+            author_username="test_author",
+        )
+        lead.deleted_at = datetime.utcnow()
+        db_session.flush()
+
+        assert service.get_active_lead_for_author("reddit", setup_author_account.id) is None
+
+    def test_contacted_lead_is_still_active(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """Contacted leads remain active - only 'ignored' deactivates."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+        lead = service.save_lead(
+            provider_id="reddit",
+            source_location="r/test",
+            external_post_id="contacted_1",
+            post_url="https://reddit.com/r/test/comments/contacted_1",
+            author_username="test_author",
+        )
+        service.update_status(lead.id, "contacted")
+
+        found = service.get_active_lead_for_author("reddit", setup_author_account.id)
+        assert found is not None
+        assert found.id == lead.id
+
+
+class TestSaveLeadAttachesToExistingAuthorLead:
+    """Tests for at-most-one-active-lead-per-author on save."""
+
+    def test_second_post_by_same_author_attaches(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """A second post by an author with an active lead creates no new lead."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        first = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="post_one",
+            post_url="https://reddit.com/r/one/comments/post_one",
+            title="First post",
+            body_text="First body",
+            author_username="test_author",
+        )
+        second = service.save_lead(
+            provider_id="reddit",
+            source_location="r/two",
+            external_post_id="post_two",
+            post_url="https://reddit.com/r/two/comments/post_two",
+            title="Second post",
+            body_text="Second body",
+            author_username="test_author",
+        )
+
+        assert second.id == first.id
+        assert getattr(second, "_attached") is True
+        assert db_session.query(LeadPost).count() == 1
+
+    def test_attached_lead_keeps_its_primary_post_fields(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """Attaching must not overwrite the lead's own post identity."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="keep_one",
+            post_url="https://reddit.com/r/one/comments/keep_one",
+            title="First post",
+            body_text="First body",
+            author_username="test_author",
+        )
+        attached = service.save_lead(
+            provider_id="reddit",
+            source_location="r/two",
+            external_post_id="keep_two",
+            post_url="https://reddit.com/r/two/comments/keep_two",
+            title="Second post",
+            body_text="Second body",
+            author_username="test_author",
+        )
+
+        assert attached.external_post_id == "keep_one"
+        assert attached.title == "First post"
+        assert attached.source_location == "r/one"
+
+    def test_attached_post_becomes_a_profile_item(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """The attached post's content is preserved as a profile_item."""
+        from rediska_core.domain.models import ProfileItem
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="item_one",
+            post_url="https://reddit.com/r/one/comments/item_one",
+            title="First post",
+            body_text="First body",
+            author_username="test_author",
+        )
+        service.save_lead(
+            provider_id="reddit",
+            source_location="r/two",
+            external_post_id="item_two",
+            post_url="https://reddit.com/r/two/comments/item_two",
+            title="Second post",
+            body_text="Second body",
+            author_username="test_author",
+        )
+
+        item_ids = {
+            item.external_item_id
+            for item in db_session.query(ProfileItem)
+            .filter(ProfileItem.account_id == setup_author_account.id)
+            .all()
+        }
+        assert "item_one" in item_ids
+        assert "item_two" in item_ids
+
+    def test_resaving_the_same_post_is_not_an_attach(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """Re-saving the same post keeps per-post upsert semantics."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        first = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="same_post",
+            post_url="https://reddit.com/r/one/comments/same_post",
+            title="Original title",
+            author_username="test_author",
+        )
+        again = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="same_post",
+            post_url="https://reddit.com/r/one/comments/same_post",
+            title="Updated title",
+            author_username="test_author",
+        )
+
+        assert again.id == first.id
+        assert getattr(again, "_attached") is False
+        assert again.title == "Updated title"
+
+    def test_ignored_author_lead_is_not_resurrected(
+        self, db_session, setup_provider, setup_author_account
+    ):
+        """A new post by an ignored author creates a separate lead, not a revival."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        first = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="ign_one",
+            post_url="https://reddit.com/r/one/comments/ign_one",
+            author_username="test_author",
+        )
+        service.update_status(first.id, "ignored")
+
+        second = service.save_lead(
+            provider_id="reddit",
+            source_location="r/two",
+            external_post_id="ign_two",
+            post_url="https://reddit.com/r/two/comments/ign_two",
+            author_username="test_author",
+        )
+
+        assert second.id != first.id
+        assert getattr(second, "_attached") is False
+        assert first.status == "ignored"
+
+    def test_authorless_posts_keep_per_post_semantics(self, db_session, setup_provider):
+        """Posts with no resolvable author never attach to each other."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        first = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="anon_one",
+            post_url="https://reddit.com/r/one/comments/anon_one",
+        )
+        second = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="anon_two",
+            post_url="https://reddit.com/r/one/comments/anon_two",
+        )
+
+        assert first.id != second.id
+        assert getattr(second, "_attached") is False
+
+    def test_different_authors_get_separate_leads(self, db_session, setup_provider):
+        """Author-level dedupe must not collapse distinct authors."""
+        from rediska_core.domain.services.leads import LeadsService
+
+        service = LeadsService(db=db_session)
+
+        first = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="auth_a",
+            post_url="https://reddit.com/r/one/comments/auth_a",
+            author_username="author_a",
+        )
+        second = service.save_lead(
+            provider_id="reddit",
+            source_location="r/one",
+            external_post_id="auth_b",
+            post_url="https://reddit.com/r/one/comments/auth_b",
+            author_username="author_b",
+        )
+
+        assert first.id != second.id
+        assert getattr(second, "_attached") is False

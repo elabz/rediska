@@ -332,7 +332,7 @@ export default function ScoutWatchHistoryPage() {
     }
   };
 
-  const getRecommendationLabel = (recommendation: string | null) => {
+  const getRecommendationLabel = (recommendation: string | null, status?: string) => {
     switch (recommendation) {
       case 'suitable':
         return 'Suitable';
@@ -342,7 +342,9 @@ export default function ScoutWatchHistoryPage() {
       case 'needs_review':
         return 'Needs Review';
       default:
-        return 'Pending';
+        // Skipped posts never get a recommendation — a standing verdict on the
+        // author short-circuited the pipeline. That is terminal, not pending.
+        return status === 'skipped' ? 'Skipped' : 'Pending';
     }
   };
 
@@ -587,7 +589,7 @@ export default function ScoutWatchHistoryPage() {
                                           />
                                         </>
                                       )}
-                                      <span>{getRecommendationLabel(post.analysis_recommendation)}</span>
+                                      <span>{getRecommendationLabel(post.analysis_recommendation, post.analysis_status)}</span>
                                       {post.analysis_confidence !== null && (
                                         <span>({Math.round(post.analysis_confidence * 100)}%)</span>
                                       )}

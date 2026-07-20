@@ -448,3 +448,86 @@ class TestAnalyzeLeadEndpoint:
             response = await client.post("/leads/1/analyze")
 
             assert response.status_code in [401, 403]
+
+
+# =============================================================================
+# AUTHOR-LEVEL DEDUPE (ATTACH) TESTS
+# =============================================================================
+
+
+class TestSaveLeadAttachEndpoint:
+    """Tests for author-level dedupe on POST /leads/save."""
+
+    @pytest.mark.asyncio
+    async def test_second_post_by_same_author_returns_existing_lead(
+        self, auth_client, setup_provider
+    ):
+        """A second post by the same author returns the existing lead, marked attached."""
+        first = await auth_client.post(
+            "/leads/save",
+            json={
+                "provider_id": "reddit",
+                "source_location": "r/one",
+                "external_post_id": "attach_one",
+                "post_url": "https://reddit.com/r/one/comments/attach_one",
+                "title": "First post",
+                "body_text": "First body",
+                "author_username": "prolific_author",
+            },
+        )
+        assert first.status_code == 200
+        assert first.json()["attached"] is False
+
+        second = await auth_client.post(
+            "/leads/save",
+            json={
+                "provider_id": "reddit",
+                "source_location": "r/two",
+                "external_post_id": "attach_two",
+                "post_url": "https://reddit.com/r/two/comments/attach_two",
+                "title": "Second post",
+                "body_text": "Second body",
+                "author_username": "prolific_author",
+            },
+        )
+
+        assert second.status_code == 200
+        data = second.json()
+        assert data["attached"] is True
+        assert data["id"] == first.json()["id"]
+        assert data["external_post_id"] == "attach_one"
+
+    @pytest.mark.asyncio
+    async def test_attach_is_audit_logged(self, auth_client, db_session, setup_provider):
+        """An attach writes a lead.attach audit entry."""
+        from rediska_core.domain.models import AuditLog
+
+        await auth_client.post(
+            "/leads/save",
+            json={
+                "provider_id": "reddit",
+                "source_location": "r/one",
+                "external_post_id": "audit_one",
+                "post_url": "https://reddit.com/r/one/comments/audit_one",
+                "author_username": "audited_author",
+            },
+        )
+        await auth_client.post(
+            "/leads/save",
+            json={
+                "provider_id": "reddit",
+                "source_location": "r/two",
+                "external_post_id": "audit_two",
+                "post_url": "https://reddit.com/r/two/comments/audit_two",
+                "author_username": "audited_author",
+            },
+        )
+
+        actions = [
+            entry.action_type
+            for entry in db_session.query(AuditLog)
+            .filter(AuditLog.entity_type == "lead_post")
+            .all()
+        ]
+        assert "lead.save" in actions
+        assert "lead.attach" in actions

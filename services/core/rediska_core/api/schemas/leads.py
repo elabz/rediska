@@ -61,6 +61,10 @@ class LeadResponse(BaseModel):
     # Profile item created from this post's content
     profile_item_id: Optional[int] = Field(default=None, description="Profile item ID created for this post")
 
+    # True when the saved post joined the author's pre-existing lead instead of
+    # creating a new one (at most one active lead per author).
+    attached: bool = Field(default=False, description="Post was attached to the author's existing lead")
+
     # Analysis fields
     latest_analysis_id: Optional[int] = Field(default=None, description="ID of the latest analysis")
     analysis_recommendation: Optional[str] = Field(default=None, description="Latest analysis recommendation")

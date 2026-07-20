@@ -231,6 +231,7 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
 
     # Get profile_item_id if it was just created (transient attr from save_lead)
     profile_item_id = getattr(lead, "_profile_item_id", None)
+    attached = bool(getattr(lead, "_attached", False))
 
     return LeadResponse(
         id=lead.id,
@@ -247,6 +248,7 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
         score=None,  # TODO: Add lead scoring
         lead_source=lead.lead_source,
         profile_item_id=profile_item_id,
+        attached=attached,
         post_created_at=_ensure_utc(lead.post_created_at),
         created_at=_ensure_utc(lead.created_at),
         # Analysis fields
@@ -293,11 +295,13 @@ async def save_lead(
         post_created_at=request.post_created_at,
     )
 
-    # Audit log for lead save
+    # Audit log for lead save. An attach means the post joined the author's
+    # pre-existing lead rather than creating one, so it gets its own action.
+    attached = bool(getattr(lead, "_attached", False))
     audit_entry = AuditLog(
         ts=datetime.now(timezone.utc),
         actor="user",
-        action_type="lead.save",
+        action_type="lead.attach" if attached else "lead.save",
         result="ok",
         provider_id=request.provider_id,
         entity_type="lead_post",

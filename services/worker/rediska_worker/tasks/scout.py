@@ -530,6 +530,59 @@ def analyze_and_decide(
             f"by u/{author_username}"
         )
 
+        # =================================================================
+        # STEP 0: Standing-verdict gate (before any provider or LLM call)
+        # =================================================================
+        # Authors the user already dismissed, contacted, or blocked get no
+        # profile fetch, no summaries and no agent inference — the sighting
+        # stays in watch history with a stored reason.
+        from rediska_core.domain.services.scout_watch import SKIP_REASON_TEXT
+
+        skip_reason = service.check_author_verdict(
+            watch.provider_id,
+            author_username,
+            post_title=post_data.get("title"),
+            post_body=post_data.get("body_text"),
+        )
+        if skip_reason:
+            from rediska_core.domain.models import AuditLog
+
+            reason_text = SKIP_REASON_TEXT[skip_reason]
+            scout_post.analysis_status = "skipped"
+            scout_post.analysis_reasoning = reason_text
+
+            db.add(
+                AuditLog(
+                    ts=_now_utc(),
+                    actor="system",
+                    action_type="scout_watch.skip_author",
+                    result="ok",
+                    provider_id=watch.provider_id,
+                    entity_type="scout_watch_post",
+                    entity_id=scout_post_id,
+                    request_json={
+                        "watch_id": watch_id,
+                        "external_post_id": external_post_id,
+                        "author_username": author_username,
+                    },
+                    response_json={"skip_reason": skip_reason},
+                )
+            )
+            db.commit()
+
+            logger.info(
+                f"Skipped post {external_post_id} by u/{author_username}: {skip_reason}"
+            )
+
+            return {
+                "status": "skipped",
+                "skip_reason": skip_reason,
+                "watch_id": watch_id,
+                "scout_post_id": scout_post_id,
+                "external_post_id": external_post_id,
+                "author_username": author_username,
+            }
+
         # Get Reddit adapter
         adapter = _get_reddit_adapter(db, watch.identity_id)
 
@@ -937,6 +990,7 @@ def analyze_and_decide(
         # =================================================================
         lead_id = None
         analysis_id = None
+        attached = False
 
         if _should_promote(verdict_dict, watch.min_confidence):
             try:
@@ -947,7 +1001,7 @@ def analyze_and_decide(
                 interests_summary = scout_post.user_interests or ""
                 character_summary = scout_post.user_character or ""
 
-                # Create lead with summaries
+                # Create the lead, or attach to the author's existing one.
                 lead = service.save_lead_from_watch(
                     watch,
                     post_data,
@@ -955,6 +1009,7 @@ def analyze_and_decide(
                     user_character_summary=character_summary,
                 )
                 lead_id = lead.id
+                attached = bool(getattr(lead, "_attached", False))
 
                 # Build prompt versions dict first (needed for LeadAnalysis)
                 prompt_service = AgentPromptService(db)
@@ -1020,12 +1075,15 @@ def analyze_and_decide(
                 scout_post.analysis_id = analysis_id
 
                 logger.info(
-                    f"Created lead {lead_id} with analysis {analysis_id} from post {external_post_id} "
+                    f"{'Attached post to' if attached else 'Created'} lead {lead_id} "
+                    f"with analysis {analysis_id} from post {external_post_id} "
                     f"(recommendation={recommendation}, confidence={confidence:.2f})"
                 )
 
-                # Update watch stats
-                watch.total_leads_created = (watch.total_leads_created or 0) + 1
+                # Update watch stats. An attach updates an existing lead, so it
+                # is a match but not a new lead.
+                if not attached:
+                    watch.total_leads_created = (watch.total_leads_created or 0) + 1
                 watch.last_match_at = _now_utc()
                 db.commit()
 
@@ -1074,7 +1132,8 @@ def analyze_and_decide(
             "recommendation": recommendation,
             "confidence": confidence,
             "lead_id": lead_id,
-            "lead_created": lead_id is not None,
+            "lead_created": lead_id is not None and not attached,
+            "lead_attached": attached,
         }
 
     except Exception as exc:

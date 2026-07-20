@@ -19,10 +19,11 @@ Usage:
     run = await service.run_watch(watch.id)
 """
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import (
@@ -62,6 +63,53 @@ VALID_SORTS = {"hot", "new", "top", "rising", "relevance"}
 VALID_TIME_FILTERS = {"hour", "day", "week", "month", "year", "all"}
 DEFAULT_LOOKBACK_MINUTES = 30
 MAX_POSTS_PER_RUN = 100
+
+# Standing verdicts that make analysing an author's new post pointless.
+# Checked before the profile-fetch/summarize/analyze pipeline runs.
+SKIP_DO_NOT_CONTACT = "do_not_contact"
+SKIP_ALREADY_CONTACTED = "already_contacted"
+SKIP_ALREADY_ENGAGED = "already_engaged"
+SKIP_LEAD_IGNORED = "lead_ignored"
+
+SKIP_REASON_TEXT = {
+    SKIP_DO_NOT_CONTACT: "Skipped: author is on the do-not-contact list",
+    SKIP_ALREADY_CONTACTED: "Skipped: author has already been contacted",
+    SKIP_ALREADY_ENGAGED: "Skipped: author is already engaged in a conversation",
+    SKIP_LEAD_IGNORED: (
+        "Skipped: author's lead was previously ignored and this post's content "
+        "was already analysed"
+    ),
+}
+
+
+# =============================================================================
+# CONTENT FINGERPRINT
+# =============================================================================
+
+
+def content_fingerprint(
+    title: Optional[str],
+    body_text: Optional[str],
+) -> Optional[str]:
+    """Fingerprint a post's analysable content.
+
+    Used to tell "the same post surfacing again" (skip) from "this author
+    posted something new" (re-analyse). Normalisation is deliberately coarse —
+    case and whitespace differences are not content changes — so that a
+    crosspost of identical text fingerprints identically.
+
+    Args:
+        title: The post title.
+        body_text: The post body.
+
+    Returns:
+        A hex digest, or None when there is no content to compare.
+    """
+    combined = " ".join(part for part in (title, body_text) if part)
+    normalized = " ".join(combined.lower().split())
+    if not normalized:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 # =============================================================================
@@ -500,25 +548,66 @@ class ScoutWatchService:
         self.db.flush()
         return post
 
-    def delete_old_runs(self, retention_days: int = 3) -> int:
-        """Delete runs older than retention_days.
+    def delete_old_runs(self, retention_days: int = 3) -> dict:
+        """Delete run records older than retention_days.
 
-        This also deletes related posts via cascade.
+        Posts that carry analysis output are NEVER deleted — their
+        `dimension_results_json` is often the only record of an analysis for a
+        post that was never promoted to a lead, and re-deriving it costs a full
+        agent pipeline run. Those posts are detached from the expiring run
+        (`run_id` set to NULL) so they survive; only analysis-free sightings
+        are removed along with the run.
 
         Args:
             retention_days: Number of days to retain.
 
         Returns:
-            Number of runs deleted.
+            Dict with runs_deleted, posts_deleted and posts_retained counts.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-        deleted = (
-            self.db.query(ScoutWatchRun)
+
+        expiring_run_ids = [
+            row[0]
+            for row in self.db.query(ScoutWatchRun.id)
             .filter(ScoutWatchRun.started_at < cutoff)
+            .all()
+        ]
+
+        if not expiring_run_ids:
+            return {"runs_deleted": 0, "posts_deleted": 0, "posts_retained": 0}
+
+        has_analysis = or_(
+            ScoutWatchPost.dimension_results_json.isnot(None),
+            ScoutWatchPost.analysis_id.isnot(None),
+            ScoutWatchPost.analysis_recommendation.isnot(None),
+            ScoutWatchPost.lead_id.isnot(None),
+        )
+
+        # Detach the posts worth keeping before their run disappears.
+        posts_retained = (
+            self.db.query(ScoutWatchPost)
+            .filter(ScoutWatchPost.run_id.in_(expiring_run_ids), has_analysis)
+            .update({ScoutWatchPost.run_id: None}, synchronize_session=False)
+        )
+
+        posts_deleted = (
+            self.db.query(ScoutWatchPost)
+            .filter(ScoutWatchPost.run_id.in_(expiring_run_ids))
             .delete(synchronize_session=False)
         )
+
+        runs_deleted = (
+            self.db.query(ScoutWatchRun)
+            .filter(ScoutWatchRun.id.in_(expiring_run_ids))
+            .delete(synchronize_session=False)
+        )
+
         self.db.flush()
-        return deleted
+        return {
+            "runs_deleted": runs_deleted,
+            "posts_deleted": posts_deleted,
+            "posts_retained": posts_retained,
+        }
 
     # =========================================================================
     # POST TRACKING (DEDUPLICATION)
@@ -658,6 +747,140 @@ class ScoutWatchService:
         return post
 
     # =========================================================================
+    # PRE-PIPELINE VERDICT GATE
+    # =========================================================================
+
+    def check_author_verdict(
+        self,
+        provider_id: str,
+        username: str,
+        post_title: Optional[str] = None,
+        post_body: Optional[str] = None,
+    ) -> Optional[str]:
+        """Check whether a standing verdict makes analysing this author pointless.
+
+        Evaluated in order: do-not-contact listing, then an account already
+        contacted or engaged, then an author whose only lead was ignored. An
+        author with an *active* lead has no standing verdict — new posts attach
+        to that lead, so the pipeline still runs.
+
+        The `ignored` verdict is content-sensitive: it only suppresses content
+        we have already analysed. When `post_title`/`post_body` are supplied and
+        their fingerprint does not match anything analysed for this author, the
+        post is genuinely new — the author may have changed what they are
+        looking for — so it is analysed again. Do-not-contact and
+        contacted/engaged are unconditional; they are about the relationship,
+        not the post.
+
+        Args:
+            provider_id: Provider ID.
+            username: The post author's username.
+            post_title: The incoming post's title, for the content check.
+            post_body: The incoming post's body, for the content check.
+
+        Returns:
+            A skip reason code (see SKIP_REASON_TEXT) or None to proceed.
+        """
+        from rediska_core.domain.models import DoNotContact
+        from rediska_core.domain.services.leads import INACTIVE_STATUSES, LeadsService
+
+        on_dnc = (
+            self.db.query(DoNotContact)
+            .filter(
+                DoNotContact.provider_id == provider_id,
+                DoNotContact.external_username == username,
+            )
+            .first()
+        )
+        if on_dnc:
+            return SKIP_DO_NOT_CONTACT
+
+        account = (
+            self.db.query(ExternalAccount)
+            .filter(
+                ExternalAccount.provider_id == provider_id,
+                ExternalAccount.external_username == username,
+            )
+            .first()
+        )
+        if not account:
+            # Unknown author: no prior verdict of any kind.
+            return None
+
+        if account.contact_state == "contacted":
+            return SKIP_ALREADY_CONTACTED
+
+        if account.engagement_state == "engaged":
+            return SKIP_ALREADY_ENGAGED
+
+        leads_service = LeadsService(self.db)
+        if leads_service.get_active_lead_for_author(provider_id, account.id):
+            return None
+
+        ignored_lead = (
+            self.db.query(LeadPost)
+            .filter(
+                LeadPost.provider_id == provider_id,
+                LeadPost.author_account_id == account.id,
+                LeadPost.status.in_(INACTIVE_STATUSES),
+                LeadPost.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if not ignored_lead:
+            return None
+
+        fingerprint = content_fingerprint(post_title, post_body)
+        if fingerprint is None:
+            # No content to compare (e.g. manual paths that don't carry a body):
+            # fall back to the author-level verdict.
+            return SKIP_LEAD_IGNORED
+
+        if fingerprint in self._analysed_fingerprints(provider_id, account.id):
+            return SKIP_LEAD_IGNORED
+
+        # New content from a previously rejected author — worth another look.
+        return None
+
+    def _analysed_fingerprints(self, provider_id: str, account_id: int) -> set[str]:
+        """Fingerprints of every post already analysed for an author.
+
+        Covers both saved leads and scout sightings that carry analysis output,
+        so a post already judged under one watch is not re-analysed when a
+        second watch surfaces the same text.
+        """
+        fingerprints = set()
+
+        leads = (
+            self.db.query(LeadPost.title, LeadPost.body_text)
+            .filter(
+                LeadPost.provider_id == provider_id,
+                LeadPost.author_account_id == account_id,
+            )
+            .all()
+        )
+        for title, body in leads:
+            fingerprints.add(content_fingerprint(title, body))
+
+        account = self.db.query(ExternalAccount).filter(
+            ExternalAccount.id == account_id
+        ).first()
+        if account:
+            posts = (
+                self.db.query(ScoutWatchPost.post_title, ScoutWatchPost.post_body)
+                .filter(
+                    ScoutWatchPost.post_author == account.external_username,
+                    ScoutWatchPost.analysis_recommendation.isnot(None),
+                )
+                .all()
+            )
+            for title, body in posts:
+                fingerprints.add(content_fingerprint(title, body))
+
+        fingerprints.discard(None)
+        return fingerprints
+
+    # =========================================================================
     # HELPER: SAVE LEAD FROM WATCH
     # =========================================================================
 
@@ -677,7 +900,8 @@ class ScoutWatchService:
             user_character_summary: Summary of user character from their comments.
 
         Returns:
-            The created LeadPost.
+            The created LeadPost, or the author's existing active lead when the
+            post was attached to it (flagged via the transient `_attached`).
         """
         from rediska_core.domain.services.leads import LeadsService
 
@@ -696,7 +920,43 @@ class ScoutWatchService:
             if user_character_summary and not existing.user_character_summary:
                 existing.user_character_summary = user_character_summary
             self.db.flush()
+            existing._attached = False  # type: ignore[attr-defined]
             return existing
+
+        # Resolve the author up front: an author with an active lead gets this
+        # post attached to it rather than a duplicate sibling lead.
+        author_account_id = None
+        author_username = post_data.get("author_username")
+        if author_username:
+            author_account_id = leads_service._get_or_create_author_account(
+                provider_id=post_data["provider_id"],
+                username=author_username,
+                external_id=post_data.get("author_external_id"),
+            )
+
+        if author_account_id:
+            author_lead = leads_service.get_active_lead_for_author(
+                post_data["provider_id"], author_account_id
+            )
+            if author_lead:
+                if user_interests_summary and not author_lead.user_interests_summary:
+                    author_lead.user_interests_summary = user_interests_summary
+                if user_character_summary and not author_lead.user_character_summary:
+                    author_lead.user_character_summary = user_character_summary
+                # Preserve the attached post's content for analysis.
+                if post_data.get("body_text") or post_data.get("title"):
+                    upsert_profile_item_from_post(
+                        db=self.db,
+                        account_id=author_account_id,
+                        external_post_id=post_data["external_post_id"],
+                        title=post_data.get("title"),
+                        body_text=post_data.get("body_text"),
+                        source_location=post_data.get("source_location"),
+                    )
+                author_lead.updated_at = datetime.utcnow()
+                self.db.flush()
+                author_lead._attached = True  # type: ignore[attr-defined]
+                return author_lead
 
         # Parse post_created_at if it's a string
         post_created_at = post_data.get("post_created_at")
@@ -720,17 +980,11 @@ class ScoutWatchService:
             user_character_summary=user_character_summary,
         )
 
-        # Handle author account
-        author_username = post_data.get("author_username")
-        if author_username:
-            lead.author_account_id = leads_service._get_or_create_author_account(
-                provider_id=post_data["provider_id"],
-                username=author_username,
-                external_id=post_data.get("author_external_id"),
-            )
+        lead.author_account_id = author_account_id
 
         self.db.add(lead)
         self.db.flush()
+        lead._attached = False  # type: ignore[attr-defined]
         return lead
 
 
@@ -747,4 +1001,10 @@ __all__ = [
     "VALID_TIME_FILTERS",
     "DEFAULT_LOOKBACK_MINUTES",
     "MAX_POSTS_PER_RUN",
+    "SKIP_DO_NOT_CONTACT",
+    "SKIP_ALREADY_CONTACTED",
+    "SKIP_ALREADY_ENGAGED",
+    "SKIP_LEAD_IGNORED",
+    "SKIP_REASON_TEXT",
+    "content_fingerprint",
 ]

@@ -40,3 +40,27 @@ A maintenance task SHALL merge pre-existing duplicate-author leads: grouping act
 - **THEN** one lead (newest post) survives, the other two are soft-deleted
 - **AND** all `lead_analyses` and scout-post links point at the survivor
 - **AND** an audit entry records the merge group
+
+### Requirement: Analysis results are retained permanently
+
+Analysis output SHALL never be deleted by any retention, cleanup, or merge process, because re-deriving it costs a full agent pipeline run. This covers `lead_analyses` rows (including those with status `failed`, which may still own completed `analysis_dimensions` rows), `analysis_dimensions` rows, and the `dimension_results_json` stored on `scout_watch_posts` — which is often the only record of an analysis for a post that was never promoted to a lead.
+
+Scout watch history retention MAY delete run records and sightings that carry no analysis output; sightings that do carry analysis SHALL be detached from the expiring run and retained.
+
+#### Scenario: Failed analysis is retained
+
+- **WHEN** the failed-analysis cleanup task runs against analyses older than its threshold
+- **THEN** no `lead_analyses` or `analysis_dimensions` rows are deleted
+- **AND** the task reports the count it would previously have removed
+
+#### Scenario: History cleanup preserves analysed sightings
+
+- **WHEN** scout watch history retention expires a run containing one analysed post and one analysis-free post
+- **THEN** the analysed post is retained with its `dimension_results_json` intact
+- **AND** the analysis-free post and the run record are deleted
+
+#### Scenario: Merge preserves every analysis
+
+- **WHEN** duplicate-author leads are merged
+- **THEN** the total count of `lead_analyses` rows is unchanged
+- **AND** every analysis is reachable from the surviving lead

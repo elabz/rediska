@@ -44,6 +44,11 @@ from rediska_core.domain.services.profile_item_utils import upsert_profile_item_
 
 VALID_STATUSES = {"new", "saved", "ignored", "contact_queued", "contacted"}
 
+# A lead is "active" for author-level dedupe unless the user ignored it or it
+# was locally deleted. An ignored lead is a standing negative verdict: it is
+# neither resurrected nor duplicated by new posts from the same author.
+INACTIVE_STATUSES = {"ignored"}
+
 
 # =============================================================================
 # SERVICE
@@ -83,8 +88,10 @@ class LeadsService:
     ) -> LeadPost:
         """Save a post as a lead.
 
-        Creates a new lead_posts row or updates an existing one
-        if the external_post_id already exists.
+        Creates a new lead_posts row, updates an existing one if the
+        external_post_id already exists, or — when the author already has an
+        active lead from a *different* post — attaches this post to that lead
+        instead of creating a duplicate (at most one active lead per author).
 
         Args:
             provider_id: Provider ID (e.g., 'reddit').
@@ -124,6 +131,8 @@ class LeadsService:
                 external_id=author_external_id,
             )
 
+        attached = False
+
         if existing:
             # Update existing lead
             if title is not None:
@@ -138,6 +147,17 @@ class LeadsService:
             existing.status = "saved"
             self.db.flush()
             lead = existing
+        elif author_account_id and (
+            author_lead := self.get_active_lead_for_author(provider_id, author_account_id)
+        ):
+            # The author already has an active lead from a different post:
+            # attach this post to it (as a profile_item, below) instead of
+            # creating a sibling lead. The lead's own title/body/status stay
+            # those of its primary post.
+            author_lead.updated_at = datetime.utcnow()
+            self.db.flush()
+            lead = author_lead
+            attached = True
         else:
             # Create new lead
             lead = LeadPost(
@@ -171,7 +191,42 @@ class LeadsService:
             # Attach as transient attribute for the response
             lead._profile_item_id = profile_item_id  # type: ignore[attr-defined]
 
+        # Transient marker: the caller saved a post that joined an existing
+        # lead rather than creating one (used by the API response + audit).
+        lead._attached = attached  # type: ignore[attr-defined]
+
         return lead
+
+    def get_active_lead_for_author(
+        self,
+        provider_id: str,
+        account_id: int,
+    ) -> Optional[LeadPost]:
+        """Get the author's active lead, if any.
+
+        Active means the lead is not `ignored` (a standing negative verdict)
+        and not locally deleted. At most one active lead per author is the
+        invariant this lookup supports; if several exist (historical
+        duplicates, pending the merge task) the newest is returned.
+
+        Args:
+            provider_id: Provider ID.
+            account_id: The author's external account ID.
+
+        Returns:
+            The active LeadPost or None if the author has none.
+        """
+        return (
+            self.db.query(LeadPost)
+            .filter(
+                LeadPost.provider_id == provider_id,
+                LeadPost.author_account_id == account_id,
+                LeadPost.status.notin_(INACTIVE_STATUSES),
+                LeadPost.deleted_at.is_(None),
+            )
+            .order_by(LeadPost.created_at.desc())
+            .first()
+        )
 
     def _get_or_create_author_account(
         self,
@@ -381,6 +436,110 @@ class LeadsService:
         return query.count()
 
     # =========================================================================
+    # HISTORICAL DUPLICATE MERGE
+    # =========================================================================
+
+    def merge_duplicate_author_leads(self, dry_run: bool = True) -> dict:
+        """Merge pre-existing duplicate-author leads onto one survivor each.
+
+        Groups active leads by `(provider_id, author_account_id)`; where a group
+        has more than one lead, the newest post wins. Analysis history and
+        scout-post linkage are repointed to the survivor and the losers are
+        soft-deleted — never hard-deleted, per the data-preservation principle.
+
+        Args:
+            dry_run: When True (the default), report the plan without mutating.
+
+        Returns:
+            A report dict with the merge groups and totals.
+        """
+        from rediska_core.domain.models import AuditLog, LeadAnalysis, ScoutWatchPost
+
+        candidates = (
+            self.db.query(LeadPost)
+            .filter(
+                LeadPost.author_account_id.isnot(None),
+                LeadPost.status.notin_(INACTIVE_STATUSES),
+                LeadPost.deleted_at.is_(None),
+            )
+            .all()
+        )
+
+        by_author: dict[tuple[str, int], list[LeadPost]] = {}
+        for lead in candidates:
+            if lead.author_account_id is None:
+                continue
+            by_author.setdefault((lead.provider_id, lead.author_account_id), []).append(lead)
+
+        now = datetime.utcnow()
+        groups: list[dict] = []
+
+        for (provider_id, account_id), leads in by_author.items():
+            if len(leads) < 2:
+                continue
+
+            # Newest post wins; fall back to newest row for undated posts.
+            ordered = sorted(
+                leads,
+                key=lambda lead: (
+                    lead.post_created_at or datetime.min,
+                    lead.created_at or datetime.min,
+                    lead.id,
+                ),
+                reverse=True,
+            )
+            survivor, losers = ordered[0], ordered[1:]
+            loser_ids = [lead.id for lead in losers]
+
+            group = {
+                "provider_id": provider_id,
+                "author_account_id": account_id,
+                "survivor_lead_id": survivor.id,
+                "merged_lead_ids": loser_ids,
+            }
+            groups.append(group)
+
+            if dry_run:
+                continue
+
+            self.db.query(LeadAnalysis).filter(
+                LeadAnalysis.lead_id.in_(loser_ids)
+            ).update({LeadAnalysis.lead_id: survivor.id}, synchronize_session=False)
+
+            self.db.query(ScoutWatchPost).filter(
+                ScoutWatchPost.lead_id.in_(loser_ids)
+            ).update({ScoutWatchPost.lead_id: survivor.id}, synchronize_session=False)
+
+            for loser in losers:
+                loser.deleted_at = now
+
+            survivor.updated_at = now
+
+            self.db.add(
+                AuditLog(
+                    ts=now,
+                    actor="system",
+                    action_type="lead.merge_duplicates",
+                    result="ok",
+                    provider_id=provider_id,
+                    entity_type="lead_post",
+                    entity_id=survivor.id,
+                    request_json={"author_account_id": account_id},
+                    response_json={"merged_lead_ids": loser_ids},
+                )
+            )
+
+        if not dry_run:
+            self.db.flush()
+
+        return {
+            "dry_run": dry_run,
+            "groups": groups,
+            "duplicate_groups": len(groups),
+            "leads_merged": sum(len(group["merged_lead_ids"]) for group in groups),
+        }
+
+    # =========================================================================
     # UPDATE STATUS
     # =========================================================================
 
@@ -417,4 +576,5 @@ class LeadsService:
 __all__ = [
     "LeadsService",
     "VALID_STATUSES",
+    "INACTIVE_STATUSES",
 ]

@@ -318,13 +318,18 @@ def check_analysis_status(analysis_id: int) -> dict:
 @app.task(name="multi_agent_analysis.cleanup_failed_analyses")
 def cleanup_failed_analyses(max_age_hours: int = 72) -> dict:
     """
-    Clean up failed analyses older than specified time.
+    Report stale failed analyses. Analysis results are never deleted.
+
+    This task used to delete failed LeadAnalysis rows. It no longer does:
+    a `failed` analysis can still own successfully completed
+    AnalysisDimension rows, so deleting it discards LLM work that would
+    have to be redone. Analysis output is retained permanently.
 
     Args:
-        max_age_hours: Delete failed analyses older than this many hours
+        max_age_hours: Age threshold for the report, in hours.
 
     Returns:
-        dict: Cleanup summary
+        dict: Report summary (nothing is mutated).
     """
     db = None
 
@@ -341,19 +346,18 @@ def cleanup_failed_analyses(max_age_hours: int = 72) -> dict:
             LeadAnalysis.status == "failed", LeadAnalysis.created_at < cutoff_time
         )
 
-        failed_analyses = db.execute(stmt).scalars().all()
-        count = len(failed_analyses)
+        stale_count = len(db.execute(stmt).scalars().all())
 
-        for analysis in failed_analyses:
-            db.delete(analysis)
-
-        db.commit()
-
-        logger.info(f"Cleaned up {count} failed analyses older than {max_age_hours} hours")
+        logger.info(
+            f"Found {stale_count} failed analyses older than {max_age_hours} hours "
+            f"(retained — analysis results are never deleted)"
+        )
 
         return {
             "status": "success",
-            "cleaned_up": count,
+            "cleaned_up": 0,
+            "stale_failed_analyses": stale_count,
+            "retained": True,
             "max_age_hours": max_age_hours,
         }
 

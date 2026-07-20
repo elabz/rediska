@@ -36,6 +36,7 @@ from rediska_core.api.schemas.scout_watch import (
 from rediska_core.domain.models import LeadAnalysis
 from rediska_core.domain.models import AuditLog
 from rediska_core.domain.services.scout_watch import (
+    SKIP_DO_NOT_CONTACT,
     ScoutWatchError,
     ScoutWatchNotFoundError,
     ScoutWatchService,
@@ -643,6 +644,17 @@ async def add_post_to_leads(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Post already added to leads: Lead #{post.lead_id}",
             )
+
+        # Manual promotion is an explicit user action, so it overrides an
+        # `ignored` verdict and the contacted/engaged skips — but never the
+        # do-not-contact list, which is a hard safety boundary.
+        if post.post_author:
+            verdict = service.check_author_verdict(watch.provider_id, post.post_author)
+            if verdict == SKIP_DO_NOT_CONTACT:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"u/{post.post_author} is on the do-not-contact list",
+                )
 
         # Build post data for lead creation
         post_data = {
