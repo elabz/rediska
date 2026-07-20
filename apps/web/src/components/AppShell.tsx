@@ -2,7 +2,6 @@
 
 import { useRouter } from 'next/navigation';
 import { Sidebar } from './Sidebar';
-import { cn } from '@/lib/utils';
 import { SidebarProvider, useSidebar } from '@/contexts/SidebarContext';
 
 interface AppShellProps {

@@ -1,0 +1,25 @@
+schema: spec-driven
+
+context: |
+  Rediska — local-first conversation management and lead discovery system (Reddit provider first).
+  Social-studies research project on human sexuality; content is sensitive/adult and in scope —
+  NO content censorship of any kind. System is LAN/VPN-only and must NEVER be exposed online;
+  LLM inference/embeddings run on local llama.cpp endpoints only.
+
+  Tech stack: Next.js 14 (App Router, BFF proxy routes) + FastAPI + Celery + Redis + MySQL 8.4 +
+  Elasticsearch 8.14 (hybrid BM25 + kNN). Docker Compose stack with no published host ports;
+  external dev-proxy terminates TLS for rediska.local.
+
+  Invariants: single admin user; identity-aware conversations; no autosend (explicit user click);
+  no remote deletes (provider deletions only mark status/visibility); every mutating endpoint
+  writes audit_log; every Celery task uses the jobs idempotency ledger; every UI page has empty
+  and error states. AI agents must not read live Inbox/message content.
+
+  Baseline capability specs live in openspec/specs/ (retrofitted 2026-07); product-level view in
+  prd/Rediska_PRD_v1.0.md. Older prd/ spec packs are historical.
+
+rules:
+  proposal:
+    - Always include a "Non-goals" section
+  specs:
+    - Never introduce content filtering/censorship requirements (see research-content-policy)

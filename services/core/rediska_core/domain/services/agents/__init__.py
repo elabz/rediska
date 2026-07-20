@@ -6,13 +6,15 @@ dimensions of lead profiles and generating suitability recommendations.
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+from rediska_core.config import get_settings
 from rediska_core.domain.models import AgentPrompt, AnalysisDimension
 
 # Import AgentConfig - will be available from domain.services.agent
@@ -22,6 +24,76 @@ except ImportError:
     # Fallback if agent module not yet created
     AgentConfig = None
     AgentHarness = None
+
+
+@dataclass(frozen=True)
+class ContextSpec:
+    """Which optional context sections a dimension agent receives.
+
+    The lead ``<title>``/``<body>`` are always included and are not listed here.
+    ``sections`` is ordered — it is also the render order.
+    """
+
+    sections: tuple[str, ...] = ()
+    max_posts: int | None = None
+    per_item_chars: int | None = None
+
+
+# Section names
+SECTION_PROFILE_SUMMARY = "profile_summary"
+SECTION_INTERESTS_SUMMARY = "interests_summary"
+SECTION_CHARACTER_SUMMARY = "character_summary"
+SECTION_ACCOUNT_METADATA = "account_metadata"
+SECTION_RECENT_POSTS = "recent_posts"
+
+# Per-dimension context specification. Raw comment dumps are deliberately absent
+# from every spec: the character summary is distilled from exactly those comments
+# and the other dimensions never needed them.
+DIMENSION_CONTEXT_SPECS: dict[str, ContextSpec] = {
+    "demographics": ContextSpec(sections=(SECTION_PROFILE_SUMMARY,)),
+    "preferences": ContextSpec(
+        sections=(SECTION_INTERESTS_SUMMARY, SECTION_RECENT_POSTS),
+    ),
+    "sexual_preferences": ContextSpec(
+        sections=(SECTION_INTERESTS_SUMMARY, SECTION_RECENT_POSTS),
+    ),
+    "relationship_goals": ContextSpec(sections=(SECTION_INTERESTS_SUMMARY,)),
+    "risk_flags": ContextSpec(
+        sections=(SECTION_ACCOUNT_METADATA, SECTION_CHARACTER_SUMMARY),
+    ),
+}
+
+# Used for any dimension not in the table (e.g. a new dimension added before its
+# spec entry). Conservative: the same summary the old unbounded builder led with.
+DEFAULT_CONTEXT_SPEC = ContextSpec(sections=(SECTION_PROFILE_SUMMARY,))
+
+# Order in which sections are sacrificed when the assembled input exceeds the
+# budget. ``recent_posts`` is trimmed item-by-item (oldest first) before any
+# section is dropped whole; account metadata is tiny and highest-signal, so it
+# goes last. The lead title/body are never trimmed.
+_SECTION_DROP_ORDER = (
+    SECTION_CHARACTER_SUMMARY,
+    SECTION_PROFILE_SUMMARY,
+    SECTION_INTERESTS_SUMMARY,
+    SECTION_ACCOUNT_METADATA,
+)
+
+
+@dataclass
+class AssembledInput:
+    """The prompt actually sent to a dimension agent, plus audit metadata."""
+
+    prompt: str
+    sections: list[str] = field(default_factory=list)
+    total_chars: int = 0
+
+    def audit_record(self) -> dict[str, Any]:
+        """Audit payload for ``analysis_dimensions.input_data_json``."""
+        return {
+            "prompt_excerpt": self.prompt[:2000],
+            "sections": self.sections,
+            "total_chars": self.total_chars,
+        }
 
 
 class BaseAnalysisAgent(ABC):
@@ -41,6 +113,9 @@ class BaseAnalysisAgent(ABC):
         """
         self.inference_client = inference_client
         self.chat_template = chat_template
+        # Execution attempt number (1 = first run, 2 = automatic retry);
+        # recorded in analysis_dimensions.input_data_json.
+        self.attempt = 1
 
     @abstractmethod
     async def analyze(
@@ -106,48 +181,199 @@ class BaseAnalysisAgent(ABC):
             "raw_response": result.output,
         }
 
-    def _build_input_prompt(
+    @staticmethod
+    def _select_recent_posts(
+        input_context: dict[str, Any],
+        max_posts: int,
+        per_item_chars: int,
+    ) -> list[str]:
+        """Newest-first author posts, each capped at ``per_item_chars``.
+
+        Prefers the structured ``items_by_type["post"]`` list (which carries
+        timestamps); falls back to the flat ``profile.post_text`` blob as a
+        single item when only that is available.
+        """
+        items = (input_context.get("items_by_type") or {}).get("post") or []
+        if not items:
+            post_text = (input_context.get("profile") or {}).get("post_text") or ""
+            items = [{"text": post_text}] if post_text.strip() else []
+
+        # Newest first. Items without a timestamp sort as oldest; the sort is
+        # stable, so ties keep their input order (the scout path puts the
+        # discovery post first).
+        def sort_key(item: dict[str, Any]) -> tuple[int, str]:
+            created = item.get("created_at") or ""
+            return (1 if created else 0, str(created))
+
+        ordered = sorted(items, key=sort_key, reverse=True)
+
+        selected = []
+        for item in ordered[:max_posts]:
+            text = (item.get("text") or "").strip()
+            if text:
+                selected.append(text[:per_item_chars])
+        return selected
+
+    @staticmethod
+    def _render_account_metadata(input_context: dict[str, Any]) -> str:
+        """Structured account signals — the strongest scam/authenticity cues."""
+        profile = input_context.get("profile") or {}
+
+        parts = []
+        karma = profile.get("karma")
+        if karma is not None:
+            parts.append(f"karma={karma}")
+
+        created_at = profile.get("created_at")
+        age_days = BaseAnalysisAgent._account_age_days(created_at)
+        if age_days is not None:
+            parts.append(f"account_age_days={age_days}")
+
+        if profile.get("is_verified") is not None:
+            parts.append(f"verified={bool(profile.get('is_verified'))}")
+
+        bio = (profile.get("bio") or "").strip()
+        if bio:
+            parts.append(f"bio={bio}")
+
+        return ", ".join(parts)
+
+    @staticmethod
+    def _account_age_days(created_at: Any) -> int | None:
+        """Days since account creation, from an ISO string or datetime."""
+        if not created_at:
+            return None
+        value = created_at
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        now = datetime.now(timezone.utc)
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return max(0, (now - value).days)
+
+    def _build_agent_input(
         self,
         dimension: str,
         input_context: dict[str, Any],
-    ) -> str:
+    ) -> AssembledInput:
         """
-        Build input prompt for agent from context.
+        Assemble the model input for a dimension per its `ContextSpec`.
+
+        The lead title and body are always included and never trimmed. Optional
+        sections come from `DIMENSION_CONTEXT_SPECS`; the assembled result is
+        capped at `ANALYSIS_CONTEXT_MAX_CHARS`, dropping the oldest posts first
+        and then whole sections in `_SECTION_DROP_ORDER`.
 
         Args:
             dimension: Agent dimension
             input_context: Input context data
 
         Returns:
-            str: Formatted input prompt
+            AssembledInput: prompt plus the sections/size actually sent
         """
-        # Extract relevant content for analysis
-        lead_title = input_context.get("lead", {}).get("title", "")
-        lead_body = input_context.get("lead", {}).get("body", "")
-        post_text = input_context.get("profile", {}).get("post_text", "")
-        comment_text = input_context.get("profile", {}).get("comment_text", "")
-        summary = input_context.get("profile", {}).get("summary", "")
+        settings = get_settings()
+        spec = DIMENSION_CONTEXT_SPECS.get(dimension, DEFAULT_CONTEXT_SPEC)
 
-        # Build content - title wrapped in XML tags, then body
-        content_parts = []
-        if lead_title:
-            content_parts.append(f"<title>{lead_title}</title>")
-        if lead_body:
-            content_parts.append(f"<body>{lead_body}</body>")
-        if summary:
-            content_parts.append(f"<profile_summary>{summary}</profile_summary>")
-        if post_text:
-            content_parts.append(f"<recent_posts>{post_text}</recent_posts>")
-        if comment_text:
-            content_parts.append(f"<comments>{comment_text}</comments>")
+        lead = input_context.get("lead") or {}
+        lead_title = lead.get("title") or ""
+        lead_body = lead.get("body") or ""
 
-        content = "\n\n".join(content_parts)
+        # Sections the spec asks for, in render order, keyed by name.
+        rendered: dict[str, str] = {}
+        posts: list[str] = []
 
-        return f"""Analyze this user content:
+        for section in spec.sections:
+            if section == SECTION_PROFILE_SUMMARY:
+                text = (input_context.get("profile") or {}).get("summary") or ""
+                if text:
+                    rendered[section] = text
+            elif section == SECTION_INTERESTS_SUMMARY:
+                text = (input_context.get("summaries") or {}).get("user_interests") or ""
+                if text:
+                    rendered[section] = text
+            elif section == SECTION_CHARACTER_SUMMARY:
+                text = (input_context.get("summaries") or {}).get("user_character") or ""
+                if text:
+                    rendered[section] = text
+            elif section == SECTION_ACCOUNT_METADATA:
+                text = self._render_account_metadata(input_context)
+                if text:
+                    rendered[section] = text
+            elif section == SECTION_RECENT_POSTS:
+                posts = self._select_recent_posts(
+                    input_context,
+                    max_posts=spec.max_posts or settings.analysis_max_recent_posts,
+                    per_item_chars=(
+                        spec.per_item_chars or settings.analysis_post_item_chars
+                    ),
+                )
+                if posts:
+                    rendered[section] = ""  # filled in by _assemble
 
-{content}
+        def assemble() -> tuple[str, list[str]]:
+            parts = []
+            names = []
+            if lead_title:
+                parts.append(f"<title>{lead_title}</title>")
+                names.append("title")
+            if lead_body:
+                parts.append(f"<body>{lead_body}</body>")
+                names.append("body")
+            for name in spec.sections:
+                if name not in rendered:
+                    continue
+                if name == SECTION_RECENT_POSTS:
+                    if not posts:
+                        continue
+                    body = "\n---\n".join(posts)
+                else:
+                    body = rendered[name]
+                parts.append(f"<{name}>{body}</{name}>")
+                names.append(name)
+            content = "\n\n".join(parts)
+            return (
+                f"Analyze this user content:\n\n{content}\n\n"
+                "Provide your analysis in valid JSON format.",
+                names,
+            )
 
-Provide your analysis in valid JSON format."""
+        prompt, names = assemble()
+        budget = settings.analysis_context_max_chars
+
+        # Over budget: shed the oldest posts one at a time, then whole sections.
+        while len(prompt) > budget and posts:
+            posts.pop()  # newest-first, so the tail is the oldest
+            if not posts:
+                rendered.pop(SECTION_RECENT_POSTS, None)
+            prompt, names = assemble()
+
+        for name in _SECTION_DROP_ORDER:
+            if len(prompt) <= budget:
+                break
+            if rendered.pop(name, None) is not None:
+                prompt, names = assemble()
+
+        if len(prompt) > budget:
+            # Only the lead itself remains, and it is never trimmed.
+            logger.warning(
+                f"Dimension '{dimension}' input is {len(prompt)} chars, over the "
+                f"{budget} budget, from the lead post alone; sending untrimmed."
+            )
+
+        return AssembledInput(prompt=prompt, sections=names, total_chars=len(prompt))
+
+    def _build_input_prompt(
+        self,
+        dimension: str,
+        input_context: dict[str, Any],
+    ) -> str:
+        """Build the input prompt for a dimension agent (see `_build_agent_input`)."""
+        return self._build_agent_input(dimension, input_context).prompt
 
     async def _store_dimension_result(
         self,
@@ -185,7 +411,7 @@ Provide your analysis in valid JSON format."""
             started_at=datetime.utcnow(),
             completed_at=datetime.utcnow(),
             status=status,
-            input_data_json=input_data,
+            input_data_json={**input_data, "attempt": self.attempt},
             output_json=output_data,
             prompt_version=prompt_version,
             error_detail=error,

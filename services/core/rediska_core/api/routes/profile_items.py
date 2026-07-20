@@ -16,6 +16,7 @@ from rediska_core.api.schemas.profile_items import (
     IngestBrowsePostsResponse,
 )
 from rediska_core.domain.models import ExternalAccount, ProfileItem
+from rediska_core.domain.services.external_listing import maybe_resolve_post_body
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
 router = APIRouter(prefix="/profile-items", tags=["profile-items"])
@@ -91,12 +92,16 @@ async def ingest_browse_posts(
         )
         is_new = existing is None
 
+        # Link-only posts from supported listing hosts: substitute the listing's
+        # About text so the stored profile_item carries real content.
+        body_text = maybe_resolve_post_body(post.body_text, post.post_url)
+
         item_id = upsert_profile_item_from_post(
             db=db,
             account_id=account_id,
             external_post_id=post.external_post_id,
             title=post.title,
-            body_text=post.body_text,
+            body_text=body_text,
             source_location=post.source_location,
             post_created_at=post.post_created_at,
         )

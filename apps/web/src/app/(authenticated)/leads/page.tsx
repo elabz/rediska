@@ -7,7 +7,6 @@ import {
   RefreshCw,
   Filter,
   ExternalLink,
-  ArrowUp,
   MessageSquare,
   Sparkles,
   CheckCircle,

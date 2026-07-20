@@ -33,6 +33,7 @@ from rediska_core.domain.models import (
     ProfileItem,
     ProfileSnapshot,
 )
+from rediska_core.domain.services.external_listing import ensure_lead_listing_content
 from rediska_core.providers.base import (
     PaginatedResult,
     ProfileItemType,
@@ -143,6 +144,10 @@ class AnalysisService:
             .filter(ExternalAccount.id == lead.author_account_id)
             .first()
         )
+
+        # Leads saved before listing resolution existed may still hold a bare
+        # link; resolve once so the pipeline analyzes real content.
+        ensure_lead_listing_content(self.db, lead)
 
         try:
             # Step 1: Fetch author profile from provider

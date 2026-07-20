@@ -33,6 +33,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ExternalAccount, LeadPost
+from rediska_core.domain.services.external_listing import maybe_resolve_post_body
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
 
@@ -99,6 +100,11 @@ class LeadsService:
         Returns:
             The created or updated LeadPost.
         """
+        # Link-only posts (e.g. weheartbdsm listings): substitute the listing's
+        # About text as the body BEFORE persisting, so the profile_item and the
+        # auto-analyze triggered right after saving always see real content.
+        body_text = maybe_resolve_post_body(body_text, post_url)
+
         # Check if lead already exists
         existing = (
             self.db.query(LeadPost)

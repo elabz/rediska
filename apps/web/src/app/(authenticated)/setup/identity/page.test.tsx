@@ -73,7 +73,6 @@ describe('IdentitySetupPage', () => {
 
   describe('form validation', () => {
     it('requires display name', async () => {
-      const user = userEvent.setup();
       render(<IdentitySetupPage />);
 
       const displayNameInput = screen.getByLabelText(/display name/i);
@@ -81,7 +80,6 @@ describe('IdentitySetupPage', () => {
     });
 
     it('requires username', async () => {
-      const user = userEvent.setup();
       render(<IdentitySetupPage />);
 
       const usernameInput = screen.getByLabelText(/username/i);

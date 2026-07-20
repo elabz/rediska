@@ -14,6 +14,10 @@ class BrowsePostForIngest(BaseModel):
     author_username: str = Field(..., description="Post author's username")
     title: Optional[str] = Field(default=None, description="Post title")
     body_text: Optional[str] = Field(default=None, description="Post body text")
+    post_url: Optional[str] = Field(
+        default=None,
+        description="Post URL; used to resolve link-only posts from supported listing hosts",
+    )
     source_location: Optional[str] = Field(default=None, description="Subreddit / channel")
     post_created_at: Optional[datetime] = Field(default=None, description="When the post was created")
 

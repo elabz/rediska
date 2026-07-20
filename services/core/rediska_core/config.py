@@ -82,6 +82,28 @@ class Settings(BaseSettings):
         default=200, description="Max miles to consider a location 'near'"
     )
 
+    # User constraints for deterministic lead gates
+    user_age: int = Field(
+        default=45, description="User's own age, checked against partner_max_age gate"
+    )
+    user_ds_orientation: str = Field(
+        default="dominant",
+        description="User's D/s orientation (dominant|submissive|switch) for the compatibility gate",
+    )
+
+    # Dimension-agent input context budgets
+    analysis_context_max_chars: int = Field(
+        default=24000,
+        description="Max characters of assembled input sent to a dimension agent (~6k tokens)",
+    )
+    analysis_max_recent_posts: int = Field(
+        default=10,
+        description="Max newest author posts included for dimensions that use recent_posts",
+    )
+    analysis_post_item_chars: int = Field(
+        default=800, description="Max characters kept per included author post"
+    )
+
     @field_validator("mysql_url")
     @classmethod
     def validate_mysql_url(cls, v: str) -> str:

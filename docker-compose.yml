@@ -11,6 +11,7 @@ services:
   # externally so it can reach rediska-web without any change here.
 
   rediska-web:
+    image: ghcr.io/elabz/rediska-web:${TAG:-latest}
     build: ./apps/web
     container_name: rediska-web
     environment:
@@ -24,6 +25,7 @@ services:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/', (r) => process.exit(r.statusCode === 200 ? 0 : 1))\""]
 
   rediska-core:
+    image: ghcr.io/elabz/rediska-core:${TAG:-latest}
     build: ./services/core
     container_name: rediska-core
     environment:
@@ -70,6 +72,7 @@ services:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/healthz || exit 1"]
 
   rediska-worker:
+    image: ghcr.io/elabz/rediska-worker:${TAG:-latest}
     build:
       context: ./services
       dockerfile: worker/Dockerfile
@@ -113,6 +116,7 @@ services:
     restart: unless-stopped
 
   rediska-beat:
+    image: ghcr.io/elabz/rediska-worker:${TAG:-latest}
     build:
       context: ./services
       dockerfile: worker/Dockerfile

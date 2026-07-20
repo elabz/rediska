@@ -296,9 +296,12 @@ def _geocode(location_str: str) -> Optional[tuple[float, float, str]]:
     return None
 
 
-# Locations that always count as "near" regardless of distance.
-# "online" = open to remote; "us"/"usa"/"united states" = too broad to penalize.
-_ALWAYS_NEAR = {"online", "remote", "anywhere", "us", "usa", "united states"}
+# Virtual / country-scale / timezone tokens that carry no usable geography.
+# They classify as "unclear" (needs review), never near or far.
+_UNCLEAR_TOKENS = {
+    "online", "remote", "anywhere", "us", "usa", "united states",
+    "est", "cst", "mst", "pst", "edt", "cdt", "mdt", "pdt",
+}
 
 
 def _split_location(location_str: str) -> list[str]:
@@ -335,74 +338,60 @@ def _split_location(location_str: str) -> list[str]:
     return result
 
 
+def _result(state: str, distance_miles: Optional[int], geocoded: bool) -> dict:
+    return {
+        "location_state": state,
+        "location_near": state == "near",
+        "distance_miles": distance_miles,
+        "geocoded": geocoded,
+    }
+
+
 def classify_location(location_str: Optional[str]) -> dict:
-    """Classify a location string as near/far based on haversine distance.
+    """Classify a location string as near/far/unclear based on haversine distance.
 
     Handles compound locations (e.g., "Ontario, Niagara" or "#Europe #online"):
     - Splits into parts and classifies each independently.
-    - "always-near" tokens (online, remote, anywhere, us, usa) are ignored
-      when a concrete geographic location is also present.
-    - If ANY concrete part geocodes as far, the whole location is far.
-    - Only returns near if ALL concrete parts are near, or if there are
-      no concrete parts (pure "online" / "anywhere").
+    - Virtual/country-scale/timezone tokens (online, remote, anywhere, us,
+      usa, EST, ...) carry no usable geography and are skipped.
+    - If ANY concrete part geocodes within the threshold, the location is near.
+    - Otherwise, if any concrete part geocodes (all beyond threshold), far.
+    - If no concrete part geocodes (pure "online", timezone strings,
+      un-geocodable text), the location is unclear.
 
     Returns:
         dict with keys:
-          - location_near (bool)
-          - distance_miles (int or None) – max distance among parts
-          - geocoded (bool) – whether we resolved at least one part
+          - location_state ("near" | "far" | "unclear")
+          - location_near (bool) – derived: state == "near"
+          - distance_miles (int or None) – nearest distance if near, else farthest
+          - geocoded (bool) – whether we resolved at least one concrete part
     """
     if not location_str:
-        return {"location_near": False, "distance_miles": None, "geocoded": False}
+        return _result("unclear", None, False)
 
     parts = _split_location(location_str)
-    if not parts:
-        return {"location_near": False, "distance_miles": None, "geocoded": False}
+    concrete_parts = [p for p in parts if _normalize(p) not in _UNCLEAR_TOKENS]
 
-    # Separate "always near" tokens from concrete locations
-    always_near_parts: list[str] = []
-    concrete_parts: list[str] = []
-    for p in parts:
-        if _normalize(p) in _ALWAYS_NEAR:
-            always_near_parts.append(p)
-        else:
-            concrete_parts.append(p)
-
-    # If all parts are "always near" (e.g., pure "online"), return near
     if not concrete_parts:
-        return {"location_near": True, "distance_miles": 0, "geocoded": True}
+        return _result("unclear", None, False)
 
-    # Classify each concrete part; if ANY is far, the whole thing is far
     settings = get_settings()
     home_lat = settings.home_latitude
     home_lon = settings.home_longitude
     threshold = settings.location_near_threshold_miles
 
-    max_distance: Optional[int] = None
-    any_geocoded = False
-    any_far = False
-
+    distances: list[int] = []
     for p in concrete_parts:
-        result = _geocode(p)
-        if result is None:
+        geocoded = _geocode(p)
+        if geocoded is None:
             continue
-        any_geocoded = True
-        lat, lon, _tier = result
-        dist = round(_haversine(home_lat, home_lon, lat, lon))
-        if max_distance is None or dist > max_distance:
-            max_distance = dist
-        if dist > threshold:
-            any_far = True
+        lat, lon, _tier = geocoded
+        distances.append(round(_haversine(home_lat, home_lon, lat, lon)))
 
-    if not any_geocoded:
-        # None of the concrete parts could be geocoded
-        # If there were also always-near parts, treat as near
-        if always_near_parts:
-            return {"location_near": True, "distance_miles": 0, "geocoded": True}
-        return {"location_near": False, "distance_miles": None, "geocoded": False}
+    if not distances:
+        return _result("unclear", None, False)
 
-    return {
-        "location_near": not any_far,
-        "distance_miles": max_distance,
-        "geocoded": True,
-    }
+    near_distances = [d for d in distances if d <= threshold]
+    if near_distances:
+        return _result("near", min(near_distances), True)
+    return _result("far", max(distances), True)

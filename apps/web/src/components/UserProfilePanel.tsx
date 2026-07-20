@@ -673,7 +673,7 @@ export function UserProfilePanel({
             <div className="text-center py-6">
               <User className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
               <p className="text-sm text-muted-foreground mb-3">
-                This user hasn't been analyzed yet
+                This user hasn&apos;t been analyzed yet
               </p>
               <Button
                 variant="default"
@@ -701,7 +701,7 @@ export function UserProfilePanel({
                 </div>
               ) : (
                 <div className="text-sm text-muted-foreground italic">
-                  No summary available yet. Click "Re-analyze" to generate one.
+                  No summary available yet. Click &quot;Re-analyze&quot; to generate one.
                 </div>
               )}
 

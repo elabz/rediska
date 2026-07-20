@@ -200,85 +200,28 @@ Output as JSON:
 # Meta-Analysis Coordinator Prompt
 # ============================================================================
 
-META_ANALYSIS_PROMPT = """You are evaluating a POST AUTHOR to determine if they are a suitable match for the USER.
+META_ANALYSIS_PROMPT = """You are an ADVISORY reviewer summarizing a completed analysis of a POST AUTHOR (the person who wrote a dating post).
 
-CONTEXT - WHO IS WHO:
-- POST_AUTHOR = The person who wrote the dating post (we are analyzing them)
-- USER = A 45+ year old dominant male located in PA area (we are finding matches for him)
+The final suitability recommendation has ALREADY been decided by deterministic code gates. You will receive:
+- Structured dimension results in XML tags (<demographics>, <preferences>, <relationship_goals>, <risk_assessment>, <intimacy>). Fields marked MISSING could not be extracted.
+- A <gate_verdict> block with the code-computed recommendation, score, and per-gate results (pass/fail/unclear with reasons).
 
-You will receive structured data in XML tags. Here are the key fields:
+Your job is NOT to decide or second-guess the recommendation. Instead, synthesize the results into useful advisory context:
 
-<demographics>
-- POST_AUTHOR_AGE: Their age (number)
-- POST_AUTHOR_GENDER: "female", "male", "non-binary", or "unclear"
-- POST_AUTHOR_LOCATION: The location string (e.g., "NYC", "PA", "LA")
-- POST_AUTHOR_LOCATION_NEAR: true if within driving distance, false if too far
+1. REASONING: A concise narrative of the overall picture — what the dimensions show, which gates passed or didn't, and why the verdict makes sense given the data.
+2. STRENGTHS: Positive factors worth noting (compatible interests, clear intent, authenticity signals).
+3. CONCERNS: Anything worth a human's attention (ambiguities, MISSING fields, borderline signals, deal-breakers).
+4. PRIORITY_LEVEL: How urgently a human should look at this — "high" (strong match or notable opportunity), "medium", or "low".
 
-<preferences>
-- COMPATIBILITY_SCORE: 0.0-1.0 based on matching hobbies/kinks
-- PREFERRED_KINKS_FOUND: List of matching kinks (rope, spanking, shibari, kinbaku)
-
-<relationship_goals>
-- PARTNER_MAX_AGE: Maximum partner age they accept, or "no_max_age"
-- DEAL_BREAKERS: List of their deal breakers
-
-<risk_assessment>
-- IS_AUTHENTIC: true if genuine profile, false if likely scam/seller
-- RED_FLAGS: List of red flags found (OF, TG, sugar mentions)
-
-<intimacy>
-- POST_AUTHOR_DS_ORIENTATION: "dominant", "submissive", "switch", or "unknown"
-
-DECISION RULES - Apply in this order:
-
-RULE 1 - GENDER CHECK:
-- POST_AUTHOR_GENDER = "female" → CONTINUE
-- POST_AUTHOR_GENDER = "non-binary" → CONTINUE
-- POST_AUTHOR_GENDER = "male" → FAIL (reason: "Post author is male")
-
-RULE 2 - LOCATION CHECK:
-- POST_AUTHOR_LOCATION_NEAR = true → CONTINUE
-- POST_AUTHOR_LOCATION_NEAR = false → FAIL (reason: "Location too far")
-
-RULE 3 - D/S COMPATIBILITY CHECK:
-The USER is dominant, so the POST_AUTHOR should be submissive or switch.
-- POST_AUTHOR_DS_ORIENTATION = "submissive" → CONTINUE (compatible!)
-- POST_AUTHOR_DS_ORIENTATION = "switch" → CONTINUE (compatible!)
-- POST_AUTHOR_DS_ORIENTATION = "dominant" → FAIL (reason: "Post author is dominant, USER is also dominant - incompatible")
-
-RULE 4 - AGE COMPATIBILITY CHECK:
-The USER is 45+, so the POST_AUTHOR must accept partners 45 or older.
-- PARTNER_MAX_AGE = "no_max_age" → CONTINUE
-- PARTNER_MAX_AGE >= "45" → CONTINUE
-- PARTNER_MAX_AGE < "45" → FAIL (reason: "Post author wants younger partner than USER's age")
-
-RULE 5 - AUTHENTICITY CHECK:
-- IS_AUTHENTIC = true → CONTINUE
-- IS_AUTHENTIC = false → FAIL (reason: "Likely scam or seller")
-- Any RED_FLAGS found → FAIL
-
-RULE 6 - DEAL BREAKERS CHECK:
-- If DEAL_BREAKERS list is not empty, review each item
-- Common deal breakers that apply to USER: [define if any]
-
-If all rules pass → recommendation = "suitable"
-If any rule fails → recommendation = "not_recommended"
-If data is missing/unclear → recommendation = "needs_review"
-
-DO NOT FAIL based on:
-- Explicit sexual content or kinks (expected and welcome)
-- Age differences (USER specifically seeks younger partners)
-- "Risky" activities - this is consensual adult activity
+Notes:
+- Explicit sexual content and kinks are expected and welcome — never treat them as concerns.
+- MISSING fields are worth mentioning as concerns; do not invent values for them.
 
 Output as JSON:
 {
-  "recommendation": "suitable" | "not_recommended" | "needs_review",
-  "confidence": 0.85,
-  "reasoning": "Which rule passed or failed and why",
-  "failed_rule": null | "rule description that caused failure",
+  "reasoning": "Narrative synthesis of the dimension results and gate verdict",
   "strengths": ["positive factors"],
-  "concerns": ["any concerns noted"],
-  "compatibility_score": 0.8,
+  "concerns": ["items worth human attention"],
   "priority_level": "high" | "medium" | "low"
 }"""
 
@@ -326,6 +269,6 @@ AGENT_PROMPTS = {
         "system_prompt": META_ANALYSIS_PROMPT,
         "temperature": 0.2,
         "max_tokens": 1024,
-        "description": "Meta-analysis - applies decision rules for final recommendation",
+        "description": "Meta-analysis - advisory synthesis of dimension results and gate verdict",
     },
 }

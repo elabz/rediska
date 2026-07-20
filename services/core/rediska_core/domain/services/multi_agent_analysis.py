@@ -26,6 +26,12 @@ from rediska_core.domain.models import (
     ProfileSnapshot,
 )
 from rediska_core.domain.services.agent_prompt import AgentPromptService
+from rediska_core.domain.services.external_listing import ensure_lead_listing_content
+from rediska_core.domain.services.lead_gates import (
+    GateVerdict,
+    UserConstraints,
+    evaluate_gates,
+)
 
 
 class MultiAgentAnalysisService:
@@ -66,13 +72,13 @@ class MultiAgentAnalysisService:
         self.chat_template = chat_template or settings.inference_chat_template
 
     def _normalize_meta_output(self, meta_output: dict[str, Any]) -> dict[str, Any]:
-        """Normalize meta-analysis output to expected schema fields.
+        """Normalize ADVISORY meta-analysis output to expected schema fields.
 
-        Handles variations in LLM output field names and values:
-        - Maps suitability_recommendation → recommendation
-        - Maps PASS/FAIL → suitable/not_recommended
-        - Extracts confidence from various field names
-        - Normalizes reasoning to string format
+        The meta agent is advisory only: the final recommendation and gating
+        confidence are computed by the deterministic gate evaluator
+        (lead_gates.evaluate_gates), never taken from this output. This
+        normalization exists purely so the advisory fields display
+        consistently. No default confidence is supplied for a missing value.
 
         Args:
             meta_output: Raw parsed output from meta-analysis agent
@@ -113,7 +119,7 @@ class MultiAgentAnalysisService:
                 if rec:
                     break
 
-        # Normalize recommendation values
+        # Normalize recommendation values (advisory only — never gates)
         if rec:
             rec_upper = str(rec).upper()
             if rec_upper in ["PASS", "SUITABLE", "YES", "TRUE"]:
@@ -123,9 +129,9 @@ class MultiAgentAnalysisService:
             elif rec_upper in ["NEEDS_REVIEW", "REVIEW", "MAYBE", "UNCLEAR"]:
                 normalized["recommendation"] = "needs_review"
             else:
-                normalized["recommendation"] = rec.lower() if isinstance(rec, str) else "needs_review"
+                normalized["recommendation"] = rec.lower() if isinstance(rec, str) else None
         else:
-            normalized["recommendation"] = meta_output.get("recommendation", "needs_review")
+            normalized["recommendation"] = meta_output.get("recommendation")
 
         # Map confidence field names
         conf = None
@@ -144,19 +150,14 @@ class MultiAgentAnalysisService:
                     or nested.get("suitability_score")
                 )
 
+        # Advisory only: no default substitutes for a missing model confidence
         if conf is not None:
             try:
                 normalized["confidence"] = float(conf)
             except (ValueError, TypeError):
-                normalized["confidence"] = 0.5
+                normalized["confidence"] = None
         else:
-            # Default confidence based on recommendation
-            if normalized["recommendation"] == "suitable":
-                normalized["confidence"] = 0.7
-            elif normalized["recommendation"] == "not_recommended":
-                normalized["confidence"] = 0.7
-            else:
-                normalized["confidence"] = 0.5
+            normalized["confidence"] = None
 
         # Normalize reasoning to string
         reasoning = meta_output.get("reasoning")
@@ -224,6 +225,10 @@ class MultiAgentAnalysisService:
 
         if not lead.author_account_id:
             raise ValueError(f"Lead has no author account: {lead_id}")
+
+        # Leads saved before listing resolution existed may still hold a bare
+        # link; resolve once so agent context contains real content.
+        ensure_lead_listing_content(self.db, lead)
 
         # Fetch profile snapshot
         profile_snapshot = (
@@ -311,14 +316,19 @@ class MultiAgentAnalysisService:
                 include_dimensions or self.DIMENSIONS
             )
 
-            # Run dimension agents in parallel
+            # Run dimension agents in parallel (failed dimensions retried once)
             dimension_results = await self._run_dimension_agents(
                 analysis.id, input_context, dimensions_to_analyze
             )
 
-            # Run meta-analysis coordinator
+            # Deterministic hard gates decide the verdict (fail-closed)
+            verdict = evaluate_gates(
+                dimension_results, UserConstraints.from_settings()
+            )
+
+            # Run meta-analysis coordinator (advisory only; failure tolerated)
             meta_result = await self._run_meta_analysis(
-                analysis.id, dimension_results
+                analysis.id, dimension_results, gate_verdict=verdict
             )
 
             # Update analysis record with results (use parsed_output for JSON fields)
@@ -337,21 +347,23 @@ class MultiAgentAnalysisService:
             analysis.sexual_preferences_json = dimension_results.get(
                 "sexual_preferences", {}
             ).get("parsed_output")
-            analysis.meta_analysis_json = meta_result.get("parsed_output")
-
+            # Store advisory meta output alongside the gate verdict
             meta_output = meta_result.get("parsed_output")
+            meta_json = dict(meta_output) if isinstance(meta_output, dict) else {}
+            meta_json["gate_verdict"] = verdict.to_dict()
+            analysis.meta_analysis_json = meta_json
+
+            # Verdict and score come from the deterministic gate evaluator;
+            # meta output is advisory context and cannot flip them.
+            analysis.final_recommendation = verdict.recommendation
+            analysis.confidence_score = verdict.score
+
+            reasoning_parts = [verdict.summary()]
             if meta_result.get("success") and meta_output:
-                # Normalize the output to handle different field names/values from LLM
                 normalized = self._normalize_meta_output(meta_output)
-                analysis.final_recommendation = normalized.get("recommendation")
-                analysis.recommendation_reasoning = normalized.get("reasoning")
-                analysis.confidence_score = normalized.get("confidence")
-            else:
-                analysis.final_recommendation = "needs_review"
-                analysis.recommendation_reasoning = (
-                    "Analysis failed or produced unclear results"
-                )
-                analysis.confidence_score = 0.0
+                if normalized.get("reasoning"):
+                    reasoning_parts.append(f"Advisory: {normalized['reasoning']}")
+            analysis.recommendation_reasoning = " | ".join(reasoning_parts)
 
             analysis.status = "completed"
             analysis.completed_at = datetime.utcnow()
@@ -416,40 +428,53 @@ class MultiAgentAnalysisService:
             "sexual_preferences": SexualPreferencesAgent,
         }
 
-        tasks = {}
-        for dimension in dimensions:
-            if dimension in agent_classes:
-                agent_class = agent_classes[dimension]
-                agent = agent_class(
-                    self.inference_client,
-                    chat_template=self.chat_template,
-                )
-                prompt = self.prompt_service.get_active_prompt(dimension)
-
-                task = agent.analyze(
-                    dimension=dimension,
-                    input_context=input_context,
-                    prompt=prompt,
-                    analysis_id=analysis_id,
-                    db=self.db,
-                )
-                tasks[dimension] = task
-
-        # Execute all agents in parallel
-        results = {}
-        if tasks:
-            task_results = await asyncio.gather(
-                *tasks.values(), return_exceptions=True
+        def make_task(dimension: str, attempt: int):
+            agent = agent_classes[dimension](
+                self.inference_client,
+                chat_template=self.chat_template,
             )
-            for dimension, result in zip(tasks.keys(), task_results):
-                if isinstance(result, Exception):
-                    results[dimension] = {
-                        "success": False,
-                        "error": str(result),
-                        "output": None,
-                    }
-                else:
-                    results[dimension] = result
+            agent.attempt = attempt
+            prompt = self.prompt_service.get_active_prompt(dimension)
+            return agent.analyze(
+                dimension=dimension,
+                input_context=input_context,
+                prompt=prompt,
+                analysis_id=analysis_id,
+                db=self.db,
+            )
+
+        async def gather_dimensions(
+            dims: list[str], attempt: int
+        ) -> dict[str, dict[str, Any]]:
+            tasks = {d: make_task(d, attempt) for d in dims if d in agent_classes}
+            gathered: dict[str, dict[str, Any]] = {}
+            if tasks:
+                task_results = await asyncio.gather(
+                    *tasks.values(), return_exceptions=True
+                )
+                for dimension, result in zip(tasks.keys(), task_results):
+                    if isinstance(result, BaseException):
+                        gathered[dimension] = {
+                            "success": False,
+                            "error": str(result),
+                            "output": None,
+                            "parsed_output": None,
+                        }
+                    else:
+                        gathered[dimension] = result
+            return gathered
+
+        results = await gather_dimensions(list(dimensions), attempt=1)
+
+        # One automatic retry for failed dimensions (fail-closed after that).
+        # Both attempts are recorded in analysis_dimensions.
+        failed = [d for d, r in results.items() if not r.get("success")]
+        if failed:
+            logger.warning(
+                f"Retrying failed dimension agents once: {failed}"
+            )
+            retry_results = await gather_dimensions(failed, attempt=2)
+            results.update(retry_results)
 
         return results
 
@@ -457,18 +482,23 @@ class MultiAgentAnalysisService:
         self,
         analysis_id: int,
         dimension_results: dict[str, Any],
+        gate_verdict: GateVerdict | None = None,
     ) -> dict[str, Any]:
         """
-        Run meta-analysis coordinator agent.
+        Run the ADVISORY meta-analysis coordinator agent.
 
-        Feeds all dimension results to meta-analysis agent for final recommendation.
+        Feeds dimension results plus the code-computed gate verdict to the
+        meta agent, which synthesizes reasoning, strengths, concerns, and a
+        priority level. Its output never changes the gate verdict, and a
+        meta-agent failure does not block the analysis.
 
         Args:
             analysis_id: ID of parent analysis
             dimension_results: Results from all dimension agents
+            gate_verdict: The deterministic gate evaluator's verdict
 
         Returns:
-            dict: Meta-analysis result with recommendation
+            dict: Advisory meta-analysis result
         """
         from rediska_core.domain.services.agents.agent_implementations import (
             MetaAnalysisAgent,
@@ -480,13 +510,26 @@ class MultiAgentAnalysisService:
         )
         prompt = self.prompt_service.get_active_prompt(self.META_ANALYSIS_DIMENSION)
 
-        result = await agent.analyze(
-            dimension=self.META_ANALYSIS_DIMENSION,
-            input_context={"dimension_results": dimension_results},
-            prompt=prompt,
-            analysis_id=analysis_id,
-            db=self.db,
-        )
+        input_context: dict[str, Any] = {"dimension_results": dimension_results}
+        if gate_verdict is not None:
+            input_context["gate_verdict"] = gate_verdict.to_dict()
+
+        try:
+            result = await agent.analyze(
+                dimension=self.META_ANALYSIS_DIMENSION,
+                input_context=input_context,
+                prompt=prompt,
+                analysis_id=analysis_id,
+                db=self.db,
+            )
+        except Exception as e:
+            logger.error(f"Advisory meta-analysis failed: {e}")
+            result = {
+                "success": False,
+                "error": str(e),
+                "output": None,
+                "parsed_output": None,
+            }
 
         return result
 
@@ -529,6 +572,13 @@ class MultiAgentAnalysisService:
                 if item.item_type == item_type and item.text_content
             ]
 
+        # Account metadata for the risk_flags agent. `signals_json` is a dict of
+        # provider profile fields when written by AnalysisService, but a list of
+        # signal objects when written by ProfileSummaryService — only the former
+        # carries account metadata.
+        signals = profile_snapshot.signals_json
+        account_signals = signals if isinstance(signals, dict) else {}
+
         # Build context
         context = {
             "lead": {
@@ -541,6 +591,11 @@ class MultiAgentAnalysisService:
                 else None,
             },
             "profile": {
+                "username": account_signals.get("username"),
+                "bio": account_signals.get("bio") or "",
+                "karma": account_signals.get("karma"),
+                "created_at": account_signals.get("created_at"),
+                "is_verified": account_signals.get("is_verified"),
                 "post_text": " ".join(
                     [
                         item.get("text", "")

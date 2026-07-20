@@ -17,6 +17,7 @@ This is the **operator-facing** guide. For day-to-day development, see `CLAUDE.m
 5. [Data Migration from Dev](#5-data-migration-from-dev)
 6. [Troubleshooting](#6-troubleshooting)
 7. [Appendix](#7-appendix)
+8. [Continuous Deployment](#8-continuous-deployment)
 
 ---
 
@@ -435,8 +436,76 @@ Docker's `restart: unless-stopped` policy plus enabling Docker at boot (`sudo sy
 
 ---
 
+## 8. Continuous Deployment
+
+The GitHub Actions workflow at `.github/workflows/deploy.yml` automates the build → push → deploy → smoke-test cycle. On every push to `main`, it builds the three Rediska images, pushes them to GHCR, then SSHes through Tailscale into the prod server and runs `scripts/deploy/update.sh` to roll containers, apply migrations, and run the smoke test.
+
+### 8.1 What the workflow does
+
+| Trigger | Behavior |
+| --- | --- |
+| `push` to `main` (non-doc paths) | Builds + pushes `rediska-{web,core,worker}` images tagged with `<sha>` and `latest`. Then deploys `<sha>` to the prod server. |
+| `push` to `main` (only `openspec/**`, `docs/**`, or `**/*.md`) | Workflow does not run. |
+| `workflow_dispatch` (manual) | Builds + pushes `<sha>` only (does not move `latest`). Deploys the SHA you pick (default: current commit). Optionally skips the smoke test. |
+
+Images live at `ghcr.io/elabz/rediska-{web,core,worker}`. The beat container reuses the worker image.
+
+### 8.2 Required secrets and variables
+
+Configured under **Settings → Secrets and variables → Actions** in the GitHub repo:
+
+| Kind | Name | Purpose |
+| --- | --- | --- |
+| Secret | `TAILSCALE_OAUTH_CLIENT_ID` | OAuth client ID for `tailscale/github-action`. The client must be allowed to mint ephemeral keys for `tag:github-actions`. |
+| Secret | `TAILSCALE_OAUTH_SECRET` | OAuth client secret matching the above. |
+| Secret | `DEPLOY_SSH_KEY` | Private SSH key whose public half is in the prod server's `~/.ssh/authorized_keys` for the deploy user. |
+| Variable | `DEPLOY_HOST` | The prod server's tailnet hostname (e.g., `rediska-prod`). |
+
+A tailnet ACL rule must grant `tag:github-actions` SSH access to the prod server only. The server also needs to be `docker login`'d to GHCR with a PAT scoped to `read:packages` so `docker compose pull` can fetch private images.
+
+See the `github-action-deployment` OpenSpec change (archived) for the full one-time setup checklist (§1 of its tasks.md).
+
+### 8.3 Manual re-deploy
+
+To re-deploy a specific image without pushing a new commit:
+
+1. Go to **Actions → Build and deploy → Run workflow**.
+2. Set **tag** to the commit SHA (or `latest`) you want.
+3. Leave **skip_smoke_test** unchecked unless you have a specific reason.
+4. Click **Run workflow**.
+
+This rebuilds the image for that SHA (cached, fast if previously built) and runs `update.sh <sha>` on the server.
+
+### 8.4 Rollback
+
+There is no auto-rollback on smoke-test failure — the workflow surfaces the failure and stops. To revert:
+
+1. Identify the last known-good SHA (e.g., the previous successful run in the Actions tab, or `git log` on the server: `cd /opt/rediska && git log --oneline -20`).
+2. Trigger **workflow_dispatch** with that SHA as **tag**.
+3. The server checks out that SHA, sets `TAG=<sha>` in `.env`, pulls the matching images (already in GHCR since they were built earlier), restarts containers, and runs migrations.
+
+> ⚠️ Migrations are forward-only by default. If the bad deploy included a migration that's incompatible with the previous code, rolling back the image alone will not undo the schema change. Use Alembic's `downgrade` manually if you need to revert the schema. See `services/core/alembic/` and `CLAUDE.md` → Database Migrations.
+
+### 8.5 What this does NOT do (intentionally)
+
+- Run tests before deploying. Add a separate `ci.yml` if you want PR-blocking tests (noted as a future enhancement in the archived design doc).
+- Auto-rollback. The workflow's job is to report, not decide.
+- Zero-downtime deploys. There's a brief (~30 s) gap during `docker compose up -d` while containers cycle. Acceptable for a single-user system.
+- Deploy on docs-only commits. Path filter excludes `openspec/**`, `docs/**`, `**/*.md`.
+
+### 8.6 Troubleshooting
+
+| Symptom | Likely cause | Where to look |
+| --- | --- | --- |
+| Workflow fails at "Connect to Tailscale" | OAuth client missing or lacks permission for `tag:github-actions` | Tailscale admin → OAuth clients; tailnet ACL |
+| Workflow fails at SSH step | `DEPLOY_SSH_KEY` not authorized on the server, or `DEPLOY_HOST` is wrong | Server's `~/.ssh/authorized_keys`; Actions vars |
+| `docker compose pull` fails on the server | Server not logged into GHCR, or PAT expired | `docker login ghcr.io` on the server; check `~/.docker/config.json` |
+| Smoke test fails after deploy | The new code shipped a regression, or migrations didn't apply cleanly | Workflow logs (the script streams smoke-test output); then [§6 Troubleshooting](#6-troubleshooting) on the server |
+
+---
+
 ## Pointers
 
 - Day-to-day developer commands: `CLAUDE.md` (top-level project guide).
 - Architecture overview: `CLAUDE.md` → "Architecture Patterns".
-- Continuous deployment via GitHub Actions: see the `github-action-deployment` change (when shipped, this section will link to its workflow doc).
+- Continuous deployment via GitHub Actions: [§8 Continuous Deployment](#8-continuous-deployment).

@@ -31,6 +31,15 @@ from typing import Any, Optional, Protocol
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import Provider
+from rediska_core.domain.services.external_listing import (
+    find_registered_host,
+    is_link_only_body,
+    maybe_resolve_post_body,
+)
+
+# Cap on inline listing resolutions per browse request (latency bound;
+# unresolved posts still resolve on save / scout / analysis).
+MAX_INLINE_LISTING_RESOLVES = 10
 
 
 # =============================================================================
@@ -165,6 +174,22 @@ class BrowseService:
                 self._normalize_post(post, provider_id, location)
                 for post in result.get("posts", [])
             ]
+
+            # Link-only posts from supported listing hosts: substitute the
+            # listing's About text so browse cards show real content. Bounded
+            # per request to cap added latency; the resolver caches results.
+            resolve_attempts = 0
+            for normalized in normalized_posts:
+                if resolve_attempts >= MAX_INLINE_LISTING_RESOLVES:
+                    break
+                if not is_link_only_body(
+                    normalized["body_text"], normalized["post_url"]
+                ) or not find_registered_host(normalized["post_url"]):
+                    continue
+                resolve_attempts += 1
+                normalized["body_text"] = maybe_resolve_post_body(
+                    normalized["body_text"], normalized["post_url"]
+                )
 
             return {
                 "posts": normalized_posts,

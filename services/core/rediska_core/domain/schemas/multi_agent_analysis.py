@@ -74,6 +74,10 @@ class DemographicsOutput(BaseModel):
         default=False,
         description="True if location is in our target area (PA, NJ, DE, Philadelphia area)",
     )
+    location_state: Optional[str] = Field(
+        None,
+        description="Offline geocoder classification: 'near', 'far', or 'unclear'",
+    )
     distance_miles: Optional[int] = Field(
         None,
         description="Distance in miles from home location (computed by geocoder)",

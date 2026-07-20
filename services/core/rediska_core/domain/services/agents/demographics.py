@@ -43,7 +43,8 @@ class DemographicsAgent(BaseAnalysisAgent):
         """
         try:
             # Build input prompt
-            input_prompt = self._build_input_prompt(dimension, input_context)
+            agent_input = self._build_agent_input(dimension, input_context)
+            input_prompt = agent_input.prompt
 
             # Configure agent
             config = AgentConfig(
@@ -63,12 +64,12 @@ class DemographicsAgent(BaseAnalysisAgent):
                 try:
                     output = DemographicsOutput(**result["parsed_output"])
 
-                    # Post-process: override location_near with geocoder
-                    if output.location:
-                        geo = classify_location(output.location)
-                        if geo["geocoded"]:
-                            output.location_near = geo["location_near"]
-                            output.distance_miles = geo["distance_miles"]
+                    # Post-process: three-state classification from the offline
+                    # geocoder; location_near kept as derived bool for the UI.
+                    geo = classify_location(output.location)
+                    output.location_state = geo["location_state"]
+                    output.location_near = geo["location_near"]
+                    output.distance_miles = geo["distance_miles"]
 
                     result["parsed_output"] = output.model_dump()
                 except (ValidationError, TypeError):
@@ -80,10 +81,7 @@ class DemographicsAgent(BaseAnalysisAgent):
                 analysis_id=analysis_id,
                 dimension=dimension,
                 prompt_version=prompt.version,
-                input_data={
-                    "lead_body": input_context.get("lead", {}).get("body", "")[:1000],
-                    "profile_summary": input_context.get("profile", {}).get("summary", "")[:1000],
-                },
+                input_data=agent_input.audit_record(),
                 output_data=result.get("parsed_output"),
                 status="completed" if result.get("success") else "failed",
                 error=result.get("error"),

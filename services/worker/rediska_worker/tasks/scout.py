@@ -24,6 +24,16 @@ MAX_PROFILE_POSTS = 20
 MAX_PROFILE_COMMENTS = 100
 
 
+def _should_promote(verdict: dict, min_confidence: float) -> bool:
+    """Auto-promotion rule: only a code-gated `suitable` verdict whose
+    computed score meets the watch threshold creates a lead.
+    `needs_review` / `not_recommended` never auto-promote."""
+    return (
+        verdict.get("recommendation") == "suitable"
+        and float(verdict.get("score") or 0.0) >= min_confidence
+    )
+
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -208,6 +218,7 @@ def run_single_watch(self, watch_id: int) -> dict:
     try:
         db = _get_db_session()
 
+        from rediska_core.domain.services.external_listing import maybe_resolve_post_body
         from rediska_core.domain.services.scout_watch import (
             ScoutWatchService,
             ScoutWatchNotFoundError,
@@ -318,6 +329,13 @@ def run_single_watch(self, watch_id: int) -> dict:
             # Check if already seen
             if service.is_post_seen(watch_id, external_post_id):
                 continue
+
+            # Link-only posts (e.g. weheartbdsm listings) carry their content on
+            # an external page. Resolve it BEFORE the empty-body skip and before
+            # analysis is enqueued, so the pipeline sees the real text.
+            resolved_body = maybe_resolve_post_body(post.body_text, post.url)
+            if resolved_body != post.body_text:
+                post.body_text = resolved_body
 
             # Skip posts with empty body (user may have hidden content)
             if not post.body_text or not post.body_text.strip():
@@ -740,9 +758,13 @@ def analyze_and_decide(
         # STEP 6: Run 6-agent multi-agent analysis
         # =================================================================
         async def run_multi_agent_analysis():
-            """Run the 6-agent analysis pipeline."""
+            """Run the 6-agent analysis pipeline with deterministic gates."""
             from rediska_core.domain.services.multi_agent_analysis import MultiAgentAnalysisService
             from rediska_core.domain.services.agent_prompt import AgentPromptService
+            from rediska_core.domain.services.lead_gates import (
+                UserConstraints,
+                evaluate_gates,
+            )
 
             inference_client = get_inference_client()
 
@@ -819,51 +841,62 @@ def analyze_and_decide(
                     "items_by_type": items_by_type,
                 }
 
-                # Run dimension agents in parallel
+                # Run dimension agents in parallel (failed dimensions retried once)
                 dimension_results = await analysis_service._run_dimension_agents(
                     analysis_id=None,  # No analysis record yet
                     input_context=input_context,
                     dimensions=analysis_service.DIMENSIONS,
                 )
 
-                # Run meta-analysis coordinator
+                failed_dims = [
+                    dim for dim, res in dimension_results.items()
+                    if not res.get("success")
+                ]
+                if failed_dims:
+                    logger.error(
+                        f"Dimension agents failed (after retry): {failed_dims}. "
+                        f"Errors: {[dimension_results[d].get('error', 'unknown') for d in failed_dims]}"
+                    )
+
+                # Deterministic hard gates decide the verdict (fail-closed)
+                verdict = evaluate_gates(
+                    dimension_results, UserConstraints.from_settings()
+                )
+
+                # Run advisory meta-analysis; its failure never blocks the verdict
                 meta_result = await analysis_service._run_meta_analysis(
                     analysis_id=None,
                     dimension_results=dimension_results,
+                    gate_verdict=verdict,
                 )
-
-                # Check if meta-analysis actually succeeded
                 if not meta_result.get("success"):
-                    # Log all dimension failures for debugging
-                    failed_dims = [
-                        dim for dim, res in dimension_results.items()
-                        if not res.get("success")
-                    ]
-                    if failed_dims:
-                        logger.error(
-                            f"Dimension agents failed: {failed_dims}. "
-                            f"Errors: {[dimension_results[d].get('error', 'unknown') for d in failed_dims]}"
-                        )
-                    logger.error(
-                        f"Meta-analysis failed: {meta_result.get('error', 'unknown')}. "
+                    logger.warning(
+                        f"Advisory meta-analysis failed: {meta_result.get('error', 'unknown')}. "
                         f"Raw output: {str(meta_result.get('output', ''))[:500]}"
                     )
 
-                # Normalize here while analysis_service is still in scope
                 meta_output = meta_result.get("parsed_output", {}) or {}
-                normalized = analysis_service._normalize_meta_output(meta_output)
+                advisory = analysis_service._normalize_meta_output(meta_output) if meta_output else {}
 
-                return dimension_results, meta_result, meta_output, normalized
+                gate_summary = verdict.summary()
+                advisory_reasoning = advisory.get("reasoning") or ""
+                reasoning = gate_summary
+                if advisory_reasoning:
+                    reasoning = f"{gate_summary} | Advisory: {advisory_reasoning}"
+
+                return dimension_results, meta_result, meta_output, verdict.to_dict(), reasoning
 
             finally:
                 await inference_client.close()
 
         try:
-            dimension_results, meta_result, meta_output, normalized = asyncio.run(run_multi_agent_analysis())
+            dimension_results, meta_result, meta_output, verdict_dict, reasoning = asyncio.run(
+                run_multi_agent_analysis()
+            )
 
-            recommendation = normalized.get("recommendation", "needs_review")
-            confidence = normalized.get("confidence", 0.5)
-            reasoning = normalized.get("reasoning", "")
+            # Code-computed verdict and score — model output is advisory only
+            recommendation = verdict_dict["recommendation"]
+            confidence = verdict_dict["score"]
 
             logger.info(
                 f"Multi-agent analysis for u/{author_username}: "
@@ -890,20 +923,22 @@ def analyze_and_decide(
         for dim_name, dim_result in dimension_results.items():
             if dim_result.get("parsed_output"):
                 all_dimension_results[dim_name] = dim_result.get("parsed_output")
-        # Add meta-analysis
+        # Add advisory meta-analysis output
         if meta_output:
             all_dimension_results["meta_analysis"] = meta_output
+        # Store per-gate results with the analysis (visible in watch history)
+        all_dimension_results["gate_verdict"] = verdict_dict
 
         # Store dimension results on scout_post (for all posts, suitable or not)
         scout_post.dimension_results_json = all_dimension_results
 
         # =================================================================
-        # STEP 8: Decide - Create lead or not
+        # STEP 8: Decide - Create lead or not (code-gated verdict + score)
         # =================================================================
         lead_id = None
         analysis_id = None
 
-        if recommendation == "suitable" and confidence >= watch.min_confidence:
+        if _should_promote(verdict_dict, watch.min_confidence):
             try:
                 from rediska_core.domain.models import LeadAnalysis, AnalysisDimension
                 from rediska_core.domain.services.agent_prompt import AgentPromptService

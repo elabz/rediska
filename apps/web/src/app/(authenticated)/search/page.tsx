@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import Link from 'next/link';
-import { Loader2, Search, MessageSquare, FileText, User, Filter, X, ExternalLink } from 'lucide-react';
+import { Loader2, Search, MessageSquare, FileText, User, Filter, ExternalLink } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';

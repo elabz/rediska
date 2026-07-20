@@ -358,6 +358,7 @@ export default function BrowsePage() {
               author_username: p.author_username,
               title: p.title,
               body_text: p.body_text,
+              post_url: p.post_url,
               source_location: p.source_location,
               post_created_at: p.post_created_at,
             })),
@@ -435,7 +436,7 @@ export default function BrowsePage() {
         fetch(`/api/core/leads/${savedLead.id}/analyze`, {
           method: 'POST',
           credentials: 'include',
-        }).catch(err => {
+        }).catch(() => {
           // Log but don't fail the save - analysis can be retried manually
           console.log('Background analysis started for lead', savedLead.id);
         });
@@ -834,7 +835,7 @@ export default function BrowsePage() {
                   <div className="text-center">
                     <Filter className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                     <p className="text-muted-foreground">
-                      No results matching "{filterQuery}"
+                      No results matching &quot;{filterQuery}&quot;
                     </p>
                     <Button
                       variant="link"

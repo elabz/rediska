@@ -20,7 +20,7 @@ import {
   CheckCircle2,
   ArrowRight,
 } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 
 import { ScoutWatchList } from './components/ScoutWatchList';

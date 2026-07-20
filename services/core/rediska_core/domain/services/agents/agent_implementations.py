@@ -4,6 +4,7 @@ This module provides all 5 dimension agents + meta-analysis coordinator,
 all following the same pattern as DemographicsAgent.
 """
 
+import json
 from typing import Any
 
 from pydantic import ValidationError
@@ -35,7 +36,8 @@ class PreferencesAgent(BaseAnalysisAgent):
     ) -> dict[str, Any]:
         """Analyze preferences from input context."""
         try:
-            input_prompt = self._build_input_prompt(dimension, input_context)
+            agent_input = self._build_agent_input(dimension, input_context)
+            input_prompt = agent_input.prompt
 
             config = AgentConfig(
                 name="preferences",
@@ -59,7 +61,7 @@ class PreferencesAgent(BaseAnalysisAgent):
                 analysis_id=analysis_id,
                 dimension=dimension,
                 prompt_version=prompt.version,
-                input_data={"profile_text_excerpt": input_context.get("profile", {}).get("post_text", "")[:1000]},
+                input_data=agent_input.audit_record(),
                 output_data=result.get("parsed_output"),
                 status="completed" if result.get("success") else "failed",
                 error=result.get("error"),
@@ -100,7 +102,8 @@ class RelationshipGoalsAgent(BaseAnalysisAgent):
     ) -> dict[str, Any]:
         """Analyze relationship goals from input context."""
         try:
-            input_prompt = self._build_input_prompt(dimension, input_context)
+            agent_input = self._build_agent_input(dimension, input_context)
+            input_prompt = agent_input.prompt
 
             config = AgentConfig(
                 name="relationship_goals",
@@ -124,7 +127,7 @@ class RelationshipGoalsAgent(BaseAnalysisAgent):
                 analysis_id=analysis_id,
                 dimension=dimension,
                 prompt_version=prompt.version,
-                input_data={"lead_title": input_context.get("lead", {}).get("title", "")},
+                input_data=agent_input.audit_record(),
                 output_data=result.get("parsed_output"),
                 status="completed" if result.get("success") else "failed",
                 error=result.get("error"),
@@ -165,7 +168,8 @@ class RiskFlagsAgent(BaseAnalysisAgent):
     ) -> dict[str, Any]:
         """Analyze risk flags from input context."""
         try:
-            input_prompt = self._build_input_prompt(dimension, input_context)
+            agent_input = self._build_agent_input(dimension, input_context)
+            input_prompt = agent_input.prompt
 
             config = AgentConfig(
                 name="risk_flags",
@@ -189,7 +193,7 @@ class RiskFlagsAgent(BaseAnalysisAgent):
                 analysis_id=analysis_id,
                 dimension=dimension,
                 prompt_version=prompt.version,
-                input_data={"full_context": "risk assessment"},
+                input_data=agent_input.audit_record(),
                 output_data=result.get("parsed_output"),
                 status="completed" if result.get("success") else "failed",
                 error=result.get("error"),
@@ -230,7 +234,8 @@ class SexualPreferencesAgent(BaseAnalysisAgent):
     ) -> dict[str, Any]:
         """Analyze sexual preferences from input context."""
         try:
-            input_prompt = self._build_input_prompt(dimension, input_context)
+            agent_input = self._build_agent_input(dimension, input_context)
+            input_prompt = agent_input.prompt
 
             config = AgentConfig(
                 name="sexual_preferences",
@@ -254,7 +259,7 @@ class SexualPreferencesAgent(BaseAnalysisAgent):
                 analysis_id=analysis_id,
                 dimension=dimension,
                 prompt_version=prompt.version,
-                input_data={"lead_body": input_context.get("lead", {}).get("body", "")[:1000]},
+                input_data=agent_input.audit_record(),
                 output_data=result.get("parsed_output"),
                 status="completed" if result.get("success") else "failed",
                 error=result.get("error"),
@@ -283,61 +288,75 @@ class SexualPreferencesAgent(BaseAnalysisAgent):
 
 
 class MetaAnalysisAgent(BaseAnalysisAgent):
-    """Meta-analysis coordinator - synthesizes results into final recommendation."""
+    """Advisory meta-analysis coordinator.
+
+    Synthesizes dimension results and the code-computed gate verdict into
+    reasoning, strengths, concerns, and a priority level. It does NOT decide
+    the final recommendation — that comes from lead_gates.evaluate_gates.
+    """
+
+    @staticmethod
+    def _field(data: dict[str, Any], key: str) -> Any:
+        """Render a field value, or MISSING explicitly — no optimistic defaults."""
+        value = data.get(key)
+        if value is None:
+            return "MISSING"
+        return value
 
     def _format_dimension_results(self, dimension_results: dict[str, Any]) -> str:
         """Format dimension results with clear labels for the LLM.
 
-        Handles None parsed_output from failed dimension agents gracefully.
+        Missing or failed dimensions render their fields as MISSING explicitly.
         """
         sections = []
+        f = self._field
 
         # Demographics
         if "demographics" in dimension_results:
             demo = dimension_results["demographics"].get("parsed_output") or {}
             sections.append(f"""<demographics>
-POST_AUTHOR_AGE: {demo.get('age', 'unknown')}
-POST_AUTHOR_GENDER: {demo.get('gender', 'unknown')}
-POST_AUTHOR_LOCATION: {demo.get('location', 'unknown')}
-POST_AUTHOR_LOCATION_NEAR: {demo.get('location_near', False)}
+POST_AUTHOR_AGE: {f(demo, 'age')}
+POST_AUTHOR_GENDER: {f(demo, 'gender')}
+POST_AUTHOR_LOCATION: {f(demo, 'location')}
+POST_AUTHOR_LOCATION_STATE: {f(demo, 'location_state')}
 </demographics>""")
 
         # Preferences
         if "preferences" in dimension_results:
             prefs = dimension_results["preferences"].get("parsed_output") or {}
             sections.append(f"""<preferences>
-HOBBIES: {prefs.get('hobbies', [])}
-PREFERRED_HOBBIES_FOUND: {prefs.get('preferred_hobbies_found', [])}
-KINKS: {prefs.get('kinks', [])}
-PREFERRED_KINKS_FOUND: {prefs.get('preferred_kinks_found', [])}
-COMPATIBILITY_SCORE: {prefs.get('compatibility_score', 0)}
+HOBBIES: {f(prefs, 'hobbies')}
+PREFERRED_HOBBIES_FOUND: {f(prefs, 'preferred_hobbies_found')}
+KINKS: {f(prefs, 'kinks')}
+PREFERRED_KINKS_FOUND: {f(prefs, 'preferred_kinks_found')}
+COMPATIBILITY_SCORE: {f(prefs, 'compatibility_score')}
 </preferences>""")
 
         # Relationship Goals
         if "relationship_goals" in dimension_results:
             goals = dimension_results["relationship_goals"].get("parsed_output") or {}
             sections.append(f"""<relationship_goals>
-RELATIONSHIP_INTENT: {goals.get('relationship_intent', 'unknown')}
-PARTNER_MAX_AGE: {goals.get('partner_max_age', 'no_max_age')}
-DEAL_BREAKERS: {goals.get('deal_breakers', [])}
+RELATIONSHIP_INTENT: {f(goals, 'relationship_intent')}
+PARTNER_MAX_AGE: {f(goals, 'partner_max_age')}
+DEAL_BREAKERS: {f(goals, 'deal_breakers')}
 </relationship_goals>""")
 
         # Risk Assessment
         if "risk_flags" in dimension_results:
             risk = dimension_results["risk_flags"].get("parsed_output") or {}
             sections.append(f"""<risk_assessment>
-IS_AUTHENTIC: {risk.get('is_authentic', True)}
-ASSESSMENT: {risk.get('assessment', 'unknown')}
-RED_FLAGS: {risk.get('red_flags', [])}
-SCAM_INDICATORS: {risk.get('scam_indicators', [])}
+IS_AUTHENTIC: {f(risk, 'is_authentic')}
+ASSESSMENT: {f(risk, 'assessment')}
+RED_FLAGS: {f(risk, 'red_flags')}
+SCAM_INDICATORS: {f(risk, 'scam_indicators')}
 </risk_assessment>""")
 
         # Intimacy & Compatibility
         if "sexual_preferences" in dimension_results:
             intimate = dimension_results["sexual_preferences"].get("parsed_output") or {}
             sections.append(f"""<intimacy>
-POST_AUTHOR_DS_ORIENTATION: {intimate.get('ds_orientation', 'unknown')}
-KINKS_INTERESTS: {intimate.get('kinks_interests', [])}
+POST_AUTHOR_DS_ORIENTATION: {f(intimate, 'ds_orientation')}
+KINKS_INTERESTS: {f(intimate, 'kinks_interests')}
 </intimacy>""")
 
         return "\n\n".join(sections)
@@ -352,15 +371,25 @@ KINKS_INTERESTS: {intimate.get('kinks_interests', [])}
     ) -> dict[str, Any]:
         """Run meta-analysis on dimension results."""
         try:
-            # Build meta-analysis prompt with dimension results
+            # Build advisory prompt with dimension results + gate verdict
             dimension_results = input_context.get("dimension_results", {})
             formatted_results = self._format_dimension_results(dimension_results)
 
-            input_prompt = f"""Analyze this POST AUTHOR and decide if they are a suitable match:
+            gate_verdict = input_context.get("gate_verdict") or {}
+            verdict_section = ""
+            if gate_verdict:
+                verdict_section = f"""
 
-{formatted_results}
+<gate_verdict>
+{json.dumps(gate_verdict, indent=2, default=str)}
+</gate_verdict>"""
 
-Apply the decision rules and output your recommendation as JSON."""
+            input_prompt = f"""Review this POST AUTHOR analysis:
+
+{formatted_results}{verdict_section}
+
+The final recommendation was already decided deterministically (see gate_verdict).
+Provide your advisory synthesis as JSON: reasoning, strengths, concerns, priority_level."""
 
             config = AgentConfig(
                 name="meta_analysis",

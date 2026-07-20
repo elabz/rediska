@@ -250,7 +250,6 @@ function JobsPanel() {
   const [counts, setCounts] = useState<JobCounts | null>(null);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState<number | null>(null);
   const [deletingMessage, setDeletingMessage] = useState<string | null>(null);
 
   const fetchJobs = useCallback(async () => {
@@ -286,7 +285,6 @@ function JobsPanel() {
   }, [fetchJobs]);
 
   const handleRetry = async (jobId: number) => {
-    setRetrying(jobId);
     try {
       const response = await fetch(`/api/core/ops/jobs/${jobId}/retry`, {
         method: 'POST',
@@ -298,8 +296,6 @@ function JobsPanel() {
       }
     } catch (err) {
       console.error('Failed to retry job:', err);
-    } finally {
-      setRetrying(null);
     }
   };
 
