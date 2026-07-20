@@ -53,6 +53,20 @@ services:
       - PROVIDER_RATE_CONCURRENCY_DEFAULT=${PROVIDER_RATE_CONCURRENCY_DEFAULT}
       - PROVIDER_RATE_BURST_FACTOR=${PROVIDER_RATE_BURST_FACTOR}
 
+      # Offline geocoding for the location gate (near/far/unclear)
+      - HOME_LATITUDE=${HOME_LATITUDE:-40.0}
+      - HOME_LONGITUDE=${HOME_LONGITUDE:--75.2}
+      - LOCATION_NEAR_THRESHOLD_MILES=${LOCATION_NEAR_THRESHOLD_MILES:-200}
+
+      # User constraints consumed by the deterministic lead gates
+      - USER_AGE=${USER_AGE:-45}
+      - USER_DS_ORIENTATION=${USER_DS_ORIENTATION:-dominant}
+
+      # Per-dimension agent input budgets
+      - ANALYSIS_CONTEXT_MAX_CHARS=${ANALYSIS_CONTEXT_MAX_CHARS:-24000}
+      - ANALYSIS_MAX_RECENT_POSTS=${ANALYSIS_MAX_RECENT_POSTS:-10}
+      - ANALYSIS_POST_ITEM_CHARS=${ANALYSIS_POST_ITEM_CHARS:-800}
+
       - CELERY_BROKER_URL=${CELERY_BROKER_URL}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
     volumes:
@@ -109,6 +123,20 @@ services:
       - PROVIDER_RATE_QPM_DEFAULT=${PROVIDER_RATE_QPM_DEFAULT}
       - PROVIDER_RATE_CONCURRENCY_DEFAULT=${PROVIDER_RATE_CONCURRENCY_DEFAULT}
       - PROVIDER_RATE_BURST_FACTOR=${PROVIDER_RATE_BURST_FACTOR}
+
+      # Offline geocoding for the location gate (near/far/unclear)
+      - HOME_LATITUDE=${HOME_LATITUDE:-40.0}
+      - HOME_LONGITUDE=${HOME_LONGITUDE:--75.2}
+      - LOCATION_NEAR_THRESHOLD_MILES=${LOCATION_NEAR_THRESHOLD_MILES:-200}
+
+      # User constraints consumed by the deterministic lead gates
+      - USER_AGE=${USER_AGE:-45}
+      - USER_DS_ORIENTATION=${USER_DS_ORIENTATION:-dominant}
+
+      # Per-dimension agent input budgets
+      - ANALYSIS_CONTEXT_MAX_CHARS=${ANALYSIS_CONTEXT_MAX_CHARS:-24000}
+      - ANALYSIS_MAX_RECENT_POSTS=${ANALYSIS_MAX_RECENT_POSTS:-10}
+      - ANALYSIS_POST_ITEM_CHARS=${ANALYSIS_POST_ITEM_CHARS:-800}
     volumes:
       - ${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}:${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}
       - ${BACKUPS_PATH:-/var/lib/rediska/backups}:${BACKUPS_PATH:-/var/lib/rediska/backups}
