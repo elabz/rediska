@@ -86,7 +86,9 @@ class ListingData:
         if self.online_only:
             mode = "online only"
         elif self.meet_type:
-            mode = self.meet_type.replace("_", " ")
+            mode = {"in_person": "in person", "online": "online",
+                    "both": "in person or online"}.get(
+                self.meet_type, self.meet_type.replace("_", " "))
         if place and mode:
             return f"{place} ({mode})"
         return place or (f"({mode})" if mode else None)

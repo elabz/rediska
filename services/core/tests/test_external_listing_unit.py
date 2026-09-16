@@ -140,6 +140,9 @@ class TestWeheartbdsmParser:
 
         assert ListingData(body="just text").as_text() == "just text"
         assert ListingData(body="t", online_only=True).details_block().endswith("Location: (online only)")
+        assert ListingData(body="t", country="United States", meet_type="both").location_line() == (
+            "United States (in person or online)"
+        )
 
     def test_falls_back_to_json_ld_description(self):
         html = (
