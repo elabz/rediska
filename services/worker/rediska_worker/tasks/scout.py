@@ -538,6 +538,21 @@ def analyze_and_decide(
             f"by u/{author_username}"
         )
 
+        # Enrich from a registered external listing (e.g. weheartbdsm.com) no
+        # matter which caller built post_data: run_single_watch resolves
+        # already (cache hit here), but reanalyze_post rebuilds post_data from
+        # a raw Reddit fetch and used to skip it, so the structured listing
+        # facts never reached the agents on re-analysis. No-op for other hosts.
+        from rediska_core.domain.services.external_listing import maybe_resolve_post_body
+
+        enriched_body = maybe_resolve_post_body(
+            post_data.get("body_text"), post_data.get("post_url")
+        )
+        if enriched_body != post_data.get("body_text"):
+            post_data["body_text"] = enriched_body
+            scout_post.post_body = enriched_body
+            db.commit()
+
         # =================================================================
         # STEP 0: Standing-verdict gate (before any provider or LLM call)
         # =================================================================

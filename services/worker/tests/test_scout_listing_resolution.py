@@ -96,9 +96,12 @@ def test_link_only_post_is_resolved_before_record_and_analysis():
     assert result["status"] == "success"
     mock_resolve.assert_called_once_with("", LISTING_URL)
 
-    # record_post persisted the RESOLVED body (not the empty link-only one)
+    # record_post persisted the RESOLVED body (not the empty link-only one),
+    # and receives the URL so its own defensive resolution can run for callers
+    # that did not pre-resolve.
     record_kwargs = service.record_post.call_args.kwargs
     assert record_kwargs["post_body"] == RESOLVED_TEXT
+    assert record_kwargs["post_url"] == LISTING_URL
 
     # analyze_and_decide was enqueued with the resolved body in post_data
     assert mock_delay.call_count == 1
@@ -128,3 +131,62 @@ def test_post_with_real_body_is_not_altered():
     assert result["status"] == "success"
     record_kwargs = service.record_post.call_args.kwargs
     assert record_kwargs["post_body"] == "Real reddit content"
+
+
+def test_analyze_and_decide_enriches_body_from_listing(monkeypatch):
+    """Re-analysis rebuilds post_data from Reddit; the task must resolve itself."""
+    import rediska_worker.tasks.scout as scout_module
+
+    seen = {}
+
+    def fake_resolve(body, url):
+        seen["args"] = (body, url)
+        return "[Listing details from weheartbdsm.com]\nLocation: Testville, PA (in person)\n\n" + (body or "")
+
+    monkeypatch.setattr(
+        "rediska_core.domain.services.external_listing.maybe_resolve_post_body", fake_resolve
+    )
+
+    class FakePost:
+        post_body = "pasted on reddit"
+
+    class FakeQuery:
+        def __init__(self, obj): self.obj = obj
+        def filter(self, *a, **k): return self
+        def first(self): return self.obj
+
+    class FakeDB:
+        def __init__(self): self.commits = 0; self.post = FakePost()
+        def query(self, model): return FakeQuery(self.post)
+        def commit(self): self.commits += 1
+        def close(self): pass
+
+    db = FakeDB()
+    monkeypatch.setattr(scout_module, "_get_db_session", lambda: db)
+
+    class StopHere(Exception):
+        pass
+
+    # Stop right after enrichment: the first provider/LLM-side call is the
+    # standing-verdict gate, which we make raise.
+    monkeypatch.setattr(
+        "rediska_core.domain.services.scout_watch.ScoutWatchService.check_author_verdict",
+        lambda *a, **k: (_ for _ in ()).throw(StopHere()),
+    )
+
+    post_data = {
+        "external_post_id": "abc", "author_username": "test_user",
+        "post_url": "https://weheartbdsm.com/listings/1?from=reddit",
+        "body_text": "pasted on reddit",
+    }
+    try:
+        scout_module.analyze_and_decide.run(watch_id=1, scout_post_id=1, post_data=post_data)
+    except StopHere:
+        pass
+    except Exception:
+        pass  # any later failure is fine; we only assert the enrichment step
+
+    assert seen["args"] == ("pasted on reddit", "https://weheartbdsm.com/listings/1?from=reddit")
+    assert post_data["body_text"].startswith("[Listing details from weheartbdsm.com]")
+    assert db.post.post_body == post_data["body_text"]
+    assert db.commits >= 1
