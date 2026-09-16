@@ -27,36 +27,158 @@ logger = logging.getLogger(__name__)
 def _repair_json(json_str: str) -> str:
     """Attempt to repair common JSON issues from LLM output.
 
-    Fixes:
+    Fixes, in order, each followed by a parse attempt:
     - Trailing commas before } or ]
-    - Single quotes used instead of double quotes (only in simple cases)
-    - Unescaped newlines inside string values
+    - A character-level pass that (a) escapes literal newlines/tabs inside
+      strings, (b) escapes unescaped double quotes inside strings when the
+      quote is not followed by a structural character, and (c) turns a bare
+      string sitting where an object key is expected (``{"a": 1, "loose"}``)
+      into ``"loose": true`` — models regularly emit a list of criteria inside
+      ``{}`` instead of ``[]``, which used to fail the whole dimension.
+    - Truncated output: close any open strings/containers so a cut-off
+      response still yields the fields that were completed.
+
+    Returns the original string when nothing parses, so the caller's error
+    message points at the model output rather than at a half-repair.
     """
-    # Remove trailing commas before } or ]
+    candidates = []
+
     repaired = re.sub(r',\s*([\]}])', r'\1', json_str)
+    candidates.append(repaired)
 
-    # Try parsing as-is first
-    try:
-        json.loads(repaired)
-        return repaired
-    except json.JSONDecodeError:
-        pass
+    walked = _walk_repair(repaired)
+    walked = re.sub(r',\s*([\]}])', r'\1', walked)
+    candidates.append(walked)
 
-    # Try fixing unescaped control characters in string values
-    # Replace literal newlines/tabs inside strings with escaped versions
-    # This is a best-effort approach
-    repaired = re.sub(r'(?<=": ")(.*?)(?="[,\}])', _escape_string_value, repaired, flags=re.DOTALL)
+    # Truncated output: terminate the open string/containers *before* the
+    # walk so a cut-off bare member still receives its ``: true`` value.
+    closed = _walk_repair(_close_truncated(repaired))
+    closed = re.sub(r',\s*([\]}])', r'\1', closed)
+    candidates.append(closed)
 
-    return repaired
+    for candidate in candidates:
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            continue
+    return json_str
 
 
-def _escape_string_value(match: re.Match) -> str:
-    """Escape control characters in a JSON string value."""
-    val = match.group(0)
-    val = val.replace('\n', '\\n')
-    val = val.replace('\t', '\\t')
-    val = val.replace('\r', '\\r')
-    return val
+_STRUCTURAL_AFTER_STRING = set(',}]:')
+
+
+def _walk_repair(text: str) -> str:
+    """Character-level repair of strings and bare object members (see _repair_json)."""
+    out: list[str] = []
+    stack: list[str] = []  # '{' or '['
+    # Per-object flag: are we currently expecting a key (True) or a value (False)?
+    expect_key: list[bool] = []
+    in_string = False
+    escape = False
+    string_start_out = -1
+    i = 0
+    n = len(text)
+
+    def _next_significant(pos: int) -> str:
+        while pos < n and text[pos] in ' \t\r\n':
+            pos += 1
+        return text[pos] if pos < n else ''
+
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                out.append(ch)
+                escape = False
+            elif ch == '\\':
+                out.append(ch)
+                escape = True
+            elif ch == '\n':
+                out.append('\\n')
+            elif ch == '\t':
+                out.append('\\t')
+            elif ch == '\r':
+                out.append('\\r')
+            elif ch == '"':
+                following = _next_significant(i + 1)
+                if following in _STRUCTURAL_AFTER_STRING or following == '':
+                    # Closing quote. If this string is an object key position
+                    # and no ':' follows, it is a bare member -> give it a value.
+                    out.append(ch)
+                    in_string = False
+                    if stack and stack[-1] == '{' and expect_key[-1] and following != ':':
+                        out.append(': true')
+                        expect_key[-1] = False
+                else:
+                    out.append('\\"')
+            else:
+                out.append(ch)
+            i += 1
+            continue
+
+        if ch == '"':
+            in_string = True
+            string_start_out = len(out)
+            out.append(ch)
+        elif ch == '{':
+            stack.append('{')
+            expect_key.append(True)
+            out.append(ch)
+        elif ch == '[':
+            stack.append('[')
+            expect_key.append(False)
+            out.append(ch)
+        elif ch in '}]':
+            if stack:
+                stack.pop()
+                expect_key.pop()
+            out.append(ch)
+        elif ch == ':':
+            if stack and stack[-1] == '{':
+                expect_key[-1] = False
+            out.append(ch)
+        elif ch == ',':
+            if stack and stack[-1] == '{':
+                expect_key[-1] = True
+            out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+
+    del string_start_out
+    return ''.join(out)
+
+
+def _close_truncated(text: str) -> str:
+    """Close an unterminated string and any open containers."""
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in '{[':
+            stack.append(ch)
+        elif ch in '}]' and stack:
+            stack.pop()
+    result = text
+    if in_string:
+        result += '"'
+    # Drop a dangling key/comma before closing (e.g. `"key":` or `,`)
+    result = re.sub(r'(,|:\s*|"[^"]*"\s*:\s*)$', '', result.rstrip())
+    result = re.sub(r',\s*$', '', result)
+    for opener in reversed(stack):
+        result += '}' if opener == '{' else ']'
+    return result
 
 
 @dataclass

@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import { DimensionCard } from './DimensionCard';
 import { RecommendationCard } from './RecommendationCard';
 import { AnalysisHistory } from './AnalysisHistory';
+import type { EffectiveEvaluation } from '@/lib/evaluations';
 
 // Types matching backend schemas
 interface DimensionAnalysisResult {
@@ -30,6 +31,7 @@ interface DimensionAnalysisResult {
   model_info: Record<string, unknown> | null;
   started_at: string;
   completed_at: string | null;
+  evaluation?: EffectiveEvaluation | null;
 }
 
 interface MultiAgentAnalysis {
@@ -50,6 +52,7 @@ interface MultiAgentAnalysis {
   meta_analysis: Record<string, unknown> | null;
   prompt_versions: Record<string, number>;
   model_info: Record<string, unknown> | null;
+  evaluation?: EffectiveEvaluation | null;
 }
 
 interface LeadAnalysisPanelProps {
@@ -139,6 +142,20 @@ export function LeadAnalysisPanel({
   useEffect(() => {
     fetchAnalysis();
   }, [fetchAnalysis]);
+
+  // Update evaluated state in place (no reload) after the dialog saves.
+  const handleFinalEvaluated = (saved: EffectiveEvaluation) => {
+    setAnalysis((prev) => (prev ? { ...prev, evaluation: saved } : prev));
+  };
+  const handleDimensionEvaluated = (dimension: string, saved: EffectiveEvaluation) => {
+    setAnalysis((prev) => {
+      if (!prev) return prev;
+      const key = dimension as keyof MultiAgentAnalysis;
+      const current = prev[key] as DimensionAnalysisResult | null;
+      if (!current) return prev;
+      return { ...prev, [key]: { ...current, evaluation: saved } };
+    });
+  };
 
   const runAnalysis = async () => {
     setAnalyzing(true);
@@ -353,6 +370,9 @@ export function LeadAnalysisPanel({
           currentStatus={currentStatus}
           onStatusChange={onStatusChange}
           onInitiateContact={onInitiateContact}
+          analysisId={analysis.id}
+          evaluation={analysis.evaluation ?? null}
+          onEvaluated={handleFinalEvaluated}
         />
       )}
 
@@ -362,30 +382,40 @@ export function LeadAnalysisPanel({
           <DimensionCard
             dimension="demographics"
             result={analysis.demographics}
+            analysisId={analysis.id}
+            onEvaluated={handleDimensionEvaluated}
           />
         )}
         {analysis?.preferences && (
           <DimensionCard
             dimension="preferences"
             result={analysis.preferences}
+            analysisId={analysis.id}
+            onEvaluated={handleDimensionEvaluated}
           />
         )}
         {analysis?.relationship_goals && (
           <DimensionCard
             dimension="relationship_goals"
             result={analysis.relationship_goals}
+            analysisId={analysis.id}
+            onEvaluated={handleDimensionEvaluated}
           />
         )}
         {analysis?.risk_flags && (
           <DimensionCard
             dimension="risk_flags"
             result={analysis.risk_flags}
+            analysisId={analysis.id}
+            onEvaluated={handleDimensionEvaluated}
           />
         )}
         {analysis?.sexual_preferences && (
           <DimensionCard
             dimension="sexual_preferences"
             result={analysis.sexual_preferences}
+            analysisId={analysis.id}
+            onEvaluated={handleDimensionEvaluated}
           />
         )}
       </div>

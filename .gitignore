@@ -78,3 +78,6 @@ docker-compose.override.yml
 *.bak
 *.tmp
 .cache/
+
+# Python build dirs above must not swallow the web app source
+!apps/web/src/lib/

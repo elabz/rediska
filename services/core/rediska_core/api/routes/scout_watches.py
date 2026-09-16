@@ -492,6 +492,10 @@ async def get_run_detail(
 
             post_responses.append(post_data)
 
+        from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
+
+        AnalysisEvaluationService(db).attach_to_scout_posts(post_responses)
+
         return ScoutWatchRunDetailResponse(
             run=ScoutWatchRunResponse.model_validate(run),
             posts=post_responses,
@@ -663,7 +667,7 @@ async def add_post_to_leads(
             "external_post_id": post.external_post_id,
             "post_url": f"https://reddit.com/comments/{post.external_post_id}",
             "title": post.post_title,
-            "body_text": None,  # Not stored on scout watch post
+            "body_text": post.post_body,  # stored since migration 013; None on older posts
             "post_created_at": post.first_seen_at,
             "author_username": post.post_author,
         }

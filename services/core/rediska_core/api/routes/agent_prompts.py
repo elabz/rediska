@@ -16,10 +16,19 @@ from rediska_core.api.schemas.agent_prompts import (
     RollbackPromptRequest,
     UpdateAgentPromptRequest,
 )
+from rediska_core.api.schemas.evaluations import (
+    ReplayCaseResult,
+    ReplayCreate,
+    ReplayListResponse,
+    ReplayResponse,
+)
+from rediska_core.config import get_settings
 from rediska_core.domain.schemas.multi_agent_analysis import AgentPrompt
 from rediska_core.domain.services.agent_prompt import AgentPromptService
+from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
+from rediska_core.domain.services.prompt_replay import ReplayError, create_replay
 from rediska_core.api.deps import CurrentUser, get_db
-from rediska_core.domain.models import AuditLog
+from rediska_core.domain.models import AuditLog, Job, PromptReplay
 
 router = APIRouter(prefix="/agent-prompts", tags=["agent-prompts"])
 
@@ -138,6 +147,7 @@ async def list_prompt_versions(
 
     try:
         versions = prompt_service.list_prompt_versions(dimension)
+        metrics = AnalysisEvaluationService(db).prompt_version_metrics(dimension)
 
         versions_response = [
             AgentPromptResponse(
@@ -152,6 +162,8 @@ async def list_prompt_versions(
                 created_at=v.created_at.isoformat(),
                 created_by=v.created_by,
                 notes=v.notes,
+                evaluations=metrics[v.version].evaluations if v.version in metrics else 0,
+                agreement=metrics[v.version].agreement if v.version in metrics else None,
             )
             for v in versions
         ]
@@ -319,3 +331,216 @@ async def rollback_agent_prompt(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to rollback prompt: {str(e)}",
         )
+
+
+# =============================================================================
+# PROMPT REPLAY (analysis-evaluation)
+# =============================================================================
+
+
+def _replay_response(replay: PromptReplay, include_prompt: bool = False) -> ReplayResponse:
+    results = [
+        ReplayCaseResult(**{k: v for k, v in r.items() if k in ReplayCaseResult.model_fields})
+        for r in (replay.results_json or [])
+        if isinstance(r, dict)
+    ]
+    return ReplayResponse(
+        id=replay.id,
+        dimension=replay.dimension,
+        candidate_version=replay.candidate_version,
+        candidate_system_prompt=replay.candidate_system_prompt if include_prompt else None,
+        status=replay.status,
+        case_count=replay.case_count,
+        completed_count=replay.completed_count,
+        agreed_count=replay.agreed_count,
+        skipped_no_input=replay.skipped_no_input,
+        agreement=replay.agreement,
+        results=results,
+        error=replay.error,
+        created_at=replay.created_at,
+        started_at=replay.started_at,
+        finished_at=replay.finished_at,
+    )
+
+
+def _enqueue_replay(replay_id: int) -> None:
+    """Send the replay task to the multi_agent_analysis queue."""
+    from celery import Celery
+
+    settings = get_settings()
+    celery_app = Celery("rediska_core", broker=settings.celery_broker_url)
+    celery_app.send_task(
+        "evaluation.replay_prompt",
+        args=[replay_id],
+        queue="multi_agent_analysis",
+    )
+
+
+@router.post(
+    "/{dimension}/replay",
+    response_model=ReplayResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_replay(
+    dimension: str,
+    request: ReplayCreate,
+    current_user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+) -> ReplayResponse:
+    """Replay a draft or existing prompt version against labelled cases.
+
+    Rejected when the dimension has no labelled cases or a replay is already
+    running. Never changes the active prompt version.
+    """
+    if dimension not in VALID_DIMENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid dimension: {dimension}",
+        )
+
+    settings = get_settings()
+    cap = settings.evaluation_replay_max_cases
+    max_cases = min(request.max_cases, cap) if request.max_cases else cap
+
+    try:
+        replay = create_replay(
+            db,
+            dimension=dimension,
+            system_prompt=request.system_prompt,
+            version=request.version,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            max_cases=max_cases,
+        )
+    except ReplayError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+    # Job ledger row (idempotency + cancellation), keyed on the replay id.
+    job = Job(
+        queue_name="multi_agent_analysis",
+        job_type="evaluation.replay_prompt",
+        payload_json={"replay_id": replay.id, "dimension": dimension},
+        dedupe_key=f"evaluation.replay_prompt:{replay.id}",
+        status="queued",
+        max_attempts=1,
+    )
+    db.add(job)
+
+    db.add(
+        AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="prompt.replay",
+            entity_type="prompt_replay",
+            entity_id=replay.id,
+            request_json={
+                "dimension": dimension,
+                "version": request.version,
+                "draft": request.version is None,
+                "max_cases": max_cases,
+            },
+            response_json={"replay_id": replay.id, "case_count": replay.case_count},
+            result="ok",
+        )
+    )
+    db.commit()
+
+    try:
+        _enqueue_replay(replay.id)
+    except Exception as e:  # pragma: no cover - broker down
+        replay.status = "failed"
+        replay.error = f"Failed to enqueue replay: {e}"
+        job.status = "failed"
+        job.last_error = replay.error
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=replay.error,
+        )
+
+    return _replay_response(replay)
+
+
+@router.get("/{dimension}/replays", response_model=ReplayListResponse)
+async def list_replays(
+    dimension: str,
+    current_user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = 20,
+) -> ReplayListResponse:
+    """Replay history for a dimension, newest first (per-case rows omitted)."""
+    if dimension not in VALID_DIMENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid dimension: {dimension}",
+        )
+    rows = (
+        db.query(PromptReplay)
+        .filter(PromptReplay.dimension == dimension)
+        .order_by(PromptReplay.created_at.desc(), PromptReplay.id.desc())
+        .limit(max(1, min(limit, 100)))
+        .all()
+    )
+    replays = []
+    for r in rows:
+        resp = _replay_response(r)
+        resp.results = []
+        replays.append(resp)
+    return ReplayListResponse(dimension=dimension, replays=replays)
+
+
+@router.get("/{dimension}/replays/{replay_id}", response_model=ReplayResponse)
+async def get_replay(
+    dimension: str,
+    replay_id: int,
+    current_user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+) -> ReplayResponse:
+    """One replay with status, progress, aggregate, and per-case rows."""
+    replay = db.query(PromptReplay).filter(PromptReplay.id == replay_id).first()
+    if not replay or replay.dimension != dimension:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Replay not found: {replay_id}",
+        )
+    return _replay_response(replay, include_prompt=True)
+
+
+@router.post("/{dimension}/replays/{replay_id}/cancel", response_model=ReplayResponse)
+async def cancel_replay(
+    dimension: str,
+    replay_id: int,
+    current_user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+) -> ReplayResponse:
+    """Cancel a queued or running replay (the worker stops between cases)."""
+    replay = db.query(PromptReplay).filter(PromptReplay.id == replay_id).first()
+    if not replay or replay.dimension != dimension:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Replay not found: {replay_id}",
+        )
+    if replay.status in ("queued", "running"):
+        replay.status = "cancelled"
+        replay.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        job = (
+            db.query(Job)
+            .filter(Job.dedupe_key == f"evaluation.replay_prompt:{replay.id}")
+            .first()
+        )
+        if job and job.status in ("queued", "running"):
+            job.status = "cancelled"
+        db.add(
+            AuditLog(
+                ts=datetime.now(timezone.utc),
+                actor="user",
+                action_type="prompt.replay_cancel",
+                entity_type="prompt_replay",
+                entity_id=replay.id,
+                request_json={"dimension": dimension},
+                response_json={"status": replay.status},
+                result="ok",
+            )
+        )
+        db.commit()
+    return _replay_response(replay)

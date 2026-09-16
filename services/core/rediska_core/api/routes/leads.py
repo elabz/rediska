@@ -821,7 +821,14 @@ async def get_lead_analysis(
             detail="Analysis not found",
         )
 
-    return _build_analysis_response(analysis)
+    return _with_evaluations(db, _build_analysis_response(analysis))
+
+
+def _with_evaluations(db: Session, response):
+    """Attach effective human evaluations (final + per dimension)."""
+    from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
+
+    return AnalysisEvaluationService(db).attach_to_analysis_response(response)
 
 
 def _build_analysis_response(analysis) -> MultiAgentAnalysisResponse:
@@ -842,6 +849,8 @@ def _build_analysis_response(analysis) -> MultiAgentAnalysisResponse:
         if not dim_record or not dim_record.output_json:
             return None
 
+        from rediska_core.domain.services.analysis_evaluation import model_input_from_row
+
         return DimensionAnalysisResult(
             dimension=dimension_name,
             status=dim_record.status or "completed",
@@ -850,6 +859,7 @@ def _build_analysis_response(analysis) -> MultiAgentAnalysisResponse:
             model_info=dim_record.model_info_json,
             started_at=dim_record.started_at.isoformat() if dim_record.started_at else analysis.started_at.isoformat(),
             completed_at=dim_record.completed_at.isoformat() if dim_record.completed_at else None,
+            model_input=model_input_from_row(dim_record),
         )
 
     # Get dimension records from the relationship
@@ -916,7 +926,9 @@ async def get_lead_analysis_history(
         .all()
     )
 
-    return [
+    from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
+
+    summaries = [
         MultiAgentAnalysisSummary(
             id=analysis.id,
             lead_id=analysis.lead_id,
@@ -930,6 +942,7 @@ async def get_lead_analysis_history(
         )
         for analysis in analyses
     ]
+    return AnalysisEvaluationService(db).attach_to_analysis_summaries(summaries)
 
 
 @router.get("/{lead_id}/analysis/{analysis_id}", response_model=MultiAgentAnalysisResponse)
@@ -981,4 +994,4 @@ async def get_lead_analysis_by_id(
             detail=f"Analysis not found: {analysis_id}",
         )
 
-    return _build_analysis_response(analysis)
+    return _with_evaluations(db, _build_analysis_response(analysis))

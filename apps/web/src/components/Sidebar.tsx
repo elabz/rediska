@@ -18,6 +18,7 @@ import {
   Sparkles,
   Brain,
   Eye,
+  ClipboardCheck,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -63,6 +64,7 @@ const NAV_SECTIONS: NavSection[] = [
     items: [
       { label: 'Browse', href: '/browse', icon: Globe },
       { label: 'Directories', href: '/directories', icon: FolderOpen },
+      { label: 'Evaluations', href: '/evaluations', icon: ClipboardCheck },
     ],
   },
   {

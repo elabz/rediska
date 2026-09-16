@@ -88,8 +88,15 @@ class AssembledInput:
     total_chars: int = 0
 
     def audit_record(self) -> dict[str, Any]:
-        """Audit payload for ``analysis_dimensions.input_data_json``."""
+        """Audit payload for ``analysis_dimensions.input_data_json``.
+
+        The full ``prompt`` is kept so a labelled case can be replayed against a
+        candidate prompt with exactly the input the judged output was produced
+        from (see analysis-evaluation). ``prompt_excerpt`` is retained for
+        callers that only need a preview.
+        """
         return {
+            "prompt": self.prompt,
             "prompt_excerpt": self.prompt[:2000],
             "sections": self.sections,
             "total_chars": self.total_chars,
@@ -116,6 +123,10 @@ class BaseAnalysisAgent(ABC):
         # Execution attempt number (1 = first run, 2 = automatic retry);
         # recorded in analysis_dimensions.input_data_json.
         self.attempt = 1
+        # When set, the agent sends exactly this text instead of assembling
+        # input from the context. Used by prompt replay to re-run a labelled
+        # case on its stored model input.
+        self.input_prompt_override: str | None = None
 
     @abstractmethod
     async def analyze(
@@ -276,6 +287,12 @@ class BaseAnalysisAgent(ABC):
         Returns:
             AssembledInput: prompt plus the sections/size actually sent
         """
+        if self.input_prompt_override is not None:
+            override = self.input_prompt_override
+            return AssembledInput(
+                prompt=override, sections=["stored_input"], total_chars=len(override)
+            )
+
         settings = get_settings()
         spec = DIMENSION_CONTEXT_SPECS.get(dimension, DEFAULT_CONTEXT_SPEC)
 
@@ -385,6 +402,7 @@ class BaseAnalysisAgent(ABC):
         status: str,
         error: str | None,
         db: Session | None,
+        raw_response: str | None = None,
     ) -> None:
         """
         Store dimension analysis result in database.
@@ -413,6 +431,9 @@ class BaseAnalysisAgent(ABC):
             status=status,
             input_data_json={**input_data, "attempt": self.attempt},
             output_json=output_data,
+            # Kept on failures so unparseable output can be diagnosed and
+            # evaluated (`unparseable_output` tag) without re-running the model.
+            raw_response=(raw_response[:20000] if raw_response and status != "completed" else None),
             prompt_version=prompt_version,
             error_detail=error,
         )

@@ -29,6 +29,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
+import { formatAgreement } from '@/lib/evaluations';
 
 interface PromptVersion {
   id: number;
@@ -40,6 +41,16 @@ interface PromptVersion {
   created_at: string;
   created_by: string;
   notes: string | null;
+  /** Human-evaluation metrics for outputs produced under this version. */
+  evaluations?: number;
+  agreement?: number | null;
+}
+
+function agreementClass(value: number | null | undefined): string {
+  if (value === null || value === undefined) return 'text-muted-foreground';
+  if (value >= 0.8) return 'text-emerald-600 dark:text-emerald-400';
+  if (value >= 0.6) return 'text-amber-600 dark:text-amber-400';
+  return 'text-red-600 dark:text-red-400';
 }
 
 interface VersionHistoryProps {
@@ -210,6 +221,22 @@ export function VersionHistory({ dimension, currentVersion, onRollback }: Versio
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
+                        <span
+                          className="text-xs whitespace-nowrap"
+                          title="Human evaluations of outputs produced under this version"
+                          data-testid={`version-metrics-${version.version}`}
+                        >
+                          {version.evaluations ? (
+                            <>
+                              <span className={cn('font-semibold', agreementClass(version.agreement))}>
+                                {formatAgreement(version.agreement)}
+                              </span>
+                              <span className="text-muted-foreground"> · {version.evaluations} eval{version.evaluations === 1 ? '' : 's'}</span>
+                            </>
+                          ) : (
+                            <span className="text-muted-foreground">no evals</span>
+                          )}
+                        </span>
                         {!isCurrent && (
                           <Button
                             variant="ghost"

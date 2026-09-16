@@ -18,6 +18,10 @@ app = Celery(
         "rediska_worker.tasks.index",
         "rediska_worker.tasks.embed",
         "rediska_worker.tasks.agent",
+        "rediska_worker.tasks.evaluation",
+        "rediska_worker.tasks.inbox_clear",
+        "rediska_worker.tasks.inbox_export",
+        "rediska_worker.tasks.inbox_import",
         "rediska_worker.tasks.maintenance",
         "rediska_worker.tasks.message",
         "rediska_worker.tasks.multi_agent_analysis",
@@ -51,8 +55,13 @@ app.conf.update(
         "rediska_worker.tasks.maintenance.*": {"queue": "maintenance"},
         "rediska_worker.tasks.message.*": {"queue": "messages"},
         "rediska_worker.tasks.multi_agent_analysis.*": {"queue": "multi_agent_analysis"},
+        # Prompt replay shares the analysis queue so it sits behind the inference gate
+        "evaluation.*": {"queue": "multi_agent_analysis"},
         "rediska_worker.tasks.scout.*": {"queue": "scout"},
         "scout.*": {"queue": "scout"},
+        # Inbox export/import/clear share a dedicated queue so a long export
+        # cannot sit behind the nightly maintenance backups.
+        "inbox.*": {"queue": "transfer"},
     },
     # Worker settings
     worker_prefetch_multiplier=1,
@@ -61,16 +70,19 @@ app.conf.update(
 
 # Beat schedule for periodic tasks
 app.conf.beat_schedule = {
-    # Fast inbox check every 60 seconds - catches new incoming messages quickly
+    # Inbox check every 60 seconds - catches new incoming messages quickly.
+    # Page-capped, and skipped while another message sync holds the lock.
     "sync-inbox-fast-periodic": {
         "task": "ingest.sync_inbox_fast",
         "schedule": 60.0,  # 1 minute
         "args": (),
     },
-    # Full sync (inbox + sent) every 2 minutes with early-exit optimization
-    "sync-delta-periodic": {
-        "task": "ingest.sync_delta",
-        "schedule": 120.0,  # 2 minutes (reduced from 10 minutes)
+    # Sent folder every 5 minutes - it only changes when a message is sent from
+    # another Reddit client. (ingest.sync_delta, inbox + sent, is on-demand only:
+    # scheduling it re-read the inbox the fast sync already covers.)
+    "sync-sent-periodic": {
+        "task": "ingest.sync_sent",
+        "schedule": 300.0,  # 5 minutes
         "args": (),
     },
     # Scout watches every 5 minutes

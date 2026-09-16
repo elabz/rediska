@@ -83,6 +83,7 @@ class DemographicsAgent(BaseAnalysisAgent):
                 prompt_version=prompt.version,
                 input_data=agent_input.audit_record(),
                 output_data=result.get("parsed_output"),
+                raw_response=result.get("raw_response"),
                 status="completed" if result.get("success") else "failed",
                 error=result.get("error"),
                 db=db,

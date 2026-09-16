@@ -34,6 +34,8 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 import { MarkdownText } from '@/components/ui/markdown-text';
+import { EvaluationControl } from '@/components/evaluations/EvaluationControl';
+import type { EffectiveEvaluation, EvaluableDimension, EvaluationMap } from '@/lib/evaluations';
 
 interface ScoutWatch {
   id: number;
@@ -80,6 +82,8 @@ interface ScoutWatchPost {
   analysis_reasoning: string | null;
   analysis_dimensions: AnalysisDimensions | null;
   lead_id: number | null;
+  evaluated_at?: string | null;
+  evaluations?: EvaluationMap;
 }
 
 interface RunDetailResponse {
@@ -145,6 +149,25 @@ export default function ScoutWatchHistoryPage() {
   // Action states
   const [reanalyzingPostId, setReanalyzingPostId] = useState<number | null>(null);
   const [addingToLeadsPostId, setAddingToLeadsPostId] = useState<number | null>(null);
+
+  // Update a post's evaluated state in place after the dialog saves.
+  const handlePostEvaluated = (runId: number, postId: number, key: string, saved: EffectiveEvaluation) => {
+    setRunDetails((prev) => {
+      const detail = prev[runId];
+      if (!detail) return prev;
+      return {
+        ...prev,
+        [runId]: {
+          ...detail,
+          posts: detail.posts.map((p) =>
+            p.id === postId
+              ? { ...p, evaluated_at: saved.created_at, evaluations: { ...(p.evaluations || {}), [key]: saved } }
+              : p
+          ),
+        },
+      };
+    });
+  };
 
   const fetchWatch = useCallback(async () => {
     try {
@@ -646,6 +669,24 @@ export default function ScoutWatchHistoryPage() {
                                     ) : null;
                                   })()}
 
+                                  {/* Human evaluation of the final verdict */}
+                                  {(post.analysis_dimensions || post.analysis_recommendation) && (
+                                    <div className="flex items-center justify-between gap-2 rounded-md border border-dashed px-2 py-1.5">
+                                      <span className="text-[10px] font-medium uppercase text-muted-foreground">
+                                        Your verdict
+                                      </span>
+                                      <EvaluationControl
+                                        subjectType="scout_post"
+                                        subjectId={post.id}
+                                        dimension={null}
+                                        evaluation={post.evaluations?.final ?? null}
+                                        agentRecommendation={post.analysis_recommendation}
+                                        onSaved={(saved) => handlePostEvaluated(run.id, post.id, 'final', saved)}
+                                        size="xs"
+                                      />
+                                    </div>
+                                  )}
+
                                   {/* Analysis Dimensions */}
                                   {post.analysis_dimensions && (
                                     <div className="space-y-3">
@@ -659,9 +700,20 @@ export default function ScoutWatchHistoryPage() {
 
                                           return (
                                             <div key={key} className="border rounded p-2">
-                                              <div className={`flex items-center gap-1.5 mb-2 ${config.color}`}>
-                                                {config.icon}
-                                                <span className="text-xs font-medium">{config.title}</span>
+                                              <div className={`flex items-center justify-between gap-1.5 mb-2`}>
+                                                <div className={`flex items-center gap-1.5 ${config.color}`}>
+                                                  {config.icon}
+                                                  <span className="text-xs font-medium">{config.title}</span>
+                                                </div>
+                                                <EvaluationControl
+                                                  subjectType="scout_post"
+                                                  subjectId={post.id}
+                                                  dimension={key as EvaluableDimension}
+                                                  evaluation={post.evaluations?.[key] ?? null}
+                                                  agentOutput={dimOutput as Record<string, unknown>}
+                                                  onSaved={(saved) => handlePostEvaluated(run.id, post.id, key, saved)}
+                                                  size="xs"
+                                                />
                                               </div>
                                               {renderDimensionOutput(key, dimOutput as Record<string, unknown>)}
                                             </div>

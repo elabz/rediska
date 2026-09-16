@@ -7,6 +7,8 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
+from rediska_core.domain.schemas.evaluation import EffectiveEvaluation, ModelInput
+
 
 def _coerce_evidence_items(v) -> list[str]:
     """Coerce a model-emitted list field to a list of strings.
@@ -437,6 +439,10 @@ class DimensionAnalysisResult(BaseModel):
     model_info: Optional[dict[str, Any]] = None
     started_at: str
     completed_at: Optional[str] = None
+    # Effective human evaluation of this dimension (None when unevaluated)
+    evaluation: Optional[EffectiveEvaluation] = None
+    # Exactly what the agent received (see ModelInput.source)
+    model_input: Optional[ModelInput] = None
 
 
 class MultiAgentAnalysisResponse(BaseModel):
@@ -466,6 +472,9 @@ class MultiAgentAnalysisResponse(BaseModel):
     prompt_versions: dict[str, int]
     model_info: Optional[dict[str, Any]] = None
 
+    # Effective human evaluation of the final recommendation (None when unevaluated)
+    evaluation: Optional[EffectiveEvaluation] = None
+
     class Config:
         from_attributes = True
 
@@ -480,6 +489,7 @@ class MultiAgentAnalysisSummary(BaseModel):
     confidence_score: Optional[float]
     created_at: str
     completed_at: Optional[str]
+    evaluation: Optional[EffectiveEvaluation] = None
 
     class Config:
         from_attributes = True

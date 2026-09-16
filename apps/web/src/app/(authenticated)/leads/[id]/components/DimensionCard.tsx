@@ -15,6 +15,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { EvaluationControl } from '@/components/evaluations/EvaluationControl';
+import { AgentInputSections } from '@/components/evaluations/AgentInputSections';
+import type { EffectiveEvaluation, EvaluableDimension, ModelInput } from '@/lib/evaluations';
 
 interface DimensionAnalysisResult {
   dimension: string;
@@ -24,11 +27,16 @@ interface DimensionAnalysisResult {
   model_info: Record<string, unknown> | null;
   started_at: string;
   completed_at: string | null;
+  evaluation?: EffectiveEvaluation | null;
+  model_input?: ModelInput | null;
 }
 
 interface DimensionCardProps {
   dimension: string;
   result: DimensionAnalysisResult;
+  /** Analysis id — enables the human evaluation control when present. */
+  analysisId?: number;
+  onEvaluated?: (dimension: string, evaluation: EffectiveEvaluation) => void;
 }
 
 const DIMENSION_CONFIG: Record<string, {
@@ -273,11 +281,13 @@ function SexualPreferencesContent({ output }: { output: Record<string, unknown> 
   );
 }
 
-export function DimensionCard({ dimension, result }: DimensionCardProps) {
+export function DimensionCard({ dimension, result, analysisId, onEvaluated }: DimensionCardProps) {
   const [expanded, setExpanded] = useState(true);
   const config = DIMENSION_CONFIG[dimension];
 
   if (!config) return null;
+
+  const evaluable = analysisId !== undefined && dimension in DIMENSION_CONFIG;
 
   const hasOutput = result.output && Object.keys(result.output).length > 0;
   const hasFailed = result.status === 'failed';
@@ -339,7 +349,25 @@ export function DimensionCard({ dimension, result }: DimensionCardProps) {
         </div>
       </CardHeader>
       {expanded && (
-        <CardContent className="pt-4">
+        <CardContent className="pt-4 space-y-3">
+          {evaluable && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-dashed border-border px-2 py-1.5">
+              <span className="text-[10px] font-medium uppercase text-muted-foreground">Your verdict</span>
+              <EvaluationControl
+                subjectType="lead_analysis"
+                subjectId={analysisId}
+                dimension={dimension as EvaluableDimension}
+                evaluation={result.evaluation}
+                agentOutput={result.output}
+                modelInput={result.model_input}
+                onSaved={(saved) => onEvaluated?.(dimension, saved)}
+                size="xs"
+              />
+            </div>
+          )}
+          {result.model_input && (
+            <AgentInputSections inputs={{ [dimension]: result.model_input }} defaultOpen={false} />
+          )}
           {renderContent()}
         </CardContent>
       )}

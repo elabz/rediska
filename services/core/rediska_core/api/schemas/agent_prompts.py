@@ -20,6 +20,11 @@ class AgentPromptResponse(BaseModel):
     created_by: str
     notes: Optional[str] = None
 
+    # Human-evaluation metrics for outputs produced under this version
+    # (populated on the versions listing; see analysis-evaluation).
+    evaluations: int = 0
+    agreement: Optional[float] = None
+
     class Config:
         from_attributes = True
 

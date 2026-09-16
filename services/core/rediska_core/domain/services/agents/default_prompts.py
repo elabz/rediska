@@ -120,7 +120,7 @@ Output as JSON:
   "relationship_timeline": "immediate" | "soon" | "eventually" | "no rush" | null,
   "relationship_goals": ["goal1", "goal2"],
   "partner_max_age": "35" | "no_max_age",
-  "partner_criteria": {"requirement": "value"},
+  "partner_criteria": ["requirement 1", "requirement 2"],
   "deal_breakers": ["wants children", "must be religious"],
   "relationship_history": ["reference1", "reference2"],
   "compatibility_factors": ["factor1", "factor2"],

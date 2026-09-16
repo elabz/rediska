@@ -25,6 +25,7 @@ AI agents working on this project are **explicitly forbidden** from reading the 
 - Do NOT open, fetch, or browse `https://rediska.local/inbox` or any individual message/conversation page matching `https://rediska.local/inbox/[0-9]+`
 - Do NOT read inbox/message content through any other channel (API calls, database queries, logs) — these are live, private conversations
 - Working on inbox-related *code* is fine; inspecting inbox *data* is not
+- If agent needs to work on inbox message, a temporary thread with a fake user should be created. The user should have a name starting with "test_"
 
 ---
 
@@ -36,6 +37,7 @@ AI agents working on this project are **explicitly forbidden** from reading the 
 | `openspec/specs/<capability>/spec.md` | **Normative capability specs** (OpenSpec) — source of truth for behavior |
 | `openspec/changes/` | OpenSpec change proposals (use the `opsx:*` skills to propose/apply/archive) |
 | `docs/deploy.md` | Operator deploy, migration, smoke test, troubleshooting |
+| `docs/inbox-backup.md` | Inbox export/import/clear — dump format, API, operational notes |
 | `prd/Rediska_Spec_Pack_v0.5.md` + older plans | Historical — superseded by PRD v1.0 + OpenSpec |
 | `tasks/` | Historical task files + design docs (SCOUT_WATCH_DESIGN, MULTI_AGENT_ANALYSIS_IMPLEMENTATION) |
 
@@ -55,6 +57,7 @@ New feature work should go through the OpenSpec workflow (propose → apply → 
 | Database | MySQL 8.4 |
 | Search/Vectors | Elasticsearch 8.14 (BM25 + dense_vector kNN) |
 | LLM Runtime | llama.cpp endpoints (inference + embeddings), configurable chat template (llama3 / qwen_thinking / mistral / chatml) |
+| HTML Parsing | `beautifulsoup4` (external listing resolution — see below) |
 
 ---
 
@@ -90,13 +93,13 @@ rediska/
         infra/                 # db engines/sessions
         infrastructure/        # crypto (Fernet), elasticsearch, embeddings, rate_limiter
         observability/
-      alembic/versions/        # head: 017_add_conversation_lists
+      alembic/versions/        # head: 018_add_analysis_evaluations
 
     worker/                    # Celery worker (imports core)
       rediska_worker/
         celery_app.py          # queues, beat schedule
         tasks/                 # ingest, index, embed, agent, message,
-                               # multi_agent_analysis, scout, maintenance
+                               # multi_agent_analysis, scout, maintenance, evaluation
         util/                  # idempotency (jobs table), retry
 
   scripts/
@@ -224,6 +227,27 @@ Automated saved Reddit searches (`/settings/scout-watches` UI, `/scout-watches` 
 - Qualifying posts auto-promote to leads (`lead_source=scout_watch`); manual add-to-leads and reanalyze also available
 - History cleaned up daily (3-day retention)
 
+### Human Evaluation of Agent Decisions
+Explicit, append-only human verdicts on analysis output (`/evaluations` UI, `/evaluations` API, `domain/services/analysis_evaluation.py`, `domain/services/prompt_replay.py`):
+- A subject is a `lead_analyses` row or an analysed `scout_watch_posts` row; an evaluation targets the **final recommendation** (`dimension = NULL`) or **one dimension**, with verdict agree / partial / disagree, optional corrected value, controlled reason tags (`REASON_TAGS` in `api/schemas/evaluations.py`, mirrored in `apps/web/src/lib/evaluations.ts`), `missing_info` (required for `missing_context`), and notes. Each row snapshots the judged agent output and prompt versions; the latest row per (subject, dimension) is the effective verdict
+- Evaluations never change an analysis, a lead status, or a scout post; every record/export writes `audit_log` (`evaluation.record`, `evaluation.export`)
+- **Review queue** (`GET /evaluations/queue`): contradictions first (a `suitable` lead marked `ignored`, a non-suitable scout post manually promoted), then `suitable` / `needs_review` / `not_recommended` interleaved round-robin; `needs_review` ordered by score desc then fewest unclear gates so near-misses come first. Sample pass defaults to a 30-day window; contradictions have none
+- **Summary** (`GET /evaluations/summary`): agreement per dimension and per prompt version, tag distribution, final-verdict confusion matrix, weekly trend, missing-info aggregation. Plain Python over effective rows (no LLM)
+- **Export** (`GET /evaluations/export?dimension=`): JSONL, content verbatim
+- **Prompt replay** (`POST /agent-prompts/{dimension}/replay`, worker task `evaluation.replay_prompt`): re-runs one dimension agent on labelled cases with a transient prompt (`db=None`, nothing persisted) and compares to the human-corrected value via `compare_fields()` (categorical exact, age ±2, list overlap ≥ 0.5). Uses the stored full input prompt (`analysis_dimensions.input_data_json.prompt`, recorded since this feature), rebuilds context from the lead when only an excerpt exists, and counts scout-only cases as `skipped_no_input`. One replay at a time; capped by `EVALUATION_REPLAY_MAX_CASES`; cancellable via the `jobs` ledger. `GET /agent-prompts/{dimension}/versions` carries per-version `evaluations` / `agreement`
+- Evaluated scout posts (`evaluated_at`) and the runs that own them are exempt from history cleanup
+- Analysis read models (`/leads/{id}/analysis*`, scout run detail) carry `evaluation` fields; the UI mounts `EvaluationControl` on the recommendation card, dimension cards, scout history posts, and the review queue
+
+### External Listing Resolution
+Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `selftext` is empty and whose URL points to an external listing page. `domain/services/external_listing.py` fetches such pages and substitutes the listing's About text as the post body, so browse cards and the LLM analysis pipeline see real content:
+- Registry of supported hosts (initially `weheartbdsm.com/listings/<id>`) maps URL pattern → parser; unregistered hosts are never fetched (no generic scraping)
+- `maybe_resolve_post_body(body_text, url)` is called **synchronously before persistence** in `LeadsService.save_lead`, `ScoutWatchService.record_post`, `profile-items/ingest-browse-posts`, and `BrowseService` — resolution always completes before any analysis is enqueued
+- `tasks/scout.py` also resolves *before* calling `record_post`, because it needs the resolved text for its own empty-body skip and for the `analyze_and_decide` payload. Double resolution is safe and free: `maybe_resolve_post_body` short-circuits on a body that is no longer link-only, so the second call never fetches
+- `ensure_lead_listing_content()` is a defensive re-check in the analysis path for leads stored before this existed
+- Best-effort: fetch/parse failures keep the original body, log a warning, and never fail ingestion
+- Polite: 10s timeout, identifying UA, per-host rate limit (30/min), Redis cache (resolved ~7d, negative ~1h) keyed by canonical URL with tracking params stripped
+- Parsing uses `beautifulsoup4`; per-host parsers are unit-tested against synthetic HTML fixtures
+
 ---
 
 ## Web App Pages (apps/web)
@@ -236,17 +260,19 @@ Automated saved Reddit searches (`/settings/scout-watches` UI, `/scout-watches` 
 | `/browse` | Browse subreddit feeds (sort/time/query presets), save leads |
 | `/leads`, `/leads/[id]` | Lead list + detail with multi-dimension AI analysis panels |
 | `/directories` | Analyzed / Contacted / Engaged / Starred contact directories |
+| `/evaluations` | Human evaluation of agent decisions: review queue (contradictions first, stratified), dashboard (agreement per dimension / prompt version, confusion matrix, tags, trend, missing info), JSONL export |
 | `/search` | Global hybrid search across messages/leads/profiles/conversations |
 | `/profile/[accountId]` | Account profile: snapshot, signals, risk flags, posts/comments/images |
 | `/ops` | Job queue, sync, backfills, attachment re-download |
+| `/ops/backup` | Inbox export / import / clear with progress tracking |
 | `/audit` | Audit log viewer |
-| `/settings/connection`, `/settings/personas`, `/settings/agents`, `/settings/scout-watches` (+ `/[watchId]/history`) | Reddit connection, voice personas, agent prompts, scout watches |
+| `/settings/connection`, `/settings/personas`, `/settings/agents`, `/settings/scout-watches` (+ `/[watchId]/history`) | Reddit connection, voice personas, agent prompts (with per-version evaluation metrics and a Replay tab), scout watches (history posts carry evaluation controls) |
 
 ---
 
 ## Key Database Tables
 
-Head migration: `017_add_conversation_lists`.
+Head migration: `018_add_analysis_evaluations`.
 
 | Table | Purpose |
 |-------|---------|
@@ -263,7 +289,9 @@ Head migration: `017_add_conversation_lists`.
 | `lead_analyses` | Multi-agent analysis results (per-dimension JSON + meta) |
 | `analysis_dimensions` | Per-dimension execution tracking (raw responses, model info) |
 | `agent_prompts` | Versioned LLM agent prompts |
-| `scout_watches`, `scout_watch_runs`, `scout_watch_posts` | Scout watch config, run history, seen-post pipeline |
+| `scout_watches`, `scout_watch_runs`, `scout_watch_posts` | Scout watch config, run history, seen-post pipeline (`evaluated_at` exempts a post from cleanup) |
+| `analysis_evaluations` | Append-only human verdicts on a lead analysis or scout post (final or per dimension), with agent snapshot + prompt versions |
+| `prompt_replays` | Candidate-prompt replays against labelled cases: status, progress, agreement, per-case results |
 | `profile_snapshots` | LLM-generated profile summaries + signals/risk flags |
 | `profile_items` | Public content items (posts/comments/images) per account |
 | `provider_credentials` | Encrypted OAuth tokens (Fernet) |
@@ -323,18 +351,23 @@ PROVIDER_RATE_BURST_FACTOR=1.5
 
 # Demographics geocoding (offline, for location_near classification)
 HOME_LATITUDE=40.0 / HOME_LONGITUDE=-75.2 / LOCATION_NEAR_THRESHOLD_MILES=200
+
+# Human evaluation: cap on labelled cases per prompt replay
+EVALUATION_REPLAY_MAX_CASES=50
 ```
 
 ---
 
 ## Celery Tasks
 
-Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`, `scout`, `maintenance`.
+Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`, `scout`, `maintenance`, `transfer`.
 
 ### Ingest
 - `ingest.backfill_conversations` / `ingest.backfill_messages` — history import
-- `ingest.sync_delta` — incremental sync (beat: every 120s)
-- `ingest.sync_inbox_fast` — fast inbox-only sync (beat: every 60s)
+- `ingest.sync_inbox_fast` — inbox-only sync (beat: every 60s, max 5 pages)
+- `ingest.sync_sent` — sent-folder sync (beat: every 300s, max 5 pages)
+- `ingest.sync_delta` — inbox + sent, on-demand "Sync now" only (not scheduled, max 20 pages)
+- All message syncs hold a per-identity Redis lock (`rediska:lock:message_sync:reddit:<id>`); a scheduled run that finds it held returns `skipped`. The Reddit adapter paces requests from `X-Ratelimit-*` headers
 - `ingest.browse_location`, `ingest.fetch_post`, `ingest.fetch_profile`, `ingest.fetch_profile_items`
 - `ingest.analyze_reddit_user`, `ingest.analyze_lead_profile`
 - `ingest.redownload_attachments` — re-download missing images from message bodies
@@ -350,14 +383,22 @@ Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`,
 ### Scout Watch
 - `scout.run_all_watches` (beat: every 300s), `scout.run_single_watch`, `scout.analyze_and_decide`, `scout.reanalyze_post`
 
+### Prompt Replay (queue: `multi_agent_analysis`)
+- `evaluation.replay_prompt` — replays a candidate prompt against labelled evaluation cases; `jobs` idempotency keyed on the replay id, `max_retries=0`, cancellable between cases, shares the inference gate with live analyses
+
 ### Messaging
 - `message.send_manual` — manual trigger only; `max_retries=0` (at-most-once)
+
+### Inbox Backup / Restore (queue: `transfer`)
+- `inbox.export` — dump conversations/messages/attachment metadata to JSON
+- `inbox.import` — atomic restore from a dump (skips existing content)
+- `inbox.clear` — delete inbox rows; keeps accounts, leads, profiles, and attachment files
 
 ### Maintenance (beat-scheduled)
 - `maintenance.mysql_dump_local` (daily 03:00 UTC)
 - `maintenance.attachments_snapshot_local` (daily 04:00 UTC)
 - `maintenance.restore_test_local` (weekly, Sun 05:00 UTC)
-- `maintenance.cleanup_scout_watch_history` (daily 02:00 UTC, 3-day retention)
+- `maintenance.cleanup_scout_watch_history` (daily 02:00 UTC, 3-day retention; skips evaluated posts and the runs that own them)
 
 ---
 

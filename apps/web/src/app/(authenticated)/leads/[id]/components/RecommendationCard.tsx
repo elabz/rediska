@@ -21,6 +21,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { MarkdownText } from '@/components/ui/markdown-text';
+import { EvaluationControl } from '@/components/evaluations/EvaluationControl';
+import type { EffectiveEvaluation } from '@/lib/evaluations';
 
 interface RecommendationCardProps {
   recommendation: string | null;
@@ -31,6 +33,10 @@ interface RecommendationCardProps {
   currentStatus: string;
   onStatusChange?: (newStatus: string) => void;
   onInitiateContact?: () => void;
+  /** Analysis id — enables the human evaluation control when present. */
+  analysisId?: number;
+  evaluation?: EffectiveEvaluation | null;
+  onEvaluated?: (evaluation: EffectiveEvaluation) => void;
 }
 
 const RECOMMENDATION_CONFIG: Record<string, {
@@ -156,6 +162,9 @@ export function RecommendationCard({
   currentStatus,
   onStatusChange,
   onInitiateContact,
+  analysisId,
+  evaluation,
+  onEvaluated,
 }: RecommendationCardProps) {
   const [updatingStatus, setUpdatingStatus] = useState<string | null>(null);
   const [showAllCriteria, setShowAllCriteria] = useState(true);
@@ -245,6 +254,21 @@ export function RecommendationCard({
       </CardHeader>
 
       <CardContent className="pt-4 space-y-4">
+        {/* Human evaluation of the final verdict */}
+        {analysisId !== undefined && (
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-border p-2">
+            <span className="text-xs font-medium uppercase text-muted-foreground">Your verdict</span>
+            <EvaluationControl
+              subjectType="lead_analysis"
+              subjectId={analysisId}
+              dimension={null}
+              evaluation={evaluation}
+              agentRecommendation={recommendation}
+              onSaved={onEvaluated}
+            />
+          </div>
+        )}
+
         {/* Key Metrics Summary */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="rounded-lg bg-muted/50 p-3 text-center">

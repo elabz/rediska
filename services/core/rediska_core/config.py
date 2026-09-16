@@ -115,6 +115,12 @@ class Settings(BaseSettings):
         default=800, description="Max characters kept per included author post"
     )
 
+    # Human evaluation: prompt replay
+    evaluation_replay_max_cases: int = Field(
+        default=50,
+        description="Hard cap on labelled cases replayed per prompt replay (most recent first)",
+    )
+
     @field_validator("mysql_url")
     @classmethod
     def validate_mysql_url(cls, v: str) -> str:

@@ -81,6 +81,9 @@ services:
       - ANALYSIS_MAX_RECENT_POSTS=${ANALYSIS_MAX_RECENT_POSTS:-10}
       - ANALYSIS_POST_ITEM_CHARS=${ANALYSIS_POST_ITEM_CHARS:-800}
 
+      # Human evaluation: cap on labelled cases per prompt replay
+      - EVALUATION_REPLAY_MAX_CASES=${EVALUATION_REPLAY_MAX_CASES:-50}
+
       - CELERY_BROKER_URL=${CELERY_BROKER_URL}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
     volumes:
@@ -157,6 +160,9 @@ services:
       - ANALYSIS_CONTEXT_MAX_CHARS=${ANALYSIS_CONTEXT_MAX_CHARS:-24000}
       - ANALYSIS_MAX_RECENT_POSTS=${ANALYSIS_MAX_RECENT_POSTS:-10}
       - ANALYSIS_POST_ITEM_CHARS=${ANALYSIS_POST_ITEM_CHARS:-800}
+
+      # Human evaluation: cap on labelled cases per prompt replay
+      - EVALUATION_REPLAY_MAX_CASES=${EVALUATION_REPLAY_MAX_CASES:-50}
     volumes:
       - ${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}:${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}
       - ${BACKUPS_PATH:-/var/lib/rediska/backups}:${BACKUPS_PATH:-/var/lib/rediska/backups}

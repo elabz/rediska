@@ -34,6 +34,7 @@ from rediska_core.domain.models import (
     ScoutWatchPost,
     ScoutWatchRun,
 )
+from rediska_core.domain.services.external_listing import maybe_resolve_post_body
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
 
@@ -558,6 +559,11 @@ class ScoutWatchService:
         (`run_id` set to NULL) so they survive; only analysis-free sightings
         are removed along with the run.
 
+        Posts with a human evaluation (`evaluated_at` set) are never deleted
+        and are NOT detached either: they stay attached, and a run that still
+        owns any post after the sweep is kept so watch history keeps showing
+        the evaluated post in context (analysis-evaluation).
+
         Args:
             retention_days: Number of days to retain.
 
@@ -582,25 +588,39 @@ class ScoutWatchService:
             ScoutWatchPost.analysis_recommendation.isnot(None),
             ScoutWatchPost.lead_id.isnot(None),
         )
+        not_evaluated = ScoutWatchPost.evaluated_at.is_(None)
 
         # Detach the posts worth keeping before their run disappears.
+        # Evaluated posts keep their run instead (see docstring).
         posts_retained = (
             self.db.query(ScoutWatchPost)
-            .filter(ScoutWatchPost.run_id.in_(expiring_run_ids), has_analysis)
+            .filter(ScoutWatchPost.run_id.in_(expiring_run_ids), has_analysis, not_evaluated)
             .update({ScoutWatchPost.run_id: None}, synchronize_session=False)
         )
 
         posts_deleted = (
             self.db.query(ScoutWatchPost)
-            .filter(ScoutWatchPost.run_id.in_(expiring_run_ids))
+            .filter(ScoutWatchPost.run_id.in_(expiring_run_ids), not_evaluated)
             .delete(synchronize_session=False)
         )
 
-        runs_deleted = (
-            self.db.query(ScoutWatchRun)
-            .filter(ScoutWatchRun.id.in_(expiring_run_ids))
-            .delete(synchronize_session=False)
-        )
+        # Runs that still own a (retained, evaluated) post survive.
+        runs_with_posts = {
+            row[0]
+            for row in self.db.query(ScoutWatchPost.run_id)
+            .filter(ScoutWatchPost.run_id.in_(expiring_run_ids))
+            .distinct()
+            .all()
+        }
+        deletable_run_ids = [r for r in expiring_run_ids if r not in runs_with_posts]
+
+        runs_deleted = 0
+        if deletable_run_ids:
+            runs_deleted = (
+                self.db.query(ScoutWatchRun)
+                .filter(ScoutWatchRun.id.in_(deletable_run_ids))
+                .delete(synchronize_session=False)
+            )
 
         self.db.flush()
         return {
@@ -641,12 +661,20 @@ class ScoutWatchService:
         post_title: Optional[str] = None,
         post_body: Optional[str] = None,
         post_author: Optional[str] = None,
+        post_url: Optional[str] = None,
     ) -> ScoutWatchPost:
         """Record a post as seen by this watch.
 
         Also saves the post as a profile_item for the author if they
         already exist in external_accounts, ensuring analysis has the
         post content even if the provider API hides it later.
+
+        If the body is link-only and ``post_url`` points at a registered
+        external listing host, the listing content is resolved before
+        persisting, so every caller of this method (and therefore anything
+        downstream of it) sees resolved content. Callers that must act on
+        the resolved text themselves may resolve first; the second call is
+        a no-op because the body is no longer link-only.
 
         Args:
             watch_id: The watch ID.
@@ -655,10 +683,13 @@ class ScoutWatchService:
             post_title: The post title (for audit display).
             post_body: The post body text.
             post_author: The post author (for audit display).
+            post_url: The post URL, used to resolve external listing content.
 
         Returns:
             The created ScoutWatchPost.
         """
+        post_body = maybe_resolve_post_body(post_body, post_url)
+
         post = ScoutWatchPost(
             watch_id=watch_id,
             run_id=run_id,

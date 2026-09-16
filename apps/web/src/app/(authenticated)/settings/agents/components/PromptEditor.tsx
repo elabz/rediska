@@ -15,6 +15,7 @@ import {
   History,
   Settings,
   Search,
+  FlaskConical,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -26,6 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 
 import { VersionHistory } from './VersionHistory';
+import { ReplayPanel } from './ReplayPanel';
 import type { AgentPrompt } from '../page';
 
 interface PromptEditorProps {
@@ -220,6 +222,10 @@ export function PromptEditor({ dimension, prompt, onClose, onSaved }: PromptEdit
               <History className="h-4 w-4 mr-2" />
               Version History
             </TabsTrigger>
+            <TabsTrigger value="replay">
+              <FlaskConical className="h-4 w-4 mr-2" />
+              Replay
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="editor" className="space-y-6">
@@ -306,6 +312,16 @@ export function PromptEditor({ dimension, prompt, onClose, onSaved }: PromptEdit
               dimension={dimension}
               currentVersion={prompt.version}
               onRollback={handleRollback}
+            />
+          </TabsContent>
+
+          <TabsContent value="replay">
+            <ReplayPanel
+              dimension={dimension}
+              draftSystemPrompt={systemPrompt}
+              draftTemperature={temperature}
+              draftMaxTokens={maxTokens}
+              activeVersion={prompt.version}
             />
           </TabsContent>
         </Tabs>

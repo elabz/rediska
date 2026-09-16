@@ -29,7 +29,9 @@ from rediska_core.api.routes import auth as auth_routes
 from rediska_core.api.routes import conversation as conversation_routes
 from rediska_core.api.routes import conversation_lists as conversation_lists_routes
 from rediska_core.api.routes import directory as directory_routes
+from rediska_core.api.routes import evaluations as evaluations_routes
 from rediska_core.api.routes import identity as identity_routes
+from rediska_core.api.routes import inbox as inbox_routes
 from rediska_core.api.routes import leads as leads_routes
 from rediska_core.api.routes import metrics as metrics_routes
 from rediska_core.api.routes import ops as ops_routes
@@ -80,7 +82,9 @@ app.include_router(auth_routes.router)
 app.include_router(conversation_routes.router)
 app.include_router(conversation_lists_routes.router)
 app.include_router(directory_routes.router)
+app.include_router(evaluations_routes.router)
 app.include_router(identity_routes.router)
+app.include_router(inbox_routes.router)
 app.include_router(leads_routes.router)
 app.include_router(metrics_routes.router)
 app.include_router(ops_routes.router)

@@ -623,8 +623,20 @@ class LeadPost(Base):
     remote_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     # Multi-agent analysis fields
+    # lead_posts <-> lead_analyses is a genuine FK cycle (a lead points at its
+    # latest analysis; an analysis points back at its lead). use_alter tells
+    # SQLAlchemy to add/drop this constraint separately so metadata.create_all
+    # and drop_all can order the tables -- without it, drop_all cannot sort them
+    # and test teardown fails.
     latest_analysis_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey("lead_analyses.id", ondelete="SET NULL"), nullable=True
+        BigInteger,
+        ForeignKey(
+            "lead_analyses.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_lead_posts_latest_analysis_id",
+        ),
+        nullable=True,
     )
     analysis_recommendation: Mapped[Optional[str]] = mapped_column(
         Text,
@@ -1196,9 +1208,14 @@ class ScoutWatchPost(Base):
         BigInteger, ForeignKey("lead_posts.id"), nullable=True
     )
 
+    # Set when a human evaluation is recorded against this post; evaluated
+    # posts (and the run that owns them) are exempt from history retention.
+    evaluated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     __table_args__ = (
         UniqueConstraint("watch_id", "external_post_id", name="uq_scout_watch_post"),
         Index("idx_scout_post_pending", "watch_id", "analysis_status"),
+        Index("idx_scout_post_evaluated", "evaluated_at"),
     )
 
     # Relationships
@@ -1206,6 +1223,129 @@ class ScoutWatchPost(Base):
     run: Mapped[Optional["ScoutWatchRun"]] = relationship(back_populates="posts")
     lead: Mapped[Optional["LeadPost"]] = relationship()
     analysis: Mapped[Optional["LeadAnalysis"]] = relationship()
+
+
+# =============================================================================
+# Analysis Evaluation Models
+# =============================================================================
+
+
+class EvaluationSubjectType(str):
+    """Evaluation subject type values."""
+
+    LEAD_ANALYSIS = "lead_analysis"
+    SCOUT_POST = "scout_post"
+
+
+class HumanVerdict(str):
+    """Human verdict values."""
+
+    AGREE = "agree"
+    PARTIAL = "partial"
+    DISAGREE = "disagree"
+
+
+class ReplayStatus(str):
+    """Prompt replay status values."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AnalysisEvaluation(Base):
+    """Append-only human verdicts on agent decisions.
+
+    One row per (subject, dimension) evaluation; the latest row for a pair is
+    the effective verdict. ``dimension`` is NULL for the final recommendation.
+    """
+
+    __tablename__ = "analysis_evaluations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    subject_type: Mapped[str] = mapped_column(
+        Enum("lead_analysis", "scout_post", name="evaluation_subject_type_enum"),
+        nullable=False,
+    )
+    subject_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("external_accounts.id"), nullable=True
+    )
+    dimension: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    human_verdict: Mapped[str] = mapped_column(
+        Enum("agree", "partial", "disagree", name="human_verdict_enum"),
+        nullable=False,
+    )
+    corrected_value_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    reason_tags_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    missing_info: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Snapshot of what was judged, so later re-analysis / prompt edits do not
+    # move the evaluation.
+    agent_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    prompt_versions_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False, default="user")
+
+    __table_args__ = (
+        Index(
+            "idx_eval_subject",
+            "subject_type",
+            "subject_id",
+            "dimension",
+            "created_at",
+        ),
+        Index("idx_eval_dimension_created", "dimension", "created_at"),
+    )
+
+
+class PromptReplay(Base):
+    """A replay of a candidate prompt against labelled evaluation cases."""
+
+    __tablename__ = "prompt_replays"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    dimension: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    temperature: Mapped[Optional[float]] = mapped_column(nullable=True)
+    max_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        Enum(
+            "queued", "running", "completed", "failed", "cancelled",
+            name="prompt_replay_status_enum",
+        ),
+        nullable=False,
+        default="queued",
+    )
+    case_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    agreed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_no_input: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    agreement: Mapped[Optional[float]] = mapped_column(nullable=True)
+    results_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("idx_replay_dimension_created", "dimension", "created_at"),
+        Index("idx_replay_status", "status"),
+    )
 
 
 # Export all models
@@ -1232,7 +1372,12 @@ __all__ = [
     "ScoutWatch",
     "ScoutWatchRun",
     "ScoutWatchPost",
+    "AnalysisEvaluation",
+    "PromptReplay",
     # Enums
+    "EvaluationSubjectType",
+    "HumanVerdict",
+    "ReplayStatus",
     "LeadSource",
     "ScoutRunStatus",
     "ScoutPostStatus",

@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
+from rediska_core.domain.schemas.evaluation import EffectiveEvaluation
 from pydantic import BaseModel, Field
 
 
@@ -136,6 +137,11 @@ class ScoutWatchPostResponse(BaseModel):
 
     # Lead creation
     lead_id: Optional[int] = None
+
+    # Human evaluations: keyed by dimension name or 'final'; value is the
+    # effective evaluation or None. Empty when the post has no analysis.
+    evaluated_at: Optional[datetime] = None
+    evaluations: dict[str, Optional[EffectiveEvaluation]] = {}
 
     class Config:
         from_attributes = True
