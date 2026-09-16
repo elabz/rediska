@@ -204,6 +204,16 @@ def parse_weheartbdsm(html: str) -> Optional[str]:
     return data.as_text() if data else None
 
 
+DETAILS_BLOCK_MARKER = "[Listing details from "
+
+
+def details_block_of(listing_text: str) -> Optional[str]:
+    """The details block at the top of stored listing text, if present."""
+    if not listing_text.startswith(DETAILS_BLOCK_MARKER):
+        return None
+    return listing_text.split("\n\n", 1)[0]
+
+
 def _normalize_text(text: str) -> str:
     """Normalize extracted listing text (line endings, stray whitespace)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -376,17 +386,28 @@ class ExternalListingResolver:
     def maybe_resolve_post_body(
         self, body_text: Optional[str], post_url: Optional[str]
     ) -> Optional[str]:
-        """Return the resolved listing text for a link-only post, else the body.
+        """Enrich a post body from its registered listing URL.
 
-        Only fetches when the body is link-only AND the URL matches a registered
-        host. On any failure the original body is returned unchanged.
+        - Link-only body: the listing text (details block + About) replaces it.
+        - Real body on a registered host: authors often paste the same text on
+          Reddit, but only the listing carries the structured facts (location,
+          age, position, sought range, kinks), so the details block is
+          prepended to the Reddit body. Idempotent: a body that already starts
+          with the block is returned unchanged.
+        - Unregistered host, fetch failure, or no structured facts: the
+          original body is returned unchanged.
         """
-        if not is_link_only_body(body_text, post_url):
-            return body_text
         if find_registered_host(post_url) is None:
             return body_text
+        if body_text and body_text.lstrip().startswith(DETAILS_BLOCK_MARKER):
+            return body_text
         resolved = self.resolve(post_url)
-        return resolved if resolved else body_text
+        if not resolved:
+            return body_text
+        if is_link_only_body(body_text, post_url):
+            return resolved
+        header = details_block_of(resolved)
+        return f"{header}\n\n{body_text}" if header else body_text
 
 
 # =============================================================================

@@ -228,15 +228,19 @@ class TestResolver:
         # Not negatively cached — a later encounter may retry
         assert f"{external_listing.CACHE_KEY_PREFIX}{CANONICAL_URL}" not in redis.store
 
-    def test_maybe_resolve_leaves_real_body_untouched(self):
-        def exploding_handler(request):  # pragma: no cover - must not be called
-            raise AssertionError("should not fetch when body present")
+    def test_maybe_resolve_prepends_details_to_real_body(self):
+        """Authors paste the text on Reddit too; the listing still holds the facts."""
+        resolver = make_resolver(fixture_handler)
+        out = resolver.maybe_resolve_post_body("Hello from Reddit", LISTING_URL)
+        assert out.startswith("[Listing details from weheartbdsm.com]")
+        assert "Location: Testville, Pennsylvania" in out
+        assert out.endswith("\n\nHello from Reddit")
+        # idempotent on a second pass
+        assert resolver.maybe_resolve_post_body(out, LISTING_URL) == out
 
-        resolver = make_resolver(exploding_handler)
-        assert (
-            resolver.maybe_resolve_post_body("Real content", LISTING_URL)
-            == "Real content"
-        )
+    def test_maybe_resolve_leaves_real_body_untouched_for_unregistered_host(self):
+        resolver = make_resolver(fixture_handler)
+        assert resolver.maybe_resolve_post_body("Hello", "https://example.com/x") == "Hello"
 
     def test_maybe_resolve_falls_back_to_original_on_failure(self):
         resolver = make_resolver(lambda req: httpx.Response(500))
