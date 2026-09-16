@@ -3,16 +3,30 @@
 import json
 from typing import Any, Optional
 
+import re
+
 from pydantic import BaseModel, Field, field_validator
 
 
-def _coerce_evidence_items(v: list) -> list[str]:
-    """Coerce evidence items to strings.
+def _coerce_evidence_items(v) -> list[str]:
+    """Coerce a model-emitted list field to a list of strings.
 
-    Some models output evidence as list of dicts like:
-        [{"quote": "...", "analysis": "..."}]
-    instead of list of strings. This normalizes them.
+    Models drift on list-typed fields in three ways, all seen in production:
+        - a list of dicts like [{"quote": "...", "analysis": "..."}]
+        - ``null`` where an empty list was meant
+        - a comma-separated string ("helpful, supportive")
+    Every one of those used to fail Pydantic validation, which fails the whole
+    dimension and makes the deterministic gates fail closed on a formatting
+    quirk. Normalize them all to a clean list of strings instead.
     """
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [part.strip() for part in re.split(r"[,;\n]+", v) if part.strip()]
+    if isinstance(v, dict):
+        v = [v]
+    if not isinstance(v, (list, tuple)):
+        return [str(v)]
     result = []
     for item in v:
         if isinstance(item, str):
@@ -102,9 +116,7 @@ class DemographicsOutput(BaseModel):
     @field_validator("evidence", "flags", mode="before")
     @classmethod
     def coerce_str_list(cls, v):
-        if isinstance(v, list):
-            return _coerce_evidence_items(v)
-        return v
+        return _coerce_evidence_items(v)
 
     model_config = {"extra": "allow"}
 
@@ -157,9 +169,7 @@ class PreferencesOutput(BaseModel):
     @field_validator("evidence", "hobbies", "preferred_hobbies_found", "kinks", "preferred_kinks_found", mode="before")
     @classmethod
     def coerce_str_list(cls, v):
-        if isinstance(v, list):
-            return _coerce_evidence_items(v)
-        return v
+        return _coerce_evidence_items(v)
 
     model_config = {"extra": "allow"}
 
@@ -235,9 +245,7 @@ class RelationshipGoalsOutput(BaseModel):
     )
     @classmethod
     def coerce_str_list(cls, v):
-        if isinstance(v, list):
-            return _coerce_evidence_items(v)
-        return v
+        return _coerce_evidence_items(v)
 
     model_config = {"extra": "allow"}
 
@@ -278,9 +286,7 @@ class RiskFlagsOutput(BaseModel):
     @field_validator("evidence", "red_flags", "scam_indicators", mode="before")
     @classmethod
     def coerce_str_list(cls, v):
-        if isinstance(v, list):
-            return _coerce_evidence_items(v)
-        return v
+        return _coerce_evidence_items(v)
 
     model_config = {"extra": "allow"}
 
@@ -327,9 +333,7 @@ class SexualPreferencesOutput(BaseModel):
     @field_validator("evidence", "kinks_interests", "sexual_compatibility_notes", mode="before")
     @classmethod
     def coerce_str_list(cls, v):
-        if isinstance(v, list):
-            return _coerce_evidence_items(v)
-        return v
+        return _coerce_evidence_items(v)
 
     model_config = {"extra": "allow"}
 
@@ -389,9 +393,7 @@ class MetaAnalysisOutput(BaseModel):
     @field_validator("strengths", "concerns", mode="before")
     @classmethod
     def coerce_str_list(cls, v):
-        if isinstance(v, list):
-            return _coerce_evidence_items(v)
-        return v
+        return _coerce_evidence_items(v)
 
     model_config = {"extra": "allow"}
 

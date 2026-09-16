@@ -16,7 +16,9 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from rediska_core.domain.schemas.multi_agent_analysis import _coerce_evidence_items
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ProfileItem
@@ -75,6 +77,13 @@ class CharacterSummaryOutput(BaseModel):
         alias="redFlags",
         description="Any concerning patterns or red flags observed"
     )
+
+    @field_validator("personality_traits", "red_flags", mode="before")
+    @classmethod
+    def coerce_str_list(cls, v):
+        # The model regularly emits "helpful, supportive" or null here; a
+        # validation failure discards the whole character summary.
+        return _coerce_evidence_items(v)
 
 
 # =============================================================================
