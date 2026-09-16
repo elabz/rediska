@@ -112,3 +112,21 @@ def test_mixed_no_concrete_parts_is_unclear():
 def test_mixed_ungeocodable_with_virtual_is_unclear():
     result = classify_location("online, blorptown")
     assert result["location_state"] == "unclear"
+
+
+
+class TestJoinedHashtagsAndRegions:
+    """r/bdsmpersonals titles carry #newyork / #midwest style tokens."""
+
+    def test_joined_state_name_geocodes(self):
+        from rediska_core.domain.services.geocoding import _geocode
+
+        assert _geocode("newyork") is not None
+        assert _geocode("#newjersey")[2] == "us_state"
+        assert _geocode("losangeles")[2] == "alias"
+
+    def test_region_tokens_are_unclear(self):
+        from rediska_core.domain.services.geocoding import classify_location
+
+        assert classify_location("#midwest #usa")["location_state"] == "unclear"
+        assert classify_location("eastcoast")["location_state"] == "unclear"

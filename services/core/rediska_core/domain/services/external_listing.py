@@ -22,7 +22,7 @@ Usage:
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -51,29 +51,140 @@ NEGATIVE_MARKER = "\x00unresolved"
 # =============================================================================
 
 
-def parse_weheartbdsm(html: str) -> Optional[str]:
-    """Extract the About/body text from a weheartbdsm.com listing page.
+@dataclass
+class ListingData:
+    """Structured fields extracted from a listing page, plus the free-text body.
+
+    Everything here is shown to the analysis agents verbatim; nothing is
+    filtered or redacted (see research-content-policy).
+    """
+
+    body: str
+    title: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    online_only: Optional[bool] = None
+    meet_type: Optional[str] = None
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    position: Optional[str] = None
+    seeking: Optional[str] = None
+    seeking_position: Optional[str] = None
+    age_min_sought: Optional[int] = None
+    age_max_sought: Optional[int] = None
+    is_couple: Optional[bool] = None
+    kinks: list[tuple[str, str]] = field(default_factory=list)  # (kink, level)
+
+    def location_line(self) -> Optional[str]:
+        place = ", ".join(p for p in (self.city, self.state) if p)
+        if not place and self.country:
+            place = self.country
+        elif place and self.country and self.country.lower() not in place.lower():
+            place = f"{place}, {self.country}"
+        mode = None
+        if self.online_only:
+            mode = "online only"
+        elif self.meet_type:
+            mode = self.meet_type.replace("_", " ")
+        if place and mode:
+            return f"{place} ({mode})"
+        return place or (f"({mode})" if mode else None)
+
+    def details_block(self) -> str:
+        """Compact, human-readable facts header placed ahead of the body text."""
+        lines = ["[Listing details from weheartbdsm.com]"]
+        loc = self.location_line()
+        if loc:
+            lines.append(f"Location: {loc}")
+        who = [f"Age: {self.age}" if self.age is not None else None,
+               f"Gender: {self.gender}" if self.gender else None,
+               f"Position: {self.position}" if self.position else None,
+               "Posting as a couple" if self.is_couple else None]
+        who = [w for w in who if w]
+        if who:
+            lines.append(" | ".join(who))
+        seek = []
+        if self.seeking:
+            seek.append(f"Seeking: {self.seeking}")
+        if self.seeking_position:
+            seek.append(f"Seeking position: {self.seeking_position.replace(',', ', ')}")
+        if self.age_min_sought is not None or self.age_max_sought is not None:
+            lo = self.age_min_sought if self.age_min_sought is not None else "?"
+            hi = self.age_max_sought if self.age_max_sought is not None else "no max"
+            seek.append(f"Sought age range: {lo}-{hi}")
+        if seek:
+            lines.append(" | ".join(seek))
+        if self.kinks:
+            lines.append("Kinks: " + ", ".join(
+                f"{k} ({lvl})" if lvl else k for k, lvl in self.kinks))
+        return "\n".join(lines)
+
+    def as_text(self) -> str:
+        """Details block + body, the string stored as the post body."""
+        header = self.details_block()
+        if header.count("\n") == 0:  # nothing but the banner line
+            return self.body
+        return f"{header}\n\n{self.body}" if self.body else header
+
+
+def _opt_int(v) -> Optional[int]:
+    try:
+        return int(v) if v is not None and v != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_str(v) -> Optional[str]:
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def parse_weheartbdsm_structured(html: str) -> Optional[ListingData]:
+    """Extract structured listing data from a weheartbdsm.com listing page.
 
     The page is an Inertia.js app: the full listing lives in the JSON
-    `data-page` attribute at props.listing.body. A truncated fallback is
-    available in the JSON-LD Article block's description.
+    `data-page` attribute at props.listing (body plus city/state/meet_type/
+    age/gender/position/seeking/age range/kinks). A truncated fallback is
+    available in the JSON-LD Article block's description (body only).
     """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Primary: Inertia data-page JSON -> props.listing.body (full text)
     tag = soup.find(attrs={"data-page": True})
     if tag is not None:
         try:
             page = json.loads(tag["data-page"])
-            body = page.get("props", {}).get("listing", {}).get("body")
+            listing = page.get("props", {}).get("listing") or {}
+            body = listing.get("body")
             if isinstance(body, str) and body.strip():
-                return _normalize_text(body)
-        except (json.JSONDecodeError, TypeError, AttributeError):
+                user = listing.get("user") or {}
+                kinks = []
+                for k in listing.get("kinks") or []:
+                    if isinstance(k, dict) and k.get("kink"):
+                        kinks.append((str(k["kink"]), str(k.get("level") or "")))
+                return ListingData(
+                    body=_normalize_text(body),
+                    title=_opt_str(listing.get("title")),
+                    city=_opt_str(listing.get("city")),
+                    state=_opt_str(listing.get("state")),
+                    country=_opt_str(user.get("location")),
+                    online_only=bool(listing["online_only"]) if listing.get("online_only") is not None else None,
+                    meet_type=_opt_str(listing.get("meet_type")),
+                    age=_opt_int(user.get("age")),
+                    gender=_opt_str(user.get("gender")),
+                    position=_opt_str(listing.get("position") or user.get("position")),
+                    seeking=_opt_str(listing.get("seeking")),
+                    seeking_position=_opt_str(listing.get("seeking_position")),
+                    age_min_sought=_opt_int(listing.get("age_min_sought")),
+                    age_max_sought=_opt_int(listing.get("age_max_sought")),
+                    is_couple=bool(listing["is_couple"]) if listing.get("is_couple") is not None else None,
+                    kinks=kinks,
+                )
+        except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
             logger.warning("weheartbdsm: failed to parse data-page JSON")
 
-    # Fallback: JSON-LD Article description (may be truncated)
+    # Fallback: JSON-LD Article description (may be truncated; body only)
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         try:
             data = json.loads(script.string or "")
@@ -82,9 +193,15 @@ def parse_weheartbdsm(html: str) -> Optional[str]:
         if isinstance(data, dict) and data.get("@type") == "Article":
             description = data.get("description")
             if isinstance(description, str) and description.strip():
-                return _normalize_text(description)
+                return ListingData(body=_normalize_text(description))
 
     return None
+
+
+def parse_weheartbdsm(html: str) -> Optional[str]:
+    """Listing text as stored for analysis: details block + About/body text."""
+    data = parse_weheartbdsm_structured(html)
+    return data.as_text() if data else None
 
 
 def _normalize_text(text: str) -> str:

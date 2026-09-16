@@ -108,11 +108,38 @@ class TestWeheartbdsmParser:
     def test_extracts_full_body_from_fixture(self):
         text = parse_weheartbdsm(FIXTURE.read_text())
         assert text is not None
-        assert text.startswith("About Me")
+        assert text.startswith("[Listing details from weheartbdsm.com]")
+        assert "About Me" in text
         # Full Inertia body, not the truncated JSON-LD description (154 chars)
         assert len(text) > 500
         assert "What I Enjoy" in text
         assert "\r" not in text  # line endings normalized
+
+    def test_details_block_carries_structured_fields(self):
+        from rediska_core.domain.services.external_listing import (
+            parse_weheartbdsm_structured,
+        )
+
+        data = parse_weheartbdsm_structured(FIXTURE.read_text())
+        assert data is not None
+        assert (data.city, data.state, data.meet_type) == ("Testville", "Pennsylvania", "in_person")
+        assert data.age == 34 and data.gender == "female" and data.position == "submissive"
+        assert data.age_max_sought == 55
+        assert data.kinks[0] == ("sourdough-baking", "into")
+
+        text = data.as_text()
+        header, _, body = text.partition("\n\n")
+        assert "Location: Testville, Pennsylvania, United States (in person)" in header
+        assert "Age: 34 | Gender: female | Position: submissive" in header
+        assert "Seeking: male | Seeking position: dominant, switch | Sought age range: 30-55" in header
+        assert "Kinks: sourdough-baking (into), cartography (curious)" in header
+        assert "About Me" in body
+
+    def test_details_block_omitted_when_no_structured_fields(self):
+        from rediska_core.domain.services.external_listing import ListingData
+
+        assert ListingData(body="just text").as_text() == "just text"
+        assert ListingData(body="t", online_only=True).details_block().endswith("Location: (online only)")
 
     def test_falls_back_to_json_ld_description(self):
         html = (
@@ -137,7 +164,7 @@ class TestResolver:
         redis = FakeRedis()
         resolver = make_resolver(fixture_handler, redis)
         text = resolver.resolve(LISTING_URL)
-        assert text is not None and text.startswith("About Me")
+        assert text is not None and "About Me" in text
         # Positive result cached under canonical URL
         cached = redis.store[f"{external_listing.CACHE_KEY_PREFIX}{CANONICAL_URL}"]
         assert cached == text
@@ -262,7 +289,7 @@ class TestSaveLeadResolution:
             author_username="listing_author",
         )
         assert lead.body_text is not None
-        assert lead.body_text.startswith("About Me")
+        assert "About Me" in lead.body_text
 
         item = (
             db_session.query(ProfileItem)
@@ -326,7 +353,7 @@ class TestBrowseFeedResolution:
         service = BrowseService(db=db_session, provider_client=FakeClient())
         result = service.browse_location("reddit", "r/bdsmpersonals")
         by_id = {p["external_post_id"]: p for p in result["posts"]}
-        assert by_id["p1"]["body_text"].startswith("About Me")
+        assert "About Me" in by_id["p1"]["body_text"]
         assert by_id["p2"]["body_text"] == "already has content"
 
 
@@ -361,7 +388,7 @@ class TestEnsureLeadListingContent:
         db_session.flush()
 
         assert ensure_lead_listing_content(db_session, lead) is True
-        assert lead.body_text is not None and lead.body_text.startswith("About Me")
+        assert lead.body_text is not None and "About Me" in lead.body_text
         item = (
             db_session.query(ProfileItem)
             .filter(ProfileItem.account_id == account.id)

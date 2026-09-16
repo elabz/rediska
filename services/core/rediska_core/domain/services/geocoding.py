@@ -293,7 +293,41 @@ def _geocode(location_str: str) -> Optional[tuple[float, float, str]]:
     if key in cities:
         return (*cities[key], "city")
 
+    # Tier 6: hashtag-joined forms ("newyork", "newjersey", "losangeles").
+    # r/bdsmpersonals enforces #location tags in titles and they arrive with the
+    # spaces removed, which none of the tables above match.
+    if " " not in key:
+        joined = _load_joined_index()
+        if key in joined:
+            return joined[key]
+
     return None
+
+
+_joined_index: Optional[dict[str, tuple[float, float, str]]] = None
+
+
+def _load_joined_index() -> dict[str, tuple[float, float, str]]:
+    """Index of every multi-word name above, keyed with spaces removed."""
+    global _joined_index
+    if _joined_index is not None:
+        return _joined_index
+    index: dict[str, tuple[float, float, str]] = {}
+    # Later tiers must not override earlier ones, so insert cities first.
+    for name, (lat, lon) in _load_cities().items():
+        if " " in name:
+            index.setdefault(name.replace(" ", ""), (lat, lon, "city"))
+    for table, tier in (
+        (COUNTRY_COORDS, "country"),
+        (CA_PROVINCE_COORDS, "ca_province"),
+        (US_STATE_COORDS, "us_state"),
+        (ALIAS_COORDS, "alias"),
+    ):
+        for name, (lat, lon) in table.items():
+            if " " in name:
+                index[name.replace(" ", "")] = (lat, lon, tier)
+    _joined_index = index
+    return index
 
 
 # Virtual / country-scale / timezone tokens that carry no usable geography.
@@ -301,6 +335,9 @@ def _geocode(location_str: str) -> Optional[tuple[float, float, str]]:
 _UNCLEAR_TOKENS = {
     "online", "remote", "anywhere", "us", "usa", "united states",
     "est", "cst", "mst", "pst", "edt", "cdt", "mdt", "pdt",
+    # US regions: too broad to be near or far, a human decides
+    "midwest", "east coast", "eastcoast", "west coast", "westcoast",
+    "northeast", "southeast", "southwest", "northwest", "the south",
 }
 
 
