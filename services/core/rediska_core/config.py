@@ -45,6 +45,17 @@ class Settings(BaseSettings):
         default="llama3",
         description="Chat template for response parsing: llama3, qwen_thinking, mistral, chatml",
     )
+    inference_max_concurrent: int = Field(
+        default=1,
+        description="Global cap on simultaneous inference requests across all processes "
+        "(llama.cpp serves one request at a time unless started with --parallel)",
+    )
+    inference_max_retries: int = Field(
+        default=4, description="Retries on 429/5xx from the inference endpoint"
+    )
+    inference_retry_base_delay: float = Field(
+        default=10.0, description="First retry delay in seconds; doubles per retry, max 120s"
+    )
     embeddings_url: Optional[str] = None
     embeddings_model: Optional[str] = None
     embeddings_api_key: Optional[str] = None

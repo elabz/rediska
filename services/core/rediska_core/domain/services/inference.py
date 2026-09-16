@@ -19,11 +19,14 @@ Usage:
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
+
+from rediska_core.infrastructure.inference_gate import InferenceGate, InferenceGateTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,12 @@ class InferenceConfig:
     max_tokens: int = 2048  # Default for standard models; increase for reasoning models with <think> tags
     temperature: float = 0.6  # Lower temperature for more consistent JSON output
     api_key: Optional[str] = None
+    # Concurrency / resilience (see infrastructure/inference_gate.py)
+    max_concurrent: int = 1  # global inflight limit across all worker processes
+    max_retries: int = 4  # retries on 429/5xx before giving up
+    retry_base_delay: float = 10.0  # seconds; doubles each retry, capped at retry_max_delay
+    retry_max_delay: float = 120.0
+    redis_url: Optional[str] = None  # None -> process-local semaphore only
 
 
 @dataclass
@@ -163,6 +172,11 @@ class InferenceClient:
         """
         self.config = config
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._gate = InferenceGate(
+            redis_url=config.redis_url,
+            max_concurrent=config.max_concurrent,
+            slot_ttl=int(config.timeout) + 120,
+        )
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
@@ -227,16 +241,69 @@ class InferenceClient:
                 logger.info("(empty content)")
         logger.info("=== END LLM REQUEST ===")
 
+        return await self._post_with_retry(client, "/v1/chat/completions", payload)
+
+    # Status codes worth retrying: gateway cooldown / busy backend / transient.
+    _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+    def _retry_delay(self, attempt: int, response: Optional[httpx.Response]) -> float:
+        """Delay before retry ``attempt`` (1-based), honouring Retry-After."""
+        delay = min(
+            self.config.retry_base_delay * (2 ** (attempt - 1)),
+            self.config.retry_max_delay,
+        )
+        if response is not None:
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay = max(delay, float(retry_after))
+                except ValueError:
+                    pass
+        # +/-20% jitter so worker processes don't retry in lockstep
+        return max(0.5, delay * random.uniform(0.8, 1.2))
+
+    async def _post_with_retry(
+        self, client: httpx.AsyncClient, path: str, payload: dict
+    ) -> dict:
+        """POST under the global concurrency gate, retrying transient failures.
+
+        Holds the gate slot across retries: if the backend is in cooldown,
+        letting another caller in would only extend the cooldown.
+        """
         try:
-            response = await client.post("/v1/chat/completions", json=payload)
-            response.raise_for_status()
-            return response.json()
-        except httpx.ConnectError as e:
-            raise ConnectionInferenceError(f"Connection error: {e}") from e
-        except httpx.TimeoutException as e:
-            raise TimeoutInferenceError(f"Timeout error: {e}") from e
-        except httpx.HTTPStatusError as e:
-            raise InferenceError(f"HTTP error: {e}") from e
+            backend = await self._gate.acquire(timeout=self.config.timeout * 3)
+        except InferenceGateTimeout as e:
+            raise InferenceError(str(e)) from e
+
+        try:
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    response = await client.post(path, json=payload)
+                    response.raise_for_status()
+                    return response.json()
+                except httpx.ConnectError as e:
+                    raise ConnectionInferenceError(f"Connection error: {e}") from e
+                except httpx.TimeoutException as e:
+                    raise TimeoutInferenceError(f"Timeout error: {e}") from e
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+                    if (
+                        status not in self._RETRYABLE_STATUSES
+                        or attempt > self.config.max_retries
+                    ):
+                        raise InferenceError(f"HTTP error: {e}") from e
+                    delay = self._retry_delay(attempt, e.response)
+                    body = e.response.text[:200].replace("\n", " ")
+                    logger.warning(
+                        f"Inference {path} returned {status} "
+                        f"(attempt {attempt}/{self.config.max_retries + 1}); "
+                        f"retrying in {delay:.1f}s. Body: {body}"
+                    )
+                    await asyncio.sleep(delay)
+        finally:
+            await self._gate.release(backend)
 
     async def _make_completion_request(
         self,
@@ -263,16 +330,7 @@ class InferenceClient:
             "max_tokens": max_tokens,
         }
 
-        try:
-            response = await client.post("/v1/completions", json=payload)
-            response.raise_for_status()
-            return response.json()
-        except httpx.ConnectError as e:
-            raise ConnectionInferenceError(f"Connection error: {e}") from e
-        except httpx.TimeoutException as e:
-            raise TimeoutInferenceError(f"Timeout error: {e}") from e
-        except httpx.HTTPStatusError as e:
-            raise InferenceError(f"HTTP error: {e}") from e
+        return await self._post_with_retry(client, "/v1/completions", payload)
 
     async def chat(
         self,
@@ -484,6 +542,10 @@ def get_inference_client() -> InferenceClient:
         model_name=settings.inference_model or "default",
         timeout=settings.inference_timeout,
         api_key=settings.inference_api_key,
+        max_concurrent=settings.inference_max_concurrent,
+        max_retries=settings.inference_max_retries,
+        retry_base_delay=settings.inference_retry_base_delay,
+        redis_url=settings.redis_url,
     )
 
     return InferenceClient(config=config)

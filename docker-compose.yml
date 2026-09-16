@@ -4,6 +4,14 @@ x-health-defaults: &health_defaults
   retries: 10
   start_period: 30s
 
+# Cap container logs. Docker's json-file driver rotates by size, not time:
+# each service keeps at most 3 files of 50MB and deletes the oldest.
+x-logging: &default_logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   # rediska-nginx was retired in favour of the shared dev-proxy stack at
   # ~/Web/dev-proxy/. The rediska.local vhost now lives in dev-proxy's
@@ -20,6 +28,7 @@ services:
       - BASE_URL=${BASE_URL}
     networks: [rediska-net]
     restart: unless-stopped
+    logging: *default_logging
     healthcheck:
       <<: *health_defaults
       test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/', (r) => process.exit(r.statusCode === 200 ? 0 : 1))\""]
@@ -39,6 +48,11 @@ services:
       - INFERENCE_URL=${INFERENCE_URL}
       - INFERENCE_MODEL=${INFERENCE_MODEL}
       - INFERENCE_API_KEY=${INFERENCE_API_KEY}
+      - INFERENCE_TIMEOUT=${INFERENCE_TIMEOUT:-300}
+      - INFERENCE_CHAT_TEMPLATE=${INFERENCE_CHAT_TEMPLATE:-llama3}
+      - INFERENCE_MAX_CONCURRENT=${INFERENCE_MAX_CONCURRENT:-1}
+      - INFERENCE_MAX_RETRIES=${INFERENCE_MAX_RETRIES:-4}
+      - INFERENCE_RETRY_BASE_DELAY=${INFERENCE_RETRY_BASE_DELAY:-10}
       - EMBEDDINGS_URL=${EMBEDDINGS_URL}
       - EMBEDDINGS_MODEL=${EMBEDDINGS_MODEL}
       - EMBEDDINGS_API_KEY=${EMBEDDINGS_API_KEY}
@@ -74,6 +88,7 @@ services:
       - ${BACKUPS_PATH:-/var/lib/rediska/backups}:${BACKUPS_PATH:-/var/lib/rediska/backups}
     networks: [rediska-net]
     restart: unless-stopped
+    logging: *default_logging
     depends_on:
       rediska-mysql:
         condition: service_healthy
@@ -107,6 +122,11 @@ services:
       - INFERENCE_URL=${INFERENCE_URL}
       - INFERENCE_MODEL=${INFERENCE_MODEL}
       - INFERENCE_API_KEY=${INFERENCE_API_KEY}
+      - INFERENCE_TIMEOUT=${INFERENCE_TIMEOUT:-300}
+      - INFERENCE_CHAT_TEMPLATE=${INFERENCE_CHAT_TEMPLATE:-llama3}
+      - INFERENCE_MAX_CONCURRENT=${INFERENCE_MAX_CONCURRENT:-1}
+      - INFERENCE_MAX_RETRIES=${INFERENCE_MAX_RETRIES:-4}
+      - INFERENCE_RETRY_BASE_DELAY=${INFERENCE_RETRY_BASE_DELAY:-10}
       - EMBEDDINGS_URL=${EMBEDDINGS_URL}
       - EMBEDDINGS_MODEL=${EMBEDDINGS_MODEL}
       - EMBEDDINGS_API_KEY=${EMBEDDINGS_API_KEY}
@@ -142,6 +162,7 @@ services:
       - ${BACKUPS_PATH:-/var/lib/rediska/backups}:${BACKUPS_PATH:-/var/lib/rediska/backups}
     networks: [rediska-net]
     restart: unless-stopped
+    logging: *default_logging
 
   rediska-beat:
     image: ghcr.io/elabz/rediska-worker:${TAG:-latest}
@@ -168,6 +189,7 @@ services:
       - ${BACKUPS_PATH:-/var/lib/rediska/backups}:${BACKUPS_PATH:-/var/lib/rediska/backups}
     networks: [rediska-net]
     restart: unless-stopped
+    logging: *default_logging
 
   rediska-redis:
     image: redis:7-alpine
@@ -177,6 +199,7 @@ services:
       - rediska_redis_data:/data
     networks: [rediska-net]
     restart: unless-stopped
+    logging: *default_logging
     healthcheck:
       <<: *health_defaults
       test: ["CMD", "redis-cli", "ping"]
@@ -193,6 +216,7 @@ services:
       - rediska_mysql_data:/var/lib/mysql
     networks: [rediska-net]
     restart: unless-stopped
+    logging: *default_logging
     healthcheck:
       <<: *health_defaults
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
@@ -208,6 +232,7 @@ services:
       - rediska_es_data:/usr/share/elasticsearch/data
     networks: [rediska-net]
     restart: unless-stopped
+    logging: *default_logging
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 10s
