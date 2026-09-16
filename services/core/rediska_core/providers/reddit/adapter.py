@@ -17,7 +17,9 @@ Usage:
     posts = await adapter.browse_location("r/programming")
 """
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -66,6 +68,17 @@ class RedditAPIError(Exception):
         self.status_code = status_code
 
 
+def _parse_header_float(headers: Any, name: str) -> Optional[float]:
+    """Read a numeric response header, or None if absent or malformed."""
+    value = headers.get(name) if headers is not None else None
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 class RedditAdapter(ProviderAdapter):
     """Reddit provider adapter.
 
@@ -76,6 +89,13 @@ class RedditAdapter(ProviderAdapter):
     # Reddit API endpoints
     BASE_URL = "https://oauth.reddit.com"
     TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+
+    # Reddit reports the OAuth quota (about 1000 requests per 10-minute window)
+    # in X-Ratelimit-* headers. Below this many remaining requests, the rest are
+    # spread evenly over what is left of the window instead of spent at once.
+    RATELIMIT_LOW_WATERMARK = 10
+    # Longest single pause, so pacing never pushes a task past its time limit.
+    RATELIMIT_MAX_WAIT_SECONDS = 30.0
 
     def __init__(
         self,
@@ -102,6 +122,13 @@ class RedditAdapter(ProviderAdapter):
         self.client_secret = client_secret
         self.user_agent = user_agent
         self.on_token_refresh = on_token_refresh
+
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+        self.ratelimit_remaining: Optional[float] = None
+        self.ratelimit_reset: Optional[float] = None
+        self._ratelimit_seen_at: float = 0.0
 
     @property
     def provider_id(self) -> str:
@@ -144,36 +171,101 @@ class RedditAdapter(ProviderAdapter):
         endpoint: str,
         params: Optional[dict] = None,
         retry_on_401: bool = True,
+        retry_on_429: bool = True,
     ) -> httpx.Response:
-        """Make an API request with automatic token refresh.
+        """Make an API request with automatic token refresh and quota pacing.
 
         Args:
             method: HTTP method (GET, POST, etc.).
             endpoint: API endpoint path.
             params: Query parameters.
             retry_on_401: Whether to retry after refreshing token on 401.
+            retry_on_429: Whether to wait and retry once on 429.
 
         Returns:
             The HTTP response.
         """
         url = f"{self.BASE_URL}{endpoint}"
 
-        async with httpx.AsyncClient() as client:
-            if method == "GET":
-                response = await client.get(
-                    url, headers=self._get_headers(), params=params
-                )
-            else:
-                response = await client.request(
-                    method, url, headers=self._get_headers(), params=params
-                )
+        delay = self._ratelimit_delay()
+        if delay > 0:
+            logger.info(
+                f"Reddit quota low ({self.ratelimit_remaining:.0f} remaining); "
+                f"pausing {delay:.1f}s before {endpoint}"
+            )
+            await asyncio.sleep(delay)
+
+        client = await self._get_client()
+        if method == "GET":
+            response = await client.get(url, headers=self._get_headers(), params=params)
+        else:
+            response = await client.request(
+                method, url, headers=self._get_headers(), params=params
+            )
+        self._record_ratelimit(response)
 
         # Handle 401 by refreshing token and retrying
         if response.status_code == 401 and retry_on_401:
             await self._refresh_access_token()
-            return await self._api_request(method, endpoint, params, retry_on_401=False)
+            return await self._api_request(
+                method, endpoint, params, retry_on_401=False, retry_on_429=retry_on_429
+            )
+
+        # Quota exhausted anyway (another process spent it): wait, then retry once
+        if response.status_code == 429 and retry_on_429:
+            wait = min(
+                self.ratelimit_reset or self.RATELIMIT_MAX_WAIT_SECONDS,
+                self.RATELIMIT_MAX_WAIT_SECONDS,
+            )
+            logger.warning(f"Reddit returned 429 for {endpoint}; retrying once in {wait:.1f}s")
+            await asyncio.sleep(wait)
+            # That wait covered the window; don't pace the retry on the same stale count
+            self.ratelimit_remaining = None
+            return await self._api_request(
+                method, endpoint, params, retry_on_401=retry_on_401, retry_on_429=False
+            )
 
         return response
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the HTTP client shared by this adapter's requests.
+
+        An httpx client is bound to the event loop it was opened on, and each
+        Celery task runs its own ``asyncio.run`` loop, so a new loop gets a new
+        client instead of reusing one whose loop has closed.
+        """
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client_loop is not loop:
+            self._client = await httpx.AsyncClient().__aenter__()
+            self._client_loop = loop
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the shared HTTP client if it was opened on the current loop."""
+        client, loop = self._client, self._client_loop
+        self._client, self._client_loop = None, None
+        if client is not None and loop is asyncio.get_running_loop():
+            await client.__aexit__(None, None, None)
+
+    def _record_ratelimit(self, response: httpx.Response) -> None:
+        """Remember the quota Reddit reported on the latest response."""
+        remaining = _parse_header_float(response.headers, "x-ratelimit-remaining")
+        if remaining is None:
+            return
+        self.ratelimit_remaining = remaining
+        self.ratelimit_reset = _parse_header_float(response.headers, "x-ratelimit-reset")
+        self._ratelimit_seen_at = time.monotonic()
+
+    def _ratelimit_delay(self) -> float:
+        """Seconds to wait before the next request to stay within Reddit's quota."""
+        remaining, reset = self.ratelimit_remaining, self.ratelimit_reset
+        if remaining is None or reset is None or remaining >= self.RATELIMIT_LOW_WATERMARK:
+            return 0.0
+        # The reset countdown was relative to when the headers arrived
+        seconds_left = reset - (time.monotonic() - self._ratelimit_seen_at)
+        if seconds_left <= 0:
+            return 0.0
+        return min(seconds_left / max(remaining, 1.0), self.RATELIMIT_MAX_WAIT_SECONDS)
 
     async def list_conversations(
         self,
@@ -922,7 +1014,7 @@ class RedditAdapter(ProviderAdapter):
             num_comments=data.get("num_comments", 0),
             remote_visibility=visibility,
             is_nsfw=data.get("over_18", False),
-            thumbnail_url=data.get("thumbnail") if data.get("thumbnail", "").startswith("http") else None,
+            thumbnail_url=data.get("thumbnail") if (data.get("thumbnail") or "").startswith("http") else None,
             raw_data=data,
         )
 

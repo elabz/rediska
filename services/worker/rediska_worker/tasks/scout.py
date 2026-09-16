@@ -333,6 +333,8 @@ def run_single_watch(self, watch_id: int) -> dict:
             # Link-only posts (e.g. weheartbdsm listings) carry their content on
             # an external page. Resolve it BEFORE the empty-body skip and before
             # analysis is enqueued, so the pipeline sees the real text.
+            # record_post resolves defensively too; that call is a no-op once
+            # the body here is no longer link-only.
             resolved_body = maybe_resolve_post_body(post.body_text, post.url)
             if resolved_body != post.body_text:
                 post.body_text = resolved_body
@@ -353,6 +355,7 @@ def run_single_watch(self, watch_id: int) -> dict:
                 post_title=post.title,
                 post_body=post.body_text,
                 post_author=post.author_username,
+                post_url=post.url,
             )
             db.commit()
 
@@ -467,6 +470,11 @@ def run_single_watch(self, watch_id: int) -> dict:
     name="scout.analyze_and_decide",
     max_retries=3,
     default_retry_delay=120,
+    # Inference is serialised through the shared gate, so one task's wall time
+    # includes every other process's LLM calls; the global 300s soft limit is
+    # far too short for a 7-call analysis. See inference_gate.py.
+    soft_time_limit=1500,
+    time_limit=1800,
 )
 def analyze_and_decide(
     self,
@@ -1172,6 +1180,11 @@ def analyze_and_decide(
     name="scout.reanalyze_post",
     max_retries=2,
     default_retry_delay=60,
+    # Inference is serialised through the shared gate, so one task's wall time
+    # includes every other process's LLM calls; the global 300s soft limit is
+    # far too short for a 7-call analysis. See inference_gate.py.
+    soft_time_limit=1500,
+    time_limit=1800,
 )
 def reanalyze_post(
     self,

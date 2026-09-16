@@ -1,7 +1,7 @@
 """Ingest tasks for fetching data from providers."""
 
 import asyncio
-from typing import Optional
+from typing import Any, Optional
 
 from rediska_worker.celery_app import app
 
@@ -41,8 +41,20 @@ def backfill_conversations(
     try:
         sync_service = MessageSyncService(db=session)
 
-        # Use the existing sync method - it already handles full pagination
-        result = asyncio.run(sync_service.sync_reddit_messages(identity_id=identity_id))
+        from rediska_core.domain.services.message_sync import ON_DEMAND_LOCK_WAIT_SECONDS
+
+        # Full pagination (no page cap); waits for a scheduled sync to finish
+        result = asyncio.run(sync_service.sync_reddit_messages(
+            identity_id=identity_id,
+            lock_wait_seconds=ON_DEMAND_LOCK_WAIT_SECONDS,
+        ))
+        if result.skipped:
+            return {
+                "status": "skipped",
+                "provider_id": provider_id,
+                "task_type": "backfill_conversations",
+                "reason": "another message sync for this identity is still running",
+            }
 
         # Queue indexing if new messages were synced
         index_task_id = None
@@ -135,9 +147,20 @@ def backfill_messages(
         sync_service = MessageSyncService(db=session)
 
         # Sync messages for this specific conversation's thread
+        from rediska_core.domain.services.message_sync import ON_DEMAND_LOCK_WAIT_SECONDS
+
         result = asyncio.run(sync_service.sync_reddit_messages(
-            identity_id=identity_id or conversation.identity_id
+            identity_id=identity_id or conversation.identity_id,
+            lock_wait_seconds=ON_DEMAND_LOCK_WAIT_SECONDS,
         ))
+        if result.skipped:
+            return {
+                "status": "skipped",
+                "provider_id": provider_id,
+                "conversation_id": conversation_id,
+                "task_type": "backfill_messages",
+                "reason": "another message sync for this identity is still running",
+            }
 
         return {
             "status": "success",
@@ -172,10 +195,12 @@ def backfill_messages(
 
 @app.task(name="ingest.sync_delta", bind=True)
 def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[int] = None) -> dict:
-    """Sync new messages since last sync.
+    """On-demand sync of inbox and sent folder (the "Sync now" button).
 
-    Uses early-exit optimization to stop pagination when hitting consecutive
-    existing messages, drastically reducing API calls for routine syncs.
+    Not beat-scheduled: ingest.sync_inbox_fast and ingest.sync_sent poll the
+    two folders separately. Stops early at already-stored messages, is capped at
+    MANUAL_SYNC_MAX_PAGES per folder, and waits briefly for a sync that is
+    already running instead of overlapping it.
 
     Args:
         provider_id: Provider to sync (currently only 'reddit' supported).
@@ -187,7 +212,12 @@ def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[in
     """
     # Import here to avoid circular imports
     from rediska_core.infra.db import get_sync_session_factory
-    from rediska_core.domain.services.message_sync import MessageSyncService, SyncError
+    from rediska_core.domain.services.message_sync import (
+        MANUAL_SYNC_MAX_PAGES,
+        ON_DEMAND_LOCK_WAIT_SECONDS,
+        MessageSyncService,
+        SyncError,
+    )
 
     # Get database session
     session_factory = get_sync_session_factory()
@@ -204,29 +234,12 @@ def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[in
                 "reason": f"Provider '{provider_id}' not supported",
             }
 
-        # Run the async sync function
-        result = asyncio.run(sync_service.sync_reddit_messages(identity_id=identity_id))
-
-        # Queue indexing if new messages were synced
-        index_task_id = None
-        if result.new_messages > 0:
-            index_task = app.send_task(
-                "index.bulk_index_all_messages",
-                kwargs={"batch_size": 500},
-                queue="celery",
-            )
-            index_task_id = index_task.id
-
-        return {
-            "status": "success",
-            "provider_id": "reddit",
-            "conversations_synced": result.conversations_synced,
-            "messages_synced": result.messages_synced,
-            "new_conversations": result.new_conversations,
-            "new_messages": result.new_messages,
-            "errors": result.errors,
-            "index_task_id": index_task_id,
-        }
+        result = asyncio.run(sync_service.sync_reddit_messages(
+            identity_id=identity_id,
+            max_pages=MANUAL_SYNC_MAX_PAGES,
+            lock_wait_seconds=ON_DEMAND_LOCK_WAIT_SECONDS,
+        ))
+        return _sync_response(result, "delta")
 
     except SyncError as e:
         return {
@@ -249,9 +262,9 @@ def sync_delta(self, provider_id: Optional[str] = None, identity_id: Optional[in
 def sync_inbox_fast(self, identity_id: Optional[int] = None) -> dict:
     """Fast inbox-only sync for catching new incoming messages quickly.
 
-    This is a lightweight sync that only checks the inbox (not sent folder),
-    with early-exit optimization. Designed to run frequently (every 60 seconds)
-    to minimize latency for new message detection.
+    Beat runs this every 60 seconds. It stops at already-stored messages, so a
+    routine run costs one Reddit request, and it never reads more than
+    PERIODIC_SYNC_MAX_PAGES pages.
 
     Args:
         identity_id: Specific identity to sync. If None, syncs the default/active identity.
@@ -259,45 +272,51 @@ def sync_inbox_fast(self, identity_id: Optional[int] = None) -> dict:
     Returns:
         Dictionary with sync results including counts and any errors.
     """
+    return _periodic_message_sync("inbox_fast", "/message/inbox", identity_id)
+
+
+@app.task(name="ingest.sync_sent", bind=True)
+def sync_sent(self, identity_id: Optional[int] = None) -> dict:
+    """Sent-folder sync, picking up messages sent from other Reddit clients.
+
+    Beat runs this every 5 minutes: sends from Rediska are stored locally first,
+    so the sent folder rarely has anything new. Page-capped like the inbox sync.
+
+    Args:
+        identity_id: Specific identity to sync. If None, syncs the default/active identity.
+
+    Returns:
+        Dictionary with sync results including counts and any errors.
+    """
+    return _periodic_message_sync("sent", "/message/sent", identity_id)
+
+
+def _periodic_message_sync(sync_type: str, endpoint: str, identity_id: Optional[int]) -> dict:
+    """Run one scheduled, page-capped sync of a single Reddit listing endpoint."""
     from rediska_core.infra.db import get_sync_session_factory
-    from rediska_core.domain.services.message_sync import MessageSyncService, SyncError
+    from rediska_core.domain.services.message_sync import (
+        PERIODIC_SYNC_MAX_PAGES,
+        MessageSyncService,
+        SyncError,
+    )
 
     session_factory = get_sync_session_factory()
     session = session_factory()
 
     try:
         sync_service = MessageSyncService(db=session)
-
-        # Run the async inbox-only sync
-        result = asyncio.run(sync_service.sync_inbox_only(identity_id=identity_id))
-
-        # Queue indexing if new messages were synced
-        index_task_id = None
-        if result.new_messages > 0:
-            index_task = app.send_task(
-                "index.bulk_index_all_messages",
-                kwargs={"batch_size": 500},
-                queue="celery",
-            )
-            index_task_id = index_task.id
-
-        return {
-            "status": "success",
-            "provider_id": "reddit",
-            "sync_type": "inbox_fast",
-            "conversations_synced": result.conversations_synced,
-            "messages_synced": result.messages_synced,
-            "new_conversations": result.new_conversations,
-            "new_messages": result.new_messages,
-            "errors": result.errors,
-            "index_task_id": index_task_id,
-        }
+        result = asyncio.run(sync_service.sync_reddit_messages(
+            identity_id=identity_id,
+            endpoints=[endpoint],
+            max_pages=PERIODIC_SYNC_MAX_PAGES,
+        ))
+        return _sync_response(result, sync_type)
 
     except SyncError as e:
         return {
             "status": "error",
             "provider_id": "reddit",
-            "sync_type": "inbox_fast",
+            "sync_type": sync_type,
             "error": str(e),
         }
     except Exception as e:
@@ -305,11 +324,46 @@ def sync_inbox_fast(self, identity_id: Optional[int] = None) -> dict:
         return {
             "status": "error",
             "provider_id": "reddit",
-            "sync_type": "inbox_fast",
+            "sync_type": sync_type,
             "error": str(e),
         }
     finally:
         session.close()
+
+
+def _sync_response(result: Any, sync_type: str) -> dict:
+    """Task result for a message sync, queueing indexing when messages arrived."""
+    if result.skipped:
+        return {
+            "status": "skipped",
+            "provider_id": "reddit",
+            "sync_type": sync_type,
+            "reason": "another message sync for this identity is still running",
+        }
+
+    # Queue indexing if new messages were synced
+    index_task_id = None
+    if result.new_messages > 0:
+        index_task = app.send_task(
+            "index.bulk_index_all_messages",
+            kwargs={"batch_size": 500},
+            queue="celery",
+        )
+        index_task_id = index_task.id
+
+    return {
+        # An aborted run keeps the pages it committed, but it did not finish
+        "status": "error" if result.aborted else "success",
+        "provider_id": "reddit",
+        "sync_type": sync_type,
+        "conversations_synced": result.conversations_synced,
+        "messages_synced": result.messages_synced,
+        "new_conversations": result.new_conversations,
+        "new_messages": result.new_messages,
+        "pages_fetched": result.pages_fetched,
+        "errors": result.errors,
+        "index_task_id": index_task_id,
+    }
 
 
 @app.task(name="ingest.browse_location")
@@ -340,7 +394,7 @@ def fetch_profile_items(provider_id: str, external_username: str) -> dict:
     return {"status": "not_implemented", "provider_id": provider_id, "username": external_username}
 
 
-@app.task(name="ingest.analyze_reddit_user", bind=True)
+@app.task(name="ingest.analyze_reddit_user", bind=True, soft_time_limit=1500, time_limit=1800)
 def analyze_reddit_user(
     self,
     username: str,
@@ -808,7 +862,7 @@ def analyze_reddit_user(
         session.close()
 
 
-@app.task(name="ingest.analyze_lead_profile", bind=True)
+@app.task(name="ingest.analyze_lead_profile", bind=True, soft_time_limit=1500, time_limit=1800)
 def analyze_lead_profile(
     self,
     lead_id: int,

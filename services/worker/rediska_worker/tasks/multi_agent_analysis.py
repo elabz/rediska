@@ -88,6 +88,11 @@ def _update_job_status(
     name="multi_agent_analysis.analyze_lead",
     max_retries=3,
     default_retry_delay=300,  # 5 minutes
+    # Inference is serialised through the shared gate, so one task's wall time
+    # includes every other process's LLM calls; the global 300s soft limit is
+    # far too short for a 7-call analysis. See inference_gate.py.
+    soft_time_limit=1500,
+    time_limit=1800,
 )
 def analyze_lead_task(self, lead_id: int) -> dict:
     """

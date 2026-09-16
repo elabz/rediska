@@ -77,10 +77,18 @@ class InferenceGate:
 
     async def _try_acquire_redis(self, r: Any) -> bool:
         count = await r.incr(self.key)
-        await r.expire(self.key, self.slot_ttl)
         if count > self.max_concurrent:
             await r.decr(self.key)
+            # Do NOT touch the TTL on a failed attempt. A slot leaked by a
+            # killed process (worker restart mid-request) must be allowed to
+            # expire; refreshing the TTL from every waiter would pin the leak
+            # forever and deadlock all inference. Only guard the pathological
+            # case of a key with no TTL at all.
+            if await r.ttl(self.key) < 0:
+                await r.expire(self.key, self.slot_ttl)
             return False
+        # Holder sets the TTL: it bounds how long a leaked slot can block others.
+        await r.expire(self.key, self.slot_ttl)
         return True
 
     async def _release_redis(self, r: Any) -> None:

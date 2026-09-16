@@ -19,6 +19,8 @@ class FakeRedis:
 
     def __init__(self) -> None:
         self.values: dict[str, int] = {}
+        self.ttls: dict[str, int] = {}
+        self.expire_calls = 0
         self.fail = False
 
     async def incr(self, key):
@@ -32,7 +34,12 @@ class FakeRedis:
         return self.values[key]
 
     async def expire(self, key, ttl):
+        self.ttls[key] = ttl
+        self.expire_calls += 1
         return True
+
+    async def ttl(self, key):
+        return self.ttls.get(key, -1)
 
     async def get(self, key):
         return self.values.get(key)
@@ -59,6 +66,30 @@ async def test_gate_serializes_across_holders():
     assert await gate_b.acquire(timeout=1) == "redis"
     await gate_b.release("redis")
     assert await r.get(gate_a.key) == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_acquire_does_not_refresh_ttl():
+    """A leaked slot must expire even while other callers keep polling."""
+    r = FakeRedis()
+    gate = InferenceGate("redis://x", max_concurrent=1, slot_ttl=100, redis_client=r)
+    await gate.acquire(timeout=1)
+    assert r.expire_calls == 1 and r.ttls[gate.key] == 100
+    r.ttls[gate.key] = 7  # simulate time passing on the holder's TTL
+    with pytest.raises(InferenceGateTimeout):
+        await gate.acquire(timeout=0.3)  # several failed attempts
+    assert r.ttls[gate.key] == 7, "waiters must not extend a possibly-leaked slot"
+    assert r.expire_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_acquire_sets_ttl_when_key_has_none():
+    r = FakeRedis()
+    gate = InferenceGate("redis://x", max_concurrent=1, slot_ttl=100, redis_client=r)
+    r.values[gate.key] = 1  # leaked with no TTL (e.g. cleared expiry)
+    with pytest.raises(InferenceGateTimeout):
+        await gate.acquire(timeout=0.2)
+    assert r.ttls[gate.key] == 100
 
 
 @pytest.mark.asyncio
