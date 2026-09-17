@@ -51,6 +51,8 @@ export interface EvaluationDialogProps {
   existing?: EffectiveEvaluation | null;
   /** What the agent received, shown verbatim inside the dialog. */
   modelInput?: ModelInput | null;
+  /** Verdict to start from when opened (e.g. Disagree from the inline control). */
+  initialVerdict?: HumanVerdict;
   onSaved?: (evaluation: EffectiveEvaluation) => void;
 }
 
@@ -89,6 +91,7 @@ export function EvaluationDialog({
   agentOutput,
   existing,
   modelInput,
+  initialVerdict,
   onSaved,
 }: EvaluationDialogProps) {
   const [verdict, setVerdict] = useState<HumanVerdict>('agree');
@@ -108,7 +111,7 @@ export function EvaluationDialog({
     if (!open) return;
     setError(null);
     setSaving(false);
-    setVerdict(existing?.human_verdict ?? 'agree');
+    setVerdict(initialVerdict ?? existing?.human_verdict ?? 'agree');
     setTags((existing?.reason_tags ?? []).filter((t): t is ReasonTag => (REASON_TAGS as readonly string[]).includes(t)));
     setMissingInfo(existing?.missing_info ?? '');
     setNotes(existing?.notes ?? '');
@@ -129,7 +132,7 @@ export function EvaluationDialog({
           : ''
       );
     }
-  }, [open, existing, dimension, fields]);
+  }, [open, existing, dimension, fields, initialVerdict]);
 
   const toggleTag = (tag: ReasonTag) => {
     setTags((prev) => (prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]));

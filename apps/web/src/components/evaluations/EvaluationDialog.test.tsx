@@ -180,3 +180,44 @@ describe('AgentInputSections', () => {
     expect(screen.getByText(/not sent to Preferences/)).toBeInTheDocument();
   });
 });
+
+
+describe('EvaluationControl', () => {
+  beforeEach(() => {
+    vi.mocked(global.fetch).mockClear();
+  });
+
+  it('Agree saves in one click without opening the form', async () => {
+    const { EvaluationControl } = await import('./EvaluationControl');
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    vi.mocked(global.fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 5, human_verdict: 'agree', reason_tags: [], created_at: '2026-09-16T00:00:00Z' }),
+    } as Response);
+
+    render(
+      <EvaluationControl subjectType="lead_analysis" subjectId={3} dimension={null} evaluation={null} onSaved={onSaved} />
+    );
+    await user.click(screen.getByRole('button', { name: /^agree with final verdict/i }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    const body = JSON.parse((vi.mocked(global.fetch).mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({ subject_id: 3, dimension: null, human_verdict: 'agree', reason_tags: [] });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByTestId('evaluation-badge')).toHaveTextContent('Agree');
+  });
+
+  it('Disagree opens the form pre-set to Disagree', async () => {
+    const { EvaluationControl } = await import('./EvaluationControl');
+    const user = userEvent.setup();
+    render(
+      <EvaluationControl subjectType="lead_analysis" subjectId={3} dimension="demographics" evaluation={null} />
+    );
+    await user.click(screen.getByRole('button', { name: /disagree with demographics/i }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /disagree/i })).toHaveAttribute('aria-checked', 'true');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
