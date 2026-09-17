@@ -19,6 +19,7 @@ from rediska_core.domain.models import (
     Message,
     Provider,
 )
+from rediska_core.infrastructure.elasticsearch import CONTENT_DOCS_INDEX
 
 
 # =============================================================================
@@ -292,7 +293,11 @@ class TestDeleteOperations:
             result = service.delete_content("message", message.id)
 
             assert result is True
-            mock_client.delete_document.assert_called_once()
+            # The only real logic here is the "<doc_type>:<entity_id>" doc_id.
+            mock_client.delete_document.assert_called_once_with(
+                index=CONTENT_DOCS_INDEX,
+                doc_id=f"message:{message.id}",
+            )
 
 
 # =============================================================================
@@ -320,15 +325,16 @@ class TestEnsureIndex:
             result = service.ensure_index()
 
             assert result is True
-            mock_client.ensure_index.assert_called_once()
+            # ensure_index is a passthrough; the index name is the real payload.
+            mock_client.ensure_index.assert_called_once_with(CONTENT_DOCS_INDEX)
 
-    def test_ensure_index_skips_if_exists(self, db_session):
-        """Ensure index should skip creation if index exists."""
+    def test_ensure_index_propagates_failure(self, db_session):
+        """Ensure index should surface a failure from the ES client."""
         from rediska_core.domain.services.indexing import IndexingService
 
         with patch("rediska_core.domain.services.indexing.ElasticsearchClient") as mock_es:
             mock_client = MagicMock()
-            mock_client.ensure_index.return_value = True
+            mock_client.ensure_index.return_value = False
             mock_es.return_value = mock_client
 
             service = IndexingService(
@@ -336,10 +342,7 @@ class TestEnsureIndex:
                 es_url="http://localhost:9200",
             )
 
-            result = service.ensure_index()
-
-            assert result is True
-            mock_client.ensure_index.assert_called_once()
+            assert service.ensure_index() is False
 
 
 # =============================================================================
@@ -385,6 +388,21 @@ class TestBulkIndexing:
 
             assert result["success"] is True
             mock_client.bulk_index.assert_called_once()
+
+            # success/indexed above are the stub's own return; check the
+            # documents the service actually assembled (1 fixture + 5 added).
+            kwargs = mock_client.bulk_index.call_args[1]
+            assert kwargs["index"] == CONTENT_DOCS_INDEX
+            documents = kwargs["documents"]
+            assert len(documents) == 6
+            expected_ids = {
+                f"message:{m.id}"
+                for m in db_session.query(Message)
+                .filter(Message.conversation_id == conv.id)
+                .all()
+            }
+            assert {d["_id"] for d in documents} == expected_ids
+            assert all(d["doc_type"] == "message" for d in documents)
 
 
 # =============================================================================

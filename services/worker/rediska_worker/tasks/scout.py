@@ -1068,6 +1068,9 @@ def analyze_and_decide(
             try:
                 from rediska_core.domain.models import LeadAnalysis, AnalysisDimension
                 from rediska_core.domain.services.agent_prompt import AgentPromptService
+                from rediska_core.domain.services.lead_priority import (
+                    priority_for_analysis,
+                )
 
                 # Get summaries from scout_post
                 interests_summary = scout_post.user_interests or ""
@@ -1142,6 +1145,9 @@ def analyze_and_decide(
                 lead.latest_analysis_id = analysis_id
                 lead.analysis_recommendation = recommendation
                 lead.analysis_confidence = confidence
+                lead.priority, lead.compatibility_score = priority_for_analysis(
+                    dimension_results, meta_output, verdict_dict
+                )
 
                 # Update scout_post with analysis link
                 scout_post.analysis_id = analysis_id

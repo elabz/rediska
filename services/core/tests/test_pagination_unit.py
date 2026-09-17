@@ -1,5 +1,7 @@
 """Unit tests for pagination utilities."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from rediska_core.domain.pagination import (
@@ -7,6 +9,8 @@ from rediska_core.domain.pagination import (
     PaginatedResult,
     CursorPaginationParams,
     CursorPaginatedResult,
+    cursor_paginate_query,
+    paginate_query,
 )
 
 
@@ -309,109 +313,107 @@ class TestCursorPaginatedResult:
         assert decoded["id"] == "msg-456"
 
 
+class _StubRow:
+    """Minimal ORM-ish row exposing the attribute used as a cursor field."""
+
+    def __init__(self, id_: str):
+        self.id = id_
+
+
+def _stub_session(count: int, rows: list) -> AsyncMock:
+    """AsyncSession stub: first execute() answers the COUNT, second the page."""
+    count_result = MagicMock()
+    count_result.scalar.return_value = count
+
+    rows_result = MagicMock()
+    rows_result.scalars.return_value.all.return_value = rows
+
+    session = AsyncMock()
+    session.execute.side_effect = [count_result, rows_result]
+    return session
+
+
 class TestPaginateQuery:
-    """Tests for paginate_query helper function."""
+    """Tests for the paginate_query helper function."""
 
-    def test_pagination_params_offset_calculation(self):
-        """Test that pagination params calculate correct offset."""
-        params = PaginationParams(page=3, page_size=25)
+    @pytest.mark.asyncio
+    async def test_applies_offset_and_limit_and_wraps_result(self):
+        """paginate_query must offset/limit the query and report the total."""
+        from sqlalchemy import select
 
-        # Verify offset calculation
-        assert params.offset == 50  # (3-1) * 25
-        assert params.page_size == 25
+        from rediska_core.domain.models import Job
 
-    def test_paginated_result_creation(self):
-        """Test creating a PaginatedResult manually."""
-        items = [{"id": 1}, {"id": 2}]
-        result = PaginatedResult(
-            items=items,
-            total=50,
-            page=1,
-            page_size=20,
-        )
+        rows = [_StubRow("a"), _StubRow("b")]
+        session = _stub_session(count=50, rows=rows)
 
-        assert isinstance(result, PaginatedResult)
-        assert len(result.items) == 2
+        # A real Select is required: paginate_query calls query.subquery(),
+        # which SQLAlchemy will not accept from a mock.
+        query = select(Job)
+        params = PaginationParams(page=3, page_size=20)
+        result = await paginate_query(session, query, params)
+
+        # Second execute() receives the paginated query; the first is the COUNT.
+        paginated = session.execute.call_args_list[1].args[0]
+        sql = str(paginated.compile(compile_kwargs={"literal_binds": True}))
+        assert "LIMIT 20" in sql
+        assert "OFFSET 40" in sql  # (3-1) * 20
+
+        assert result.items == rows
         assert result.total == 50
-        assert result.total_pages == 3
-
-    def test_paginated_result_empty(self):
-        """Test empty PaginatedResult."""
-        result = PaginatedResult(
-            items=[],
-            total=0,
-            page=1,
-            page_size=20,
-        )
-
-        assert len(result.items) == 0
-        assert result.total == 0
-        assert result.total_pages == 0
-        assert result.has_next is False
-
-    def test_paginated_result_last_page(self):
-        """Test PaginatedResult on last page."""
-        result = PaginatedResult(
-            items=[{"id": 1}],
-            total=41,
-            page=3,
-            page_size=20,
-        )
-
+        assert result.page == 3
+        assert result.page_size == 20
         assert result.total_pages == 3
         assert result.has_next is False
         assert result.has_previous is True
 
 
 class TestCursorPaginateQuery:
-    """Tests for cursor_paginate_query helper function."""
+    """Tests for the cursor_paginate_query helper function."""
 
-    def test_cursor_paginated_result_creation(self):
-        """Test creating a CursorPaginatedResult manually."""
-        items = [{"id": "msg-1"}, {"id": "msg-2"}]
-        result = CursorPaginatedResult(
-            items=items,
-            next_cursor="abc123",
-            has_more=True,
-        )
+    @staticmethod
+    def _rows_session(rows: list) -> AsyncMock:
+        rows_result = MagicMock()
+        rows_result.scalars.return_value.all.return_value = rows
+        session = AsyncMock()
+        session.execute.return_value = rows_result
+        return session
 
-        assert isinstance(result, CursorPaginatedResult)
-        assert len(result.items) == 2
+    @pytest.mark.asyncio
+    async def test_fetches_limit_plus_one_and_trims_overflow(self):
+        """An extra row signals has_more; it is trimmed and becomes the cursor."""
+        # 3 rows returned for limit=2 -> one row of overflow.
+        rows = [_StubRow("r1"), _StubRow("r2"), _StubRow("r3")]
+        session = self._rows_session(rows)
+
+        query = MagicMock()
+        query.limit.return_value = "limited-query"
+
+        params = CursorPaginationParams(limit=2)
+        result = await cursor_paginate_query(session, query, params)
+
+        query.limit.assert_called_once_with(3)  # limit + 1 probe row
+
         assert result.has_more is True
+        assert [r.id for r in result.items] == ["r1", "r2"]
+        # next_cursor encodes the last *kept* row's cursor field.
+        assert result.next_cursor is not None
+        assert CursorPaginationParams(
+            cursor=result.next_cursor, limit=2
+        ).decode_cursor() == {"id": "r2"}
 
-    def test_cursor_paginated_result_no_more(self):
-        """Test CursorPaginatedResult with no more items."""
-        result = CursorPaginatedResult(
-            items=[{"id": "msg-1"}],
-            next_cursor=None,
-            has_more=False,
-        )
+    @pytest.mark.asyncio
+    async def test_no_overflow_yields_no_cursor(self):
+        """Fewer rows than the probe limit means the page is the last one."""
+        rows = [_StubRow("r1")]
+        session = self._rows_session(rows)
+
+        query = MagicMock()
+        params = CursorPaginationParams(limit=2)
+        result = await cursor_paginate_query(session, query, params)
 
         assert result.has_more is False
         assert result.next_cursor is None
-
-    def test_cursor_encoding_decoding(self):
-        """Test cursor encoding and decoding round-trip."""
-        import base64
-        import json
-
-        # Encode cursor
-        cursor_data = {"id": "msg-100", "created_at": "2024-01-15"}
-        cursor = CursorPaginatedResult.encode_cursor(cursor_data)
-
-        # Decode cursor
-        params = CursorPaginationParams(cursor=cursor, limit=20)
-        decoded = params.decode_cursor()
-
-        assert decoded is not None
-        assert decoded["id"] == "msg-100"
-        assert decoded["created_at"] == "2024-01-15"
-
-    def test_cursor_params_limit_clamping(self):
-        """Test that cursor params limit is clamped correctly."""
-        params = CursorPaginationParams(limit=500, max_limit=100)
-
-        assert params.limit == 100
+        assert result.items == rows
 
 
 class TestPaginationEdgeCases:

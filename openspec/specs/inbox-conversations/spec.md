@@ -7,7 +7,7 @@ The Inbox is the primary reading surface: a cursor-paginated conversation list w
 
 ### Requirement: Conversation list with cursor pagination and filters
 
-`GET /conversations` SHALL return conversations ordered by `last_activity_at` with cursor pagination. The inbox UI SHALL surface unread and send-failed badges, a star toggle per conversation, and an identity filter.
+`GET /conversations` SHALL return conversations ordered by `last_activity_at` with cursor pagination. It SHALL accept `identity_id`, `list_id`, `has_attachments`, and `has_replies` filters, applied server-side before pagination so every matching conversation is reachable by paging — the UI MUST NOT filter only the pages it has already loaded. The inbox UI SHALL surface unread and send-failed badges, a star toggle per conversation, and an identity filter.
 
 #### Scenario: Paging through the inbox
 
@@ -18,6 +18,12 @@ The Inbox is the primary reading surface: a cursor-paginated conversation list w
 
 - **WHEN** the user selects an identity in the inbox filter
 - **THEN** only conversations bound to that identity are listed
+- **AND** the list is fetched with `identity_id`, so matches older than the first page are included
+
+#### Scenario: Active filter matches nothing
+
+- **WHEN** a filter (identity, list, attachments, replies) is active and no conversation matches
+- **THEN** the filter bar stays visible with a filter-specific empty state and a way to clear the filter, rather than the page-wide "No conversations yet" state
 
 #### Scenario: Failed-send badge
 
@@ -26,12 +32,22 @@ The Inbox is the primary reading surface: a cursor-paginated conversation list w
 
 ### Requirement: User-defined conversation lists
 
-The system SHALL support user-defined conversation lists (labels) via `GET/POST /lists`, `PUT/DELETE /lists/{listId}`, membership endpoints (`POST/DELETE /lists/{listId}/conversations/{conversationId}`), and `GET /lists/{listId}/conversation-ids`. The inbox SHALL offer a lists dropdown to assign conversations and filter by list.
+The system SHALL support user-defined conversation lists (labels) via `GET/POST /lists`, `PUT/DELETE /lists/{listId}`, membership endpoints (`POST/DELETE /lists/{listId}/conversations/{conversationId}`), and `GET /lists/{listId}/conversation-ids`. The inbox SHALL offer a lists dropdown to assign conversations and filter by list. Filtering by list SHALL pass `list_id` to `GET /conversations` (paginated, 50 per page in the UI) and to `GET /conversations/search`, so a list shows all of its members regardless of how recent they are, and a search while a list is selected returns only that list's conversations.
 
 #### Scenario: Assigning a conversation to a list
 
 - **WHEN** the user adds a conversation to a list from the inbox dropdown
 - **THEN** a membership row is created and the conversation appears when that list filter is active
+
+#### Scenario: List member older than the first page
+
+- **WHEN** a list's only member is older than the 50 most recent conversations and the user selects that list
+- **THEN** the member is shown immediately without loading more pages, and no "Load More" is offered
+
+#### Scenario: Searching within a list
+
+- **WHEN** a list filter is active and the user types a search query
+- **THEN** only matching conversations that are members of that list are returned
 
 #### Scenario: Deleting a list
 
@@ -41,6 +57,12 @@ The system SHALL support user-defined conversation lists (labels) via `GET/POST 
 ### Requirement: Conversation detail with infinite scroll and polling
 
 The conversation page SHALL load recent messages first, fetch older messages via cursor pagination when the user scrolls up ("infinite scroll"), and poll at a fast interval for new messages, appending them without disturbing scroll position.
+
+#### Scenario: Thread fills the viewport
+
+- **WHEN** the user opens a conversation
+- **THEN** the conversation panel fills the full viewport height (less the app shell padding)
+- **AND** the header, profile panel, and compose box keep their natural size while the message list takes all remaining height and scrolls internally
 
 #### Scenario: Loading older history
 

@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from unittest.mock import MagicMock, AsyncMock, patch
 
@@ -129,9 +129,10 @@ class TestJsonFormatter:
         output = formatter.format(record)
         parsed = json.loads(output)
 
-        # Should be parseable as ISO datetime
-        timestamp = parsed["timestamp"]
-        assert "T" in timestamp or "-" in timestamp
+        # Must actually round-trip through the ISO parser, and carry the
+        # UTC offset JsonFormatter attaches via tz=timezone.utc.
+        parsed_ts = datetime.fromisoformat(parsed["timestamp"])
+        assert parsed_ts.utcoffset() == timedelta(0)
 
 
 class TestRequestContext:
@@ -176,6 +177,28 @@ class TestRequestContext:
         assert result["provider"] == "reddit"
 
 
+def capture_structured_logger(name: str, level: int = logging.DEBUG):
+    """Attach a JsonFormatter StringIO handler to a fresh StructuredLogger.
+
+    Returns (logger, read) where read() parses the single emitted JSON record.
+    """
+    buffer = StringIO()
+    handler = logging.StreamHandler(buffer)
+    handler.setFormatter(JsonFormatter())
+
+    logger = StructuredLogger(name)
+    logger._logger.handlers.clear()
+    logger._logger.addHandler(handler)
+    logger._logger.setLevel(level)
+    # Don't let records escape to the root logger's handlers.
+    logger._logger.propagate = False
+
+    def read():
+        return json.loads(buffer.getvalue().strip())
+
+    return logger, read
+
+
 class TestStructuredLogger:
     """Tests for structured logger."""
 
@@ -187,46 +210,79 @@ class TestStructuredLogger:
 
     def test_log_info_message(self):
         """Test logging an info message."""
-        logger = StructuredLogger("test.module")
+        logger, read = capture_structured_logger("test.log.info")
 
-        # Should not raise
         logger.info("Test info message")
+
+        parsed = read()
+        assert parsed["message"] == "Test info message"
+        assert parsed["level"] == "INFO"
+        assert parsed["logger"] == "test.log.info"
 
     def test_log_with_context(self):
         """Test logging with request context."""
-        logger = StructuredLogger("test.module")
-        context = RequestContext(request_id="req-123")
+        logger, read = capture_structured_logger("test.log.context")
+        context = RequestContext(
+            request_id="req-123", user_id="user-456", path="/api/test"
+        )
 
-        # Should not raise
         logger.info("Test message", context=context)
+
+        parsed = read()
+        # Context fields are flattened onto the record by _log().
+        assert parsed["request_id"] == "req-123"
+        assert parsed["user_id"] == "user-456"
+        assert parsed["path"] == "/api/test"
 
     def test_log_with_extra_fields(self):
         """Test logging with extra fields."""
-        logger = StructuredLogger("test.module")
+        logger, read = capture_structured_logger("test.log.extra")
 
-        # Should not raise
         logger.info("User action", user_id="user-123", action="login")
+
+        parsed = read()
+        assert parsed["message"] == "User action"
+        assert parsed["user_id"] == "user-123"
+        assert parsed["action"] == "login"
 
     def test_log_error_with_exception(self):
         """Test logging error with exception."""
-        logger = StructuredLogger("test.module")
+        logger, read = capture_structured_logger("test.log.error")
 
         try:
             raise ValueError("Test error")
         except ValueError:
             logger.error("Error occurred", exc_info=True)
 
+        parsed = read()
+        assert parsed["level"] == "ERROR"
+        assert "ValueError: Test error" in parsed["exception"]
+        # WARNING and above also get a source location block, and it must point
+        # at the real call site rather than StructuredLogger's own wrapper --
+        # _log passes stacklevel=3 to walk back past itself and error().
+        assert parsed["source"]["function"] == "test_log_error_with_exception"
+        assert parsed["source"]["file"].endswith("test_observability_unit.py")
+
     def test_log_warning(self):
         """Test logging a warning."""
-        logger = StructuredLogger("test.module")
+        logger, read = capture_structured_logger("test.log.warning")
 
         logger.warning("Warning message", code="W001")
 
+        parsed = read()
+        assert parsed["level"] == "WARNING"
+        assert parsed["message"] == "Warning message"
+        assert parsed["code"] == "W001"
+
     def test_log_debug(self):
         """Test logging a debug message."""
-        logger = StructuredLogger("test.module")
+        logger, read = capture_structured_logger("test.log.debug")
 
         logger.debug("Debug details", data={"key": "value"})
+
+        parsed = read()
+        assert parsed["level"] == "DEBUG"
+        assert parsed["data"] == {"key": "value"}
 
 
 class TestGetLogger:
@@ -260,24 +316,43 @@ class TestConfigureLogging:
         """Test that configure_logging sets the log level."""
         configure_logging(level="DEBUG")
 
-        logger = get_logger("test.config")
-        # Should be able to log at debug level
-        logger.debug("Debug message")
+        root = logging.getLogger()
+        assert root.level == logging.DEBUG
+        # configure_logging replaces handlers wholesale with a single one.
+        assert len(root.handlers) == 1
+        assert root.handlers[0].level == logging.DEBUG
 
     def test_configure_logging_json_format(self):
         """Test configuring JSON format logging."""
         configure_logging(json_format=True)
 
-        # Should not raise
-        logger = get_logger("test.json")
-        logger.info("Test message")
+        root = logging.getLogger()
+        assert isinstance(root.handlers[0].formatter, JsonFormatter)
+
+    def test_configure_logging_non_json_format(self):
+        """Test that json_format=False installs a plain text formatter."""
+        configure_logging(json_format=False)
+
+        root = logging.getLogger()
+        formatter = root.handlers[0].formatter
+        assert not isinstance(formatter, JsonFormatter)
+        assert isinstance(formatter, logging.Formatter)
 
     def test_configure_logging_with_service_name(self):
         """Test configuring logging with service name."""
         configure_logging(service_name="rediska-core")
 
-        logger = get_logger("test.service")
-        logger.info("Test message")
+        root = logging.getLogger()
+        formatter = root.handlers[0].formatter
+        assert isinstance(formatter, JsonFormatter)
+        # The service name must reach the formatter so it lands in every record.
+        assert formatter.service_name == "rediska-core"
+
+        record = logging.LogRecord(
+            name="test.service", level=logging.INFO, pathname="t.py",
+            lineno=1, msg="hi", args=(), exc_info=None,
+        )
+        assert json.loads(formatter.format(record))["service"] == "rediska-core"
 
 
 class TestMetricType:
@@ -356,12 +431,6 @@ class TestMetric:
 class TestMetricsCollector:
     """Tests for MetricsCollector."""
 
-    def test_create_collector(self):
-        """Test creating a metrics collector."""
-        collector = MetricsCollector()
-
-        assert collector is not None
-
     def test_increment_counter(self):
         """Test incrementing a counter."""
         collector = MetricsCollector()
@@ -410,11 +479,17 @@ class TestMetricsCollector:
         collector = MetricsCollector()
 
         collector.increment("counter_a")
+        collector.increment("counter_a")
         collector.set_gauge("gauge_b", 10)
+        collector.record_histogram("hist_c", 2.5)
 
         metrics = collector.get_all()
 
-        assert len(metrics) >= 2
+        # get_all() always returns the three buckets, so assert the contents.
+        assert metrics["counters"] == {"counter_a": 2}
+        assert metrics["gauges"] == {"gauge_b": 10}
+        assert metrics["histograms"]["hist_c"]["count"] == 1
+        assert metrics["histograms"]["hist_c"]["max"] == 2.5
 
     def test_get_nonexistent_metric_returns_zero(self):
         """Test getting non-existent metric returns 0."""
@@ -450,19 +525,37 @@ class TestSystemMetrics:
         with patch.object(metrics, "_get_redis", return_value=mock_redis):
             queue_metrics = metrics.collect_queue_metrics()
 
-        assert "queue_depth" in queue_metrics or len(queue_metrics) >= 0
+        # One queue_depth_<name> entry per monitored queue, keyed by name.
+        assert set(queue_metrics) == {
+            f"queue_depth_{name}" for name in SystemMetrics.QUEUE_NAMES
+        }
+        assert all(depth == 42 for depth in queue_metrics.values())
+        # Depth is read from the Celery list key for each queue.
+        mock_redis.llen.assert_any_call("celery:ingest")
+
+    def test_collect_queue_metrics_without_redis(self):
+        """Queue metrics degrade to an empty dict when Redis is unavailable."""
+        metrics = SystemMetrics()
+
+        with patch.object(metrics, "_get_redis", return_value=None):
+            assert metrics.collect_queue_metrics() == {}
 
     def test_collect_last_sync_times(self):
         """Test collecting last sync times."""
         metrics = SystemMetrics()
 
         mock_redis = MagicMock()
-        mock_redis.get.return_value = "2024-01-15T12:00:00Z"
+        # collect_sync_times() scans for keys first; without this the iteration
+        # over a bare MagicMock raises and the result is silently empty.
+        mock_redis.keys.return_value = [b"rediska:last_sync:reddit"]
+        mock_redis.get.return_value = b"2024-01-15T12:00:00Z"
 
         with patch.object(metrics, "_get_redis", return_value=mock_redis):
             sync_times = metrics.collect_sync_times()
 
-        assert isinstance(sync_times, dict)
+        # Provider is the last colon-segment; bytes are decoded on both sides.
+        assert sync_times == {"last_sync_reddit": "2024-01-15T12:00:00Z"}
+        mock_redis.keys.assert_called_once_with("rediska:last_sync:*")
 
     def test_collect_all_metrics(self):
         """Test collecting all system metrics."""
@@ -471,17 +564,12 @@ class TestSystemMetrics:
         with patch.object(metrics, "_get_redis", return_value=None):
             all_metrics = metrics.collect_all()
 
-        assert isinstance(all_metrics, dict)
-        assert "collected_at" in all_metrics
-
-    def test_metrics_include_timestamp(self):
-        """Test that collected metrics include timestamp."""
-        metrics = SystemMetrics()
-
-        with patch.object(metrics, "_get_redis", return_value=None):
-            all_metrics = metrics.collect_all()
-
-        assert "collected_at" in all_metrics
+        assert set(all_metrics) == {"collected_at", "queues", "sync_times"}
+        # Parseable ISO timestamp, not just a present key.
+        assert datetime.fromisoformat(all_metrics["collected_at"]).tzinfo is not None
+        # No Redis -> both sub-collections degrade to empty, not missing.
+        assert all_metrics["queues"] == {}
+        assert all_metrics["sync_times"] == {}
 
 
 class TestLoggingIntegration:

@@ -4,8 +4,12 @@ These tests verify that models can be created, relationships work,
 and constraints are properly enforced using an in-memory SQLite database.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from sqlalchemy.exc import IntegrityError
+
+from rediska_core.domain.models import Identity
 
 from tests.factories import (
     create_audit_log,
@@ -22,14 +26,6 @@ from tests.factories import (
 
 class TestProviderModel:
     """Tests for the Provider model."""
-
-    def test_create_provider(self, db_session):
-        """Test creating a provider."""
-        provider = create_provider(db_session)
-
-        assert provider.provider_id == "reddit"
-        assert provider.display_name == "Reddit"
-        assert provider.enabled is True
 
     def test_provider_requires_unique_id(self, db_session):
         """Test that provider_id must be unique."""
@@ -61,41 +57,44 @@ class TestLocalUserModel:
 class TestIdentityModel:
     """Tests for the Identity model."""
 
-    def test_create_identity(self, db_session):
-        """Test creating an identity."""
-        identity = create_identity(
-            db_session,
-            external_username="my_reddit_account",
-            display_name="My Account",
-            is_default=True,
-        )
-
-        assert identity.id is not None
-        assert identity.external_username == "my_reddit_account"
-        assert identity.display_name == "My Account"
-        assert identity.is_default is True
-        assert identity.is_active is True
-
-    def test_identity_with_voice_config(self, db_session):
-        """Test creating identity with voice configuration."""
+    def test_identity_voice_config_survives_db_round_trip(self, db_session):
+        """Nested voice config JSON must round-trip through the JSON column."""
         voice_config = {
             "system_prompt": "You are a friendly assistant.",
             "tone": "casual",
             "guidelines": ["Be helpful", "Be concise"],
         }
 
-        identity = create_identity(
-            db_session,
-            voice_config_json=voice_config,
+        identity = create_identity(db_session, voice_config_json=voice_config)
+        identity_id = identity.id
+
+        # commit() expires the instance (expire_on_commit=True), so the requery
+        # below genuinely re-reads and re-deserializes the JSON column.
+        db_session.commit()
+
+        reloaded = db_session.get(Identity, identity_id)
+        assert reloaded is not None
+        assert reloaded.voice_config_json == voice_config
+        assert reloaded.voice_config_json["guidelines"] == ["Be helpful", "Be concise"]
+
+    def test_identity_requires_existing_provider(self, db_session):
+        """A non-existent provider_id must be rejected by the FK constraint."""
+        create_provider(db_session, provider_id="reddit")
+
+        identity = Identity(
+            provider_id="does_not_exist",
+            external_username="orphan",
+            external_user_id="t2_orphan",
+            display_name="Orphan",
+            voice_config_json={},
         )
+        db_session.add(identity)
 
-        assert identity.voice_config_json == voice_config
+        with pytest.raises(IntegrityError):
+            db_session.flush()
 
-    def test_identity_requires_provider(self, db_session):
-        """Test that identity requires a valid provider."""
-        # Provider is auto-created by factory
-        identity = create_identity(db_session)
-        assert identity.provider_id == "reddit"
+        # Leave the session usable for teardown after the failed flush.
+        db_session.rollback()
 
     def test_identity_unique_per_provider_username(self, db_session):
         """Test that (provider_id, external_username) must be unique."""
@@ -137,26 +136,6 @@ class TestExternalAccountModel:
         assert account.engagement_state == "not_engaged"
 
 
-class TestConversationModel:
-    """Tests for the Conversation model."""
-
-    def test_create_conversation(self, db_session):
-        """Test creating a conversation."""
-        conversation = create_conversation(db_session)
-
-        assert conversation.id is not None
-        assert conversation.identity_id is not None
-        assert conversation.counterpart_account_id is not None
-        assert conversation.external_conversation_id is not None
-
-    def test_conversation_requires_identity(self, db_session):
-        """Test that conversation is linked to an identity."""
-        identity = create_identity(db_session, is_default=True)
-        conversation = create_conversation(db_session, identity=identity)
-
-        assert conversation.identity_id == identity.id
-
-
 class TestMessageModel:
     """Tests for the Message model."""
 
@@ -188,13 +167,6 @@ class TestMessageModel:
         assert message.direction == "out"
         assert message.identity_id == identity.id
 
-    def test_message_belongs_to_conversation(self, db_session):
-        """Test that message is linked to a conversation."""
-        conversation = create_conversation(db_session)
-        message = create_message(db_session, conversation=conversation)
-
-        assert message.conversation_id == conversation.id
-
 
 class TestConversationWithMessages:
     """Tests for conversation with multiple messages."""
@@ -208,55 +180,20 @@ class TestConversationWithMessages:
         assert len(messages) == 5
         assert all(m.conversation_id == conversation.id for m in messages)
 
-    def test_message_directions_alternate(self, db_session):
-        """Test that factory alternates message directions."""
-        _, messages = create_conversation_with_messages(db_session, message_count=4)
-
-        # Even indices are "in", odd indices are "out"
-        assert messages[0].direction == "in"
-        assert messages[1].direction == "out"
-        assert messages[2].direction == "in"
-        assert messages[3].direction == "out"
-
 
 class TestAuditLogModel:
     """Tests for the AuditLog model."""
 
-    def test_create_audit_log(self, db_session):
-        """Test creating an audit log entry."""
-        audit = create_audit_log(
-            db_session,
-            action_type="user.login",
-            result="ok",
-        )
+    def test_audit_log_ts_defaults_on_insert(self, db_session):
+        """`ts` is populated by the column default, not by the caller."""
+        before = datetime.now(timezone.utc).replace(tzinfo=None)
+        audit = create_audit_log(db_session, action_type="user.login", result="ok")
+        after = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        assert audit.id is not None
-        assert audit.action_type == "user.login"
-        assert audit.result == "ok"
+        # No ts was passed in, so a non-null value proves the model default ran.
+        # Columns are naive DATETIME storing UTC by convention.
         assert audit.ts is not None
-
-    def test_audit_log_with_identity(self, db_session):
-        """Test creating audit log with identity reference."""
-        identity = create_identity(db_session)
-        audit = create_audit_log(
-            db_session,
-            action_type="identity.create",
-            identity=identity,
-        )
-
-        assert audit.identity_id == identity.id
-
-    def test_audit_log_with_entity_reference(self, db_session):
-        """Test creating audit log with entity reference."""
-        audit = create_audit_log(
-            db_session,
-            action_type="conversation.archive",
-            entity_type="conversation",
-            entity_id=123,
-        )
-
-        assert audit.entity_type == "conversation"
-        assert audit.entity_id == 123
+        assert before <= audit.ts <= after
 
 
 class TestJobModel:

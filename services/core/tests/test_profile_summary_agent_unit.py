@@ -209,16 +209,46 @@ class TestProfileSummaryInput:
         assert "post" in prompt.lower()
         assert "comment" in prompt.lower()
 
-    def test_input_truncates_long_content(self):
-        """Input should truncate very long content."""
+    def test_input_truncates_each_item_to_500_chars(self):
+        """Each individual post is capped at 500 chars regardless of the budget."""
+        input_data = ProfileSummaryInput(
+            account_metadata={"username": "test"},
+            profile_items=[
+                {
+                    "id": 1,
+                    "item_type": "post",
+                    "external_item_id": "post_1",
+                    "text_content": "x" * 10000,
+                    "item_created_at": datetime.now(timezone.utc),
+                }
+            ],
+            max_content_length=1000,
+        )
+
+        prompt = input_data.to_prompt()
+
+        # Per-item cap applies before the running budget is consulted, so a single
+        # huge post contributes exactly 500 chars and never trips the budget.
+        assert "x" * 500 in prompt
+        assert "x" * 501 not in prompt
+        assert "(Content truncated" not in prompt
+
+    def test_input_stops_adding_items_once_budget_exceeded(self):
+        """The running content budget should cut the item list short.
+
+        Each post is capped at 500 chars, so with max_content_length=1000 the third
+        post is what pushes the running total past the budget. A single item can
+        never trigger this branch, which is why >2 items are required here.
+        """
         long_items = [
             {
-                "id": 1,
+                "id": i,
                 "item_type": "post",
-                "external_item_id": "post_1",
-                "text_content": "x" * 10000,  # Very long content
+                "external_item_id": f"post_{i}",
+                "text_content": chr(ord("a") + i) * 600,  # distinct filler per item
                 "item_created_at": datetime.now(timezone.utc),
             }
+            for i in range(3)
         ]
 
         input_data = ProfileSummaryInput(
@@ -229,8 +259,12 @@ class TestProfileSummaryInput:
 
         prompt = input_data.to_prompt()
 
-        # Should be truncated
-        assert len(prompt) < 15000
+        assert "(Content truncated" in prompt
+        # First two posts fit (500 + 500 == budget); the third is dropped.
+        assert "[Post ID:0]" in prompt
+        assert "[Post ID:1]" in prompt
+        assert "[Post ID:2]" not in prompt
+        assert "c" * 500 not in prompt
 
 
 # =============================================================================

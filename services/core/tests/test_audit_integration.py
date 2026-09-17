@@ -118,6 +118,9 @@ class TestAuditListEndpoint:
 
         assert response.status_code == 200
         data = response.json()
+        # Pin the count: `all(...)` over an empty list is vacuously true, so a
+        # filter that returns nothing would otherwise pass silently.
+        assert len(data["entries"]) == 2
         assert all(e["action_type"] == "identity.create" for e in data["entries"])
 
     @pytest.mark.asyncio
@@ -136,6 +139,7 @@ class TestAuditListEndpoint:
 
         assert response.status_code == 200
         data = response.json()
+        assert len(data["entries"]) == 2
         assert all(e["identity_id"] == identity.id for e in data["entries"])
 
     @pytest.mark.asyncio
@@ -155,6 +159,7 @@ class TestAuditListEndpoint:
 
         assert response.status_code == 200
         data = response.json()
+        assert len(data["entries"]) == 2
         assert all(e["provider_id"] == "reddit" for e in data["entries"])
 
     @pytest.mark.asyncio
@@ -193,6 +198,7 @@ class TestAuditListEndpoint:
 
         assert response.status_code == 200
         data = response.json()
+        assert len(data["entries"]) == 1
         assert all(e["result"] == "error" for e in data["entries"])
 
     @pytest.mark.asyncio
@@ -211,6 +217,7 @@ class TestAuditListEndpoint:
 
         assert response.status_code == 200
         data = response.json()
+        assert len(data["entries"]) == 1
         assert all(e["entity_type"] == "identity" for e in data["entries"])
 
     @pytest.mark.asyncio

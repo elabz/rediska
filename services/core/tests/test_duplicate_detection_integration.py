@@ -182,6 +182,61 @@ def setup_accounts_with_images(db_session, setup_provider):
     return [account1, account2, account3]
 
 
+@pytest.fixture
+def setup_accounts_both_signals(db_session, setup_provider):
+    """Two accounts that match on BOTH username similarity and a shared image.
+
+    The enable_username_matching / enable_image_matching flags can only be
+    observed to do anything when both signals are present; the image-only
+    fixture above shares no similar usernames, so toggling the username flag
+    there changes nothing.
+    """
+    source = ExternalAccount(
+        provider_id="reddit",
+        external_username="signal_user",
+        external_user_id="t2_sig1",
+        analysis_state="analyzed",
+    )
+    twin = ExternalAccount(
+        provider_id="reddit",
+        external_username="signal_user_alt",
+        external_user_id="t2_sig2",
+        analysis_state="analyzed",
+    )
+    db_session.add_all([source, twin])
+    db_session.flush()
+
+    attachment = Attachment(
+        storage_backend="fs",
+        storage_key="/data/attachments/signal_shared.jpg",
+        sha256="signalsharedhash",
+        mime_type="image/jpeg",
+        size_bytes=31000,
+    )
+    db_session.add(attachment)
+    db_session.flush()
+
+    db_session.add_all(
+        [
+            ProfileItem(
+                account_id=source.id,
+                item_type="image",
+                external_item_id="sig_img1",
+                attachment_id=attachment.id,
+            ),
+            ProfileItem(
+                account_id=twin.id,
+                item_type="image",
+                external_item_id="sig_img2",
+                attachment_id=attachment.id,
+            ),
+        ]
+    )
+    db_session.flush()
+
+    return [source, twin]
+
+
 # =============================================================================
 # SERVICE INTEGRATION TESTS
 # =============================================================================
@@ -213,15 +268,43 @@ class TestDuplicateDetectionServiceIntegration:
     async def test_find_duplicates_returns_sorted_by_confidence(
         self, db_session, setup_accounts
     ):
-        """Suggestions should be sorted by confidence descending."""
+        """Suggestions should be sorted by confidence descending.
+
+        The base fixture only yields ONE match for john_doe, so the `if len >= 2`
+        sort check never ran. Two more john variants are added here with
+        deliberately DIFFERENT confidences (variation 0.85 > prefix ~0.80 >
+        fuzzy ~0.76) so the ordering is actually observable.
+        """
         service = DuplicateDetectionService(db=db_session)
+
+        prefix_match = ExternalAccount(
+            provider_id="reddit",
+            external_username="john_doex",  # prefix_suffix_match, ~0.80
+            external_user_id="t2_john4",
+            analysis_state="analyzed",
+        )
+        fuzzy_match = ExternalAccount(
+            provider_id="reddit",
+            external_username="johnn_doe",  # fuzzy_match, ~0.76
+            external_user_id="t2_john5",
+            analysis_state="analyzed",
+        )
+        db_session.add_all([prefix_match, fuzzy_match])
+        db_session.flush()
 
         john_doe = setup_accounts[0]
         suggestions = await service.find_duplicates(john_doe.id)
 
-        if len(suggestions) >= 2:
-            for i in range(len(suggestions) - 1):
-                assert suggestions[i].overall_confidence >= suggestions[i + 1].overall_confidence
+        # Guard the guard: the sort assertion below is only meaningful if the
+        # list is actually long enough to be mis-sorted.
+        assert len(suggestions) >= 3
+
+        confidences = [s.overall_confidence for s in suggestions]
+        assert confidences == sorted(confidences, reverse=True)
+        # Distinct values, so a no-op sort would be caught.
+        assert len(set(confidences)) >= 3
+        # The strongest signal (john_doe_alt, variation_match) leads.
+        assert suggestions[0].candidate_account_id == setup_accounts[1].id
 
     @pytest.mark.asyncio
     async def test_find_duplicates_by_image_hash(
@@ -256,13 +339,13 @@ class TestDuplicateDetectionServiceIntegration:
         """Service should not flag accounts with no shared characteristics."""
         service = DuplicateDetectionService(db=db_session)
 
-        # unique_person has no shared images and different username
+        # unique_person shares no images and has an unrelated username, so it
+        # must produce NO suggestions at all -- not merely low-confidence ones.
+        # The old loop passed vacuously on an empty list either way.
         unique_person = setup_accounts_with_images[2]
         suggestions = await service.find_duplicates(unique_person.id)
 
-        # Should not have high-confidence matches
-        for suggestion in suggestions:
-            assert suggestion.overall_confidence < 0.8
+        assert suggestions == []
 
     @pytest.mark.asyncio
     async def test_find_duplicates_nonexistent_account(self, db_session, setup_provider):
@@ -375,33 +458,49 @@ class TestDuplicateDetectionConfiguration:
 
     @pytest.mark.asyncio
     async def test_disable_username_matching(
-        self, db_session, setup_accounts_with_images
+        self, db_session, setup_accounts_both_signals
     ):
-        """Disabling username matching should only use image hashes."""
+        """Turning off username matching drops the username reason only.
+
+        Uses accounts that match on BOTH signals so the flag has something to
+        remove. With the image-only fixture the accounts shared no similar
+        usernames, so this flag changed nothing and the loop asserted a
+        condition that was already true.
+        """
+        source, twin = setup_accounts_both_signals
+
+        default_service = DuplicateDetectionService(db=db_session)
+        baseline = await default_service.find_duplicates(source.id)
+        baseline_match = next(
+            s for s in baseline if s.candidate_account_id == twin.id
+        )
+        # Precondition: both reasons present when the flag is on.
+        assert {r.type for r in baseline_match.reasons} == {"username", "image_hash"}
+
         config = DuplicateDetectionConfig(enable_username_matching=False)
         service = DuplicateDetectionService(db=db_session, config=config)
+        suggestions = await service.find_duplicates(source.id)
 
-        photo_user = setup_accounts_with_images[0]
-        suggestions = await service.find_duplicates(photo_user.id)
-
-        # Should only have image_hash reasons
-        for suggestion in suggestions:
-            reason_types = [r.type for r in suggestion.reasons]
-            assert "username" not in reason_types
+        match = next(s for s in suggestions if s.candidate_account_id == twin.id)
+        assert {r.type for r in match.reasons} == {"image_hash"}
+        # Losing a signal must lower the combined confidence, not keep it.
+        assert match.overall_confidence < baseline_match.overall_confidence
 
     @pytest.mark.asyncio
-    async def test_disable_image_matching(self, db_session, setup_accounts_with_images):
-        """Disabling image matching should only use usernames."""
+    async def test_disable_image_matching(self, db_session, setup_accounts_both_signals):
+        """Turning off image matching leaves a non-empty username-only result."""
+        source, twin = setup_accounts_both_signals
+
         config = DuplicateDetectionConfig(enable_image_matching=False)
         service = DuplicateDetectionService(db=db_session, config=config)
 
-        photo_user = setup_accounts_with_images[0]
-        suggestions = await service.find_duplicates(photo_user.id)
+        suggestions = await service.find_duplicates(source.id)
 
-        # Should only have username reasons
-        for suggestion in suggestions:
-            reason_types = [r.type for r in suggestion.reasons]
-            assert "image_hash" not in reason_types
+        # Non-empty: previously this produced 0 suggestions, so the loop body
+        # never executed and the assertion inside it never ran.
+        assert len(suggestions) >= 1
+        match = next(s for s in suggestions if s.candidate_account_id == twin.id)
+        assert {r.type for r in match.reasons} == {"username"}
 
 
 # =============================================================================
@@ -572,19 +671,21 @@ class TestIntegrationEdgeCases:
             db_session.add(account)
         db_session.flush()
 
-        config = DuplicateDetectionConfig(max_candidates=5)
-        service = DuplicateDetectionService(db=db_session, config=config)
-
-        # Get first account
         first_account = (
             db_session.query(ExternalAccount)
             .filter(ExternalAccount.external_username == "user_0")
             .first()
         )
 
-        # This tests that the query limit is applied
-        # (though matching results may be fewer based on actual similarity)
+        # Every user_N matches user_0 (variation_match), so the ONLY thing that
+        # can limit the result count is max_candidates. 19 would match uncapped.
+        uncapped = DuplicateDetectionService(db=db_session)
+        uncapped_suggestions = await uncapped.find_duplicates(first_account.id)
+        assert len(uncapped_suggestions) == 19
+
+        config = DuplicateDetectionConfig(max_candidates=5)
+        service = DuplicateDetectionService(db=db_session, config=config)
         suggestions = await service.find_duplicates(first_account.id)
 
-        # Should have results (exact number depends on similarity)
-        assert suggestions is not None
+        # `is not None` could never fail. Assert the cap really binds.
+        assert len(suggestions) == 5

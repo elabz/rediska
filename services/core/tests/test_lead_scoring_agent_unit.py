@@ -22,8 +22,6 @@ from rediska_core.domain.services.lead_scoring import (
     LeadScoringInput,
     LeadScoringOutput,
     LeadScoringService,
-    ScoringFlag,
-    ScoringReason,
 )
 
 
@@ -79,77 +77,49 @@ def sample_profile_summary():
 class TestLeadScoringOutput:
     """Tests for LeadScoringOutput schema."""
 
-    def test_output_schema_fields(self):
-        """Output should have all required fields."""
-        output = LeadScoringOutput(
-            score=85,
-            reasons=[
-                ScoringReason(
-                    factor="budget_fit",
-                    impact="positive",
-                    description="Budget of $500/month aligns with our pricing",
-                    weight=0.3,
-                ),
-            ],
-            flags=[],
-            recommended_action="contact",
-            confidence=0.85,
-        )
+    def test_score_bounds_are_enforced(self):
+        """The ge=0/le=100 constraint must actually reject out-of-range scores.
 
-        assert output.score == 85
-        assert len(output.reasons) == 1
-        assert output.recommended_action == "contact"
-        assert output.confidence == 0.85
+        The old test built score=50 and asserted 0 <= 50 <= 100, which is a
+        property of the literal, not of the schema -- it passed even with the
+        constraint removed. Feed values outside the range instead.
+        """
+        from pydantic import ValidationError
 
-    def test_score_bounds(self):
-        """Score should be between 0 and 100."""
-        output = LeadScoringOutput(
-            score=50,
-            reasons=[],
-            flags=[],
-            recommended_action="review",
-            confidence=0.5,
-        )
+        for bad_score in (101, -1, 1000):
+            with pytest.raises(ValidationError):
+                LeadScoringOutput(
+                    score=bad_score,
+                    reasons=[],
+                    flags=[],
+                    recommended_action="review",
+                    confidence=0.5,
+                )
 
-        assert 0 <= output.score <= 100
-
-    def test_scoring_reason_structure(self):
-        """ScoringReason should capture why score was given."""
-        reason = ScoringReason(
-            factor="company_size",
-            impact="positive",
-            description="20-person company is in our target segment",
-            weight=0.25,
-        )
-
-        assert reason.factor == "company_size"
-        assert reason.impact == "positive"
-        assert reason.weight == 0.25
-
-    def test_scoring_flag_structure(self):
-        """ScoringFlag should capture concerns."""
-        flag = ScoringFlag(
-            type="competitor_mention",
-            severity="medium",
-            description="Post mentions considering competitor products",
-        )
-
-        assert flag.type == "competitor_mention"
-        assert flag.severity == "medium"
-
-    def test_recommended_actions(self):
-        """Output should have valid recommended actions."""
-        valid_actions = ["contact", "review", "nurture", "skip", "prioritize"]
-
-        for action in valid_actions:
+        # The boundaries themselves remain valid.
+        for ok_score in (0, 100):
             output = LeadScoringOutput(
-                score=50,
+                score=ok_score,
                 reasons=[],
                 flags=[],
-                recommended_action=action,
+                recommended_action="review",
                 confidence=0.5,
             )
-            assert output.recommended_action == action
+            assert output.score == ok_score
+
+    def test_confidence_bounds_are_enforced(self):
+        """confidence carries ge=0.0/le=1.0 and must reject values outside it."""
+        from pydantic import ValidationError
+
+        for bad_confidence in (1.5, -0.1):
+            with pytest.raises(ValidationError):
+                LeadScoringOutput(
+                    score=50,
+                    reasons=[],
+                    flags=[],
+                    recommended_action="review",
+                    confidence=bad_confidence,
+                )
 
 
 # =============================================================================
@@ -159,41 +129,6 @@ class TestLeadScoringOutput:
 
 class TestLeadScoringInput:
     """Tests for LeadScoringInput."""
-
-    def test_input_from_lead_data(self, sample_lead_data):
-        """Input should accept lead post data."""
-        input_data = LeadScoringInput(
-            lead_data=sample_lead_data,
-        )
-
-        assert input_data.lead_data["title"] is not None
-        assert "CRM" in input_data.lead_data["title"]
-
-    def test_input_with_profile_summary(self, sample_lead_data, sample_profile_summary):
-        """Input should accept optional profile summary."""
-        input_data = LeadScoringInput(
-            lead_data=sample_lead_data,
-            profile_summary=sample_profile_summary,
-        )
-
-        assert input_data.profile_summary is not None
-        assert "founder" in input_data.profile_summary["summary"]
-
-    def test_input_with_scoring_criteria(self, sample_lead_data):
-        """Input should accept custom scoring criteria."""
-        criteria = {
-            "target_industries": ["B2B SaaS", "fintech"],
-            "min_company_size": 10,
-            "max_company_size": 500,
-            "budget_range": {"min": 200, "max": 2000},
-        }
-
-        input_data = LeadScoringInput(
-            lead_data=sample_lead_data,
-            scoring_criteria=criteria,
-        )
-
-        assert input_data.scoring_criteria["min_company_size"] == 10
 
     def test_input_to_prompt(self, sample_lead_data, sample_profile_summary):
         """Input should generate a prompt for the agent."""
@@ -546,22 +481,33 @@ class TestLeadScoringSystemPrompt:
     """Tests for the lead scoring system prompt."""
 
     def test_system_prompt_includes_scoring_guidance(self):
-        """System prompt should include scoring guidance."""
+        """System prompt must state the full 0-100 range and its bands.
+
+        `"0" in prompt and "100" in prompt` cannot fail -- any prompt
+        containing "100" contains "0". Assert the actual score bands instead.
+        """
         agent = LeadScoringAgent(inference_client=AsyncMock())
 
         prompt = agent.get_system_prompt()
 
         assert "score" in prompt.lower()
-        assert "0" in prompt and "100" in prompt
+        assert "score the lead from 0 to 100" in prompt.lower()
+        # Every band the model is asked to choose between.
+        for band in ("90-100", "70-89", "50-69", "30-49", "0-29"):
+            assert band in prompt
 
     def test_system_prompt_defines_actions(self):
-        """System prompt should define recommended actions."""
+        """All five action literals the schema accepts must be named.
+
+        The old `"contact" in p or "action" in p` was satisfied by the word
+        "action" alone, so the prompt could have omitted every action name.
+        """
         agent = LeadScoringAgent(inference_client=AsyncMock())
 
         prompt = agent.get_system_prompt()
 
-        # Should mention possible actions
-        assert "contact" in prompt.lower() or "action" in prompt.lower()
+        for action in ("prioritize", "contact", "review", "nurture", "skip"):
+            assert f'"{action}"' in prompt, f"missing action literal: {action}"
 
     def test_system_prompt_specifies_output_format(self):
         """System prompt should specify JSON output format."""

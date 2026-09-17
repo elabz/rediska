@@ -8,6 +8,8 @@ Provides endpoints for:
 - DELETE /scout-watches/{id} - Delete a watch
 - POST /scout-watches/{id}/run - Trigger a manual run
 - GET /scout-watches/{id}/runs - Get run history
+- GET /scout-watches/needs-review - Cross-watch needs-review triage queue
+- POST /scout-watches/posts/{post_id}/dismiss - Dismiss a needs-review post
 """
 
 import logging
@@ -21,9 +23,12 @@ from sqlalchemy.orm import Session
 from rediska_core.api.deps import CurrentUser, get_db
 from rediska_core.config import get_settings
 from rediska_core.api.schemas.scout_watch import (
+    NeedsReviewListResponse,
+    NeedsReviewPostResponse,
     ScoutWatchCreate,
     ScoutWatchListResponse,
     ScoutWatchPostAddToLeadsResponse,
+    ScoutWatchPostDismissResponse,
     ScoutWatchPostReanalyzeResponse,
     ScoutWatchPostResponse,
     ScoutWatchResponse,
@@ -45,6 +50,31 @@ from rediska_core.domain.services.scout_watch import (
 
 router = APIRouter(prefix="/scout-watches", tags=["scout-watches"])
 logger = logging.getLogger(__name__)
+
+
+def _post_dimensions(post, db: Session) -> Optional[dict]:
+    """A scout post's stored dimension outputs.
+
+    Stored on the post for all posts since migration 011; older posts fall
+    back to the linked LeadAnalysis dimension rows.
+    """
+    if post.dimension_results_json:
+        return post.dimension_results_json
+    if not post.analysis_id:
+        return None
+
+    from sqlalchemy.orm import joinedload
+
+    analysis = (
+        db.query(LeadAnalysis)
+        .options(joinedload(LeadAnalysis.dimensions))
+        .filter(LeadAnalysis.id == post.analysis_id)
+        .first()
+    )
+    if not analysis or not analysis.dimensions:
+        return None
+    dimensions = {d.dimension: d.output_json for d in analysis.dimensions if d.output_json}
+    return dimensions or None
 
 
 # =============================================================================
@@ -135,6 +165,56 @@ async def create_watch(
 
     except ScoutWatchError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+# =============================================================================
+# NEEDS-REVIEW QUEUE (declared before /{watch_id} so the path is not captured)
+# =============================================================================
+
+
+@router.get("/needs-review", response_model=NeedsReviewListResponse)
+async def list_needs_review(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+    cursor: Optional[str] = Query(default=None, description="Cursor from a previous page"),
+    limit: int = Query(default=25, ge=1, le=100),
+    watch_id: Optional[int] = Query(default=None, description="Restrict to one watch"),
+) -> NeedsReviewListResponse:
+    """Scout posts analysed as needs_review that nobody has triaged, newest first."""
+    service = ScoutWatchService(db)
+
+    try:
+        posts, next_cursor = service.list_needs_review(
+            cursor=cursor, limit=limit, watch_id=watch_id
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid cursor: {cursor}"
+        )
+
+    watches = {}
+    items: list[NeedsReviewPostResponse] = []
+    for post in posts:
+        if post.watch_id not in watches:
+            watches[post.watch_id] = service.get_watch(post.watch_id)
+        watch = watches[post.watch_id]
+        item = NeedsReviewPostResponse.model_validate(post)
+        item.analysis_dimensions = _post_dimensions(post, db)
+        if watch:
+            item.watch_source_location = watch.source_location
+            item.watch_search_query = watch.search_query
+            item.watch_min_confidence = watch.min_confidence
+        items.append(item)
+
+    from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
+
+    AnalysisEvaluationService(db).attach_to_scout_posts(items)
+
+    return NeedsReviewListResponse(
+        items=items,
+        total=service.count_needs_review(watch_id=watch_id),
+        next_cursor=next_cursor,
+    )
 
 
 # =============================================================================
@@ -464,32 +544,7 @@ async def get_run_detail(
         post_responses = []
         for post in posts:
             post_data = ScoutWatchPostResponse.model_validate(post)
-
-            # First try to get dimension results from scout_watch_posts directly
-            # (stored for ALL posts since migration 011)
-            if post.dimension_results_json:
-                post_data.analysis_dimensions = post.dimension_results_json
-            # Fallback: Load analysis dimensions from LeadAnalysis if analysis_id exists
-            # (for backward compatibility with posts analyzed before migration 011)
-            elif post.analysis_id:
-                from sqlalchemy.orm import joinedload
-
-                analysis = db.query(LeadAnalysis).options(
-                    joinedload(LeadAnalysis.dimensions)
-                ).filter(
-                    LeadAnalysis.id == post.analysis_id
-                ).first()
-
-                if analysis and analysis.dimensions:
-                    # Build dimensions dict from the dimension records
-                    dimensions_dict = {}
-                    for dim in analysis.dimensions:
-                        if dim.output_json:
-                            dimensions_dict[dim.dimension] = dim.output_json
-
-                    if dimensions_dict:
-                        post_data.analysis_dimensions = dimensions_dict
-
+            post_data.analysis_dimensions = _post_dimensions(post, db)
             post_responses.append(post_data)
 
         from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
@@ -506,6 +561,56 @@ async def get_run_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Watch not found: {watch_id}",
         )
+
+
+# =============================================================================
+# DISMISS NEEDS-REVIEW POST
+# =============================================================================
+
+
+@router.post(
+    "/posts/{post_id}/dismiss",
+    response_model=ScoutWatchPostDismissResponse,
+)
+async def dismiss_post(
+    post_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> ScoutWatchPostDismissResponse:
+    """Dismiss a needs-review post: it leaves the queue and no lead is created."""
+    service = ScoutWatchService(db)
+
+    post = service.get_post(post_id)
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Post not found: {post_id}",
+        )
+
+    try:
+        service.dismiss_post(post)
+    except ScoutWatchError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    db.add(
+        AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="scout_watch.dismiss_post",
+            entity_type="scout_watch_post",
+            entity_id=post_id,
+            request_json={"watch_id": post.watch_id},
+            response_json={
+                "analysis_recommendation": post.analysis_recommendation,
+                "analysis_confidence": post.analysis_confidence,
+            },
+            result="ok",
+        )
+    )
+    db.commit()
+
+    assert post.dismissed_at is not None
+    return ScoutWatchPostDismissResponse(post_id=post_id, dismissed_at=post.dismissed_at)
 
 
 # =============================================================================
@@ -680,8 +785,18 @@ async def add_post_to_leads(
             user_character_summary=post.user_character,
         )
 
-        # Update post with lead_id
+        # Update post with lead_id; a human promotion triages the post out of
+        # the needs-review queue.
         post.lead_id = lead.id
+        post.triaged_at = datetime.utcnow()
+        if lead.priority is None:
+            from rediska_core.domain.services.lead_priority import (
+                priority_from_stored_results,
+            )
+
+            lead.priority, lead.compatibility_score = priority_from_stored_results(
+                post.dimension_results_json
+            )
         db.flush()
 
         # Audit log

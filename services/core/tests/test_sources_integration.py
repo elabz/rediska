@@ -7,13 +7,16 @@ Tests cover:
 4. Error handling
 """
 
-from unittest.mock import MagicMock, patch
+import json
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from rediska_core.api.deps import get_current_user
-from rediska_core.domain.models import LocalUser, Provider
+from rediska_core.domain.models import Identity, LocalUser, Provider
+from rediska_core.providers.base import PaginatedResult, ProviderPost
 
 
 # =============================================================================
@@ -46,45 +49,75 @@ async def auth_client(test_app, db_session, mock_user):
     test_app.dependency_overrides.pop(get_current_user, None)
 
 
+@pytest.fixture(autouse=True)
+def stub_reddit_credentials(test_settings):
+    """Supply the settings and stored OAuth tokens that browse_posts requires.
+
+    The endpoint loads an encryption key and decrypts real stored credentials
+    before it ever reaches the provider. These tests cover the endpoint's
+    response shape, so both are stood in for.
+    """
+    tokens = json.dumps(
+        {"access_token": "test-access-token", "refresh_token": "test-refresh-token"}
+    )
+    with patch(
+        "rediska_core.api.routes.sources.get_settings", return_value=test_settings
+    ), patch("rediska_core.api.routes.sources.CredentialsService") as mock_credentials:
+        mock_credentials.return_value.get_credential_decrypted.return_value = tokens
+        yield mock_credentials
+
+
 @pytest.fixture
 def setup_provider(db_session):
-    """Set up provider for tests."""
+    """Set up provider and the active identity browse_posts resolves."""
     provider = Provider(
         provider_id="reddit",
         display_name="Reddit",
         enabled=True,
     )
     db_session.add(provider)
+    db_session.flush()
+
+    identity = Identity(
+        provider_id="reddit",
+        external_username="test_identity",
+        display_name="Test Identity",
+        is_default=True,
+        is_active=True,
+    )
+    db_session.add(identity)
     db_session.commit()
     return provider
 
 
 @pytest.fixture
 def sample_posts():
-    """Sample posts data from provider."""
+    """Sample posts as the adapter returns them: normalized ProviderPost DTOs."""
     return [
-        {
-            "id": "post1",
-            "title": "First Post",
-            "body": "This is the first post content.",
-            "author": "user1",
-            "author_id": "t2_user1",
-            "url": "https://reddit.com/r/test/comments/post1",
-            "created_utc": 1704067200,
-            "score": 100,
-            "num_comments": 25,
-        },
-        {
-            "id": "post2",
-            "title": "Second Post",
-            "body": "This is the second post content.",
-            "author": "user2",
-            "author_id": "t2_user2",
-            "url": "https://reddit.com/r/test/comments/post2",
-            "created_utc": 1704153600,
-            "score": 50,
-            "num_comments": 10,
-        },
+        ProviderPost(
+            external_id="post1",
+            author_id="t2_user1",
+            author_username="user1",
+            title="First Post",
+            url="https://reddit.com/r/test/comments/post1",
+            location="r/test",
+            body_text="This is the first post content.",
+            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            score=100,
+            num_comments=25,
+        ),
+        ProviderPost(
+            external_id="post2",
+            author_id="t2_user2",
+            author_username="user2",
+            title="Second Post",
+            url="https://reddit.com/r/test/comments/post2",
+            location="r/test",
+            body_text="This is the second post content.",
+            created_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            score=50,
+            num_comments=10,
+        ),
     ]
 
 
@@ -101,13 +134,14 @@ class TestBrowsePostsEndpoint:
         self, auth_client, setup_provider, sample_posts
     ):
         """GET /sources/.../posts should return posts."""
-        with patch("rediska_core.api.routes.sources.get_provider_client") as mock_get_client:
-            mock_client = MagicMock()
-            mock_client.browse_location.return_value = {
-                "posts": sample_posts,
-                "after": "cursor_abc",
-            }
-            mock_get_client.return_value = mock_client
+        with patch("rediska_core.api.routes.sources.RedditAdapter") as mock_adapter_cls:
+            mock_client = AsyncMock()
+            mock_client.browse_location.return_value = PaginatedResult(
+                items=sample_posts,
+                next_cursor="cursor_abc",
+                has_more=False,
+            )
+            mock_adapter_cls.return_value = mock_client
 
             response = await auth_client.get(
                 "/sources/reddit/locations/r%2Ftest/posts"
@@ -124,13 +158,14 @@ class TestBrowsePostsEndpoint:
         self, auth_client, setup_provider, sample_posts
     ):
         """Response should include cursor for pagination."""
-        with patch("rediska_core.api.routes.sources.get_provider_client") as mock_get_client:
-            mock_client = MagicMock()
-            mock_client.browse_location.return_value = {
-                "posts": sample_posts,
-                "after": "next_page_cursor",
-            }
-            mock_get_client.return_value = mock_client
+        with patch("rediska_core.api.routes.sources.RedditAdapter") as mock_adapter_cls:
+            mock_client = AsyncMock()
+            mock_client.browse_location.return_value = PaginatedResult(
+                items=sample_posts,
+                next_cursor="next_page_cursor",
+                has_more=False,
+            )
+            mock_adapter_cls.return_value = mock_client
 
             response = await auth_client.get(
                 "/sources/reddit/locations/r%2Ftest/posts"
@@ -144,13 +179,14 @@ class TestBrowsePostsEndpoint:
         self, auth_client, setup_provider, sample_posts
     ):
         """Should pass cursor parameter for pagination."""
-        with patch("rediska_core.api.routes.sources.get_provider_client") as mock_get_client:
-            mock_client = MagicMock()
-            mock_client.browse_location.return_value = {
-                "posts": sample_posts,
-                "after": None,
-            }
-            mock_get_client.return_value = mock_client
+        with patch("rediska_core.api.routes.sources.RedditAdapter") as mock_adapter_cls:
+            mock_client = AsyncMock()
+            mock_client.browse_location.return_value = PaginatedResult(
+                items=sample_posts,
+                next_cursor=None,
+                has_more=False,
+            )
+            mock_adapter_cls.return_value = mock_client
 
             response = await auth_client.get(
                 "/sources/reddit/locations/r%2Ftest/posts",
@@ -161,20 +197,21 @@ class TestBrowsePostsEndpoint:
             # Verify cursor was passed to client
             mock_client.browse_location.assert_called_once()
             call_kwargs = mock_client.browse_location.call_args[1]
-            assert call_kwargs.get("after") == "page2_cursor"
+            assert call_kwargs.get("cursor") == "page2_cursor"
 
     @pytest.mark.asyncio
     async def test_browse_posts_with_sort(
         self, auth_client, setup_provider, sample_posts
     ):
         """Should pass sort parameter."""
-        with patch("rediska_core.api.routes.sources.get_provider_client") as mock_get_client:
-            mock_client = MagicMock()
-            mock_client.browse_location.return_value = {
-                "posts": sample_posts,
-                "after": None,
-            }
-            mock_get_client.return_value = mock_client
+        with patch("rediska_core.api.routes.sources.RedditAdapter") as mock_adapter_cls:
+            mock_client = AsyncMock()
+            mock_client.browse_location.return_value = PaginatedResult(
+                items=sample_posts,
+                next_cursor=None,
+                has_more=False,
+            )
+            mock_adapter_cls.return_value = mock_client
 
             response = await auth_client.get(
                 "/sources/reddit/locations/r%2Ftest/posts",
@@ -190,13 +227,14 @@ class TestBrowsePostsEndpoint:
         self, auth_client, setup_provider, sample_posts
     ):
         """Should pass limit parameter."""
-        with patch("rediska_core.api.routes.sources.get_provider_client") as mock_get_client:
-            mock_client = MagicMock()
-            mock_client.browse_location.return_value = {
-                "posts": sample_posts[:1],
-                "after": None,
-            }
-            mock_get_client.return_value = mock_client
+        with patch("rediska_core.api.routes.sources.RedditAdapter") as mock_adapter_cls:
+            mock_client = AsyncMock()
+            mock_client.browse_location.return_value = PaginatedResult(
+                items=sample_posts[:1],
+                next_cursor=None,
+                has_more=False,
+            )
+            mock_adapter_cls.return_value = mock_client
 
             response = await auth_client.get(
                 "/sources/reddit/locations/r%2Ftest/posts",
@@ -225,10 +263,10 @@ class TestBrowsePostsErrorHandling:
         self, auth_client, setup_provider
     ):
         """Should handle provider API errors gracefully."""
-        with patch("rediska_core.api.routes.sources.get_provider_client") as mock_get_client:
-            mock_client = MagicMock()
+        with patch("rediska_core.api.routes.sources.RedditAdapter") as mock_adapter_cls:
+            mock_client = AsyncMock()
             mock_client.browse_location.side_effect = Exception("API Error")
-            mock_get_client.return_value = mock_client
+            mock_adapter_cls.return_value = mock_client
 
             response = await auth_client.get(
                 "/sources/reddit/locations/r%2Ftest/posts"
@@ -259,13 +297,14 @@ class TestBrowsePostsNormalization:
         self, auth_client, setup_provider, sample_posts
     ):
         """Posts should include all required fields."""
-        with patch("rediska_core.api.routes.sources.get_provider_client") as mock_get_client:
-            mock_client = MagicMock()
-            mock_client.browse_location.return_value = {
-                "posts": sample_posts,
-                "after": None,
-            }
-            mock_get_client.return_value = mock_client
+        with patch("rediska_core.api.routes.sources.RedditAdapter") as mock_adapter_cls:
+            mock_client = AsyncMock()
+            mock_client.browse_location.return_value = PaginatedResult(
+                items=sample_posts,
+                next_cursor=None,
+                has_more=False,
+            )
+            mock_adapter_cls.return_value = mock_client
 
             response = await auth_client.get(
                 "/sources/reddit/locations/r%2Ftest/posts"

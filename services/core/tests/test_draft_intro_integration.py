@@ -216,6 +216,19 @@ class TestDraftIntroServiceForLead:
         assert len(result.output.alternatives) >= 1
         assert result.output.primary_draft.tone_used is not None
 
+        # The draft text above is canned mock output. What this test actually
+        # proves is that the service loaded the RIGHT rows and fed them to the
+        # agent, so assert the user prompt carries this lead's title/body, the
+        # author's username and the snapshot summary+signals from the DB.
+        user_prompt = mock_inference_client.chat.call_args[0][0][1].content
+
+        assert "Looking for a CRM solution for our growing team" in user_prompt
+        assert "just closed Series A" in user_prompt
+        assert "r/startups" in user_prompt
+        assert "startup_ceo" in user_prompt  # author account username
+        assert "Tech startup founder building B2B SaaS products" in user_prompt  # snapshot
+        assert "role: founder" in user_prompt  # snapshot signals_json
+
     @pytest.mark.asyncio
     async def test_draft_includes_voice_config(
         self, db_session, setup_lead, setup_profile_snapshot, setup_identity, mock_inference_client
@@ -391,6 +404,17 @@ class TestDraftIntroServiceForAccount:
         assert result.success
         assert result.output is not None
         assert "startup_ceo" in result.output.primary_draft.body
+
+        # The body above is canned. Assert the service resolved the account
+        # row and its latest snapshot into the prompt, so loading the wrong
+        # account (or silently skipping the snapshot) would fail here.
+        user_prompt = mock_inference_client.chat.call_args[0][0][1].content
+
+        assert "Username: startup_ceo" in user_prompt
+        assert "Tech startup founder building B2B SaaS products" in user_prompt
+        assert "industry: B2B SaaS" in user_prompt  # snapshot signals_json
+        # draft_for_account passes no lead_context
+        assert "## Lead Post Context" not in user_prompt
 
     @pytest.mark.asyncio
     async def test_draft_for_account_nonexistent(
@@ -600,6 +624,18 @@ class TestDraftIntroFullFlow:
         # Verify model info
         assert result.model_info is not None
         assert result.model_info["model_name"] == "llama-3.2-8b"
+
+        # Everything above is parsed from the canned reply. Assert the DB rows
+        # this flow loaded actually reached the model: lead title/body/source,
+        # the author username, and the snapshot summary. Without this the test
+        # would still pass if draft_for_lead read the wrong lead entirely.
+        user_prompt = mock_inference_client.chat.call_args[0][0][1].content
+
+        assert "Looking for a CRM solution for our growing team" in user_prompt
+        assert "Slack integration and automation capabilities" in user_prompt
+        assert "Source: r/startups" in user_prompt
+        assert "Username: startup_ceo" in user_prompt
+        assert "Tech startup founder building B2B SaaS products" in user_prompt
 
     @pytest.mark.asyncio
     async def test_draft_with_minimal_voice_config(

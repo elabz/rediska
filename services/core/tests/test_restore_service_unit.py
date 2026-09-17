@@ -26,42 +26,6 @@ from rediska_core.domain.services.restore_service import (
 class TestRestoreTestResult:
     """Tests for RestoreTestResult dataclass."""
 
-    def test_create_success_result(self):
-        """Test creating a successful restore test result."""
-        result = RestoreTestResult(
-            success=True,
-            backup_file="/backups/database_2024-01-15_030000.sql.gz",
-            started_at=datetime(2024, 1, 15, 5, 0, 0, tzinfo=timezone.utc),
-            completed_at=datetime(2024, 1, 15, 5, 10, 0, tzinfo=timezone.utc),
-            integrity_checks=[
-                IntegrityCheckResult(
-                    check_name="table_count",
-                    passed=True,
-                    expected="15",
-                    actual="15",
-                ),
-            ],
-            attachments_sampled=10,
-            attachments_verified=10,
-        )
-
-        assert result.success is True
-        assert result.backup_file == "/backups/database_2024-01-15_030000.sql.gz"
-        assert len(result.integrity_checks) == 1
-
-    def test_create_failure_result(self):
-        """Test creating a failed restore test result."""
-        result = RestoreTestResult(
-            success=False,
-            backup_file="/backups/database_2024-01-15_030000.sql.gz",
-            started_at=datetime(2024, 1, 15, 5, 0, 0, tzinfo=timezone.utc),
-            completed_at=datetime(2024, 1, 15, 5, 1, 0, tzinfo=timezone.utc),
-            error="Failed to start MySQL container",
-        )
-
-        assert result.success is False
-        assert "MySQL container" in result.error
-
     def test_duration_seconds(self):
         """Test calculating restore test duration."""
         result = RestoreTestResult(
@@ -92,31 +56,20 @@ class TestRestoreTestResult:
 
         result_dict = result.to_dict()
 
-        assert "success" in result_dict
-        assert "backup_file" in result_dict
-        assert "duration_seconds" in result_dict
-        assert "integrity_checks" in result_dict
-        assert len(result_dict["integrity_checks"]) == 1
-
-
-class TestIntegrityCheck:
-    """Tests for IntegrityCheck enum."""
-
-    def test_table_count_check(self):
-        """Test table count integrity check."""
-        assert IntegrityCheck.TABLE_COUNT.value == "table_count"
-
-    def test_row_counts_check(self):
-        """Test row counts integrity check."""
-        assert IntegrityCheck.ROW_COUNTS.value == "row_counts"
-
-    def test_foreign_keys_check(self):
-        """Test foreign keys integrity check."""
-        assert IntegrityCheck.FOREIGN_KEYS.value == "foreign_keys"
-
-    def test_recent_data_check(self):
-        """Test recent data integrity check."""
-        assert IntegrityCheck.RECENT_DATA.value == "recent_data"
+        # Assert values, not just key presence: to_dict() feeds the audit log, so a
+        # derived duration and nested check serialization are the real contract.
+        assert result_dict["success"] is True
+        assert result_dict["backup_file"] == "/backups/test.sql.gz"
+        assert result_dict["duration_seconds"] == 300
+        assert result_dict["integrity_checks"] == [
+            {
+                "check_name": "table_count",
+                "passed": True,
+                "expected": "15",
+                "actual": "15",
+                "error": None,
+            }
+        ]
 
 
 class TestRestoreTestService:
@@ -144,6 +97,10 @@ class TestRestoreTestService:
                 # Create temp files to add
                 with tempfile.NamedTemporaryFile(delete=False) as f:
                     f.write(b"test attachment")
+                    # Must flush before tar.add: otherwise the bytes are still in the
+                    # Python buffer and the archived member is 0 bytes, which
+                    # _sample_attachments counts as unverified.
+                    f.flush()
                     tar.add(f.name, arcname="attachments/test.jpg")
 
             yield tmpdir
@@ -262,9 +219,18 @@ class TestRestoreTestService:
 
         sampled, verified = restore_service._sample_attachments(att_backup, sample_size=5)
 
-        assert sampled >= 0
-        assert verified >= 0
-        assert verified <= sampled
+        # The fixture tarball holds exactly one non-empty file, so both counts must
+        # be 1. _sample_attachments swallows every error and returns (0, 0), which
+        # a >= 0 assertion would happily accept from an unreadable tarball.
+        assert (sampled, verified) == (1, 1)
+
+    def test_sample_attachments_missing_backup_returns_zero(self, restore_service, tmp_path):
+        """A missing tarball yields (0, 0) rather than raising."""
+        sampled, verified = restore_service._sample_attachments(
+            str(tmp_path / "does_not_exist.tar.gz"), sample_size=5
+        )
+
+        assert (sampled, verified) == (0, 0)
 
 
 class TestRestoreTestServiceIntegration:
@@ -313,24 +279,6 @@ class TestRestoreTestServiceIntegration:
 
 class TestRestoreTestResultAudit:
     """Tests for audit logging of restore test results."""
-
-    def test_result_includes_audit_fields(self):
-        """Test that result includes fields needed for audit logging."""
-        result = RestoreTestResult(
-            success=True,
-            backup_file="/backups/test.sql.gz",
-            started_at=datetime(2024, 1, 15, 5, 0, 0, tzinfo=timezone.utc),
-            completed_at=datetime(2024, 1, 15, 5, 5, 0, tzinfo=timezone.utc),
-            integrity_checks=[],
-        )
-
-        result_dict = result.to_dict()
-
-        # Fields needed for audit log
-        assert "success" in result_dict
-        assert "started_at" in result_dict
-        assert "completed_at" in result_dict
-        assert "duration_seconds" in result_dict
 
     def test_failed_result_includes_error(self):
         """Test that failed result includes error for audit."""

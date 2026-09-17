@@ -212,7 +212,7 @@ export default function ConversationDetailPage() {
   if (!conversation) return null;
 
   return (
-    <div className="flex flex-col h-[calc(100vh-10rem)] min-h-[400px] border border-border rounded-lg bg-card overflow-hidden">
+    <div className="flex flex-col h-[calc(100dvh-5.5rem)] md:h-[calc(100dvh-6.5rem)] lg:h-[calc(100dvh-4rem)] min-h-[400px] border border-border rounded-lg bg-card overflow-hidden">
       <ConversationHeader
         conversation={conversation}
         conversationId={conversationId}
@@ -222,7 +222,7 @@ export default function ConversationDetailPage() {
         onScrubRequest={() => setShowBatchDeleteDialog(true)}
       />
 
-      <div className="px-4 pb-3 border-b border-border">
+      <div className="px-4 pb-3 border-b border-border shrink-0">
         <UserProfilePanel
           username={conversation.counterpart.external_username}
           accountId={conversation.counterpart.id}
@@ -251,7 +251,7 @@ export default function ConversationDetailPage() {
       />
 
       {actionError && (
-        <div className="mx-4 mt-4 rounded-lg border border-destructive bg-destructive/10 p-3">
+        <div className="mx-4 mt-4 rounded-lg border border-destructive bg-destructive/10 p-3 shrink-0">
           <div className="flex items-start gap-2">
             <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
             <div className="flex-1">

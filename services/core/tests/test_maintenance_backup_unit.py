@@ -19,39 +19,6 @@ from rediska_core.domain.services.backup_service import (
 class TestBackupResult:
     """Tests for BackupResult dataclass."""
 
-    def test_create_success_result(self):
-        """Test creating a successful backup result."""
-        result = BackupResult(
-            success=True,
-            backup_type=BackupType.DATABASE,
-            file_path="/backups/db_2024-01-15_030000.sql.gz",
-            file_size=1024000,
-            checksum="abc123def456",
-            started_at=datetime(2024, 1, 15, 3, 0, 0),
-            completed_at=datetime(2024, 1, 15, 3, 5, 0),
-        )
-
-        assert result.success is True
-        assert result.backup_type == BackupType.DATABASE
-        assert result.file_path == "/backups/db_2024-01-15_030000.sql.gz"
-        assert result.file_size == 1024000
-        assert result.checksum == "abc123def456"
-
-    def test_create_failure_result(self):
-        """Test creating a failed backup result."""
-        result = BackupResult(
-            success=False,
-            backup_type=BackupType.DATABASE,
-            error="Connection refused",
-            started_at=datetime(2024, 1, 15, 3, 0, 0),
-            completed_at=datetime(2024, 1, 15, 3, 0, 5),
-        )
-
-        assert result.success is False
-        assert result.error == "Connection refused"
-        assert result.file_path is None
-        assert result.file_size is None
-
     def test_backup_duration(self):
         """Test calculating backup duration."""
         result = BackupResult(
@@ -156,13 +123,24 @@ class TestBackupService:
         assert new_dir.is_dir()
 
     def test_ensure_backup_directory_exists(self, backup_service, temp_backup_dir):
-        """Test that existing backup directory is handled correctly."""
+        """Re-running on an existing directory is idempotent, not destructive.
+
+        Asserting the tmpdir exists is meaningless -- the fixture created it, so
+        the assertion held even if the method wiped and recreated the dir. Drop
+        a file in first and prove it survives (existing backups must not be
+        blown away).
+        """
         backup_service.backups_path = temp_backup_dir
+
+        existing_backup = Path(temp_backup_dir) / "pre_existing_backup.sql.gz"
+        existing_backup.write_bytes(b"precious backup bytes")
 
         # Should not raise
         backup_service._ensure_backup_directory()
 
-        assert Path(temp_backup_dir).exists()
+        assert Path(temp_backup_dir).is_dir()
+        assert existing_backup.exists()
+        assert existing_backup.read_bytes() == b"precious backup bytes"
 
     @patch("subprocess.run")
     def test_dump_database_success(self, mock_run, backup_service, temp_backup_dir):
@@ -348,11 +326,18 @@ class TestMySQLDumpCommand:
         assert "--triggers" in cmd
 
     def test_mysqldump_command_excludes_password_in_args(self, backup_service):
-        """Test that password is not passed as command line argument."""
+        """The DB password must never reach argv (it is visible in `ps`).
+
+        The old `A not in s or B not in s` was satisfied whenever the password
+        was space-separated ("--password", "secret"), i.e. exactly the leaky
+        form it was meant to catch. Check every argument instead. dump_database
+        passes the password through the MYSQL_PWD env var.
+        """
         cmd = backup_service._build_mysqldump_command("test_db", "/path/to/output.sql.gz")
 
-        # Password should be passed via environment or config file, not command line
-        assert "--password" not in " ".join(cmd) or "--password=" not in " ".join(cmd)
+        assert not any(arg.startswith("--password") for arg in cmd)
+        assert "-p" not in cmd  # short form
+        assert not any(arg.startswith("-p") and arg != "-p" for arg in cmd)
 
 
 class TestBackupServiceIntegration:

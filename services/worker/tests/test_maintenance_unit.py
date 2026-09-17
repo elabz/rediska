@@ -9,12 +9,39 @@ Tests cover:
 
 import gzip
 import os
+import sys
 import tarfile
+import types
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@contextmanager
+def docker_module(stub):
+    """Temporarily control what `import docker` inside a task resolves to.
+
+    Pass a ModuleType to make the import succeed, or None to make it raise
+    ImportError (CPython treats a None entry in sys.modules that way). Needed
+    because restore_test_local branches on `import docker` before doing
+    anything else, and docker is not installed in this test environment.
+    """
+    sentinel = object()
+    original = sys.modules.get("docker", sentinel)
+    if stub is None:
+        sys.modules["docker"] = None  # type: ignore[assignment]
+    else:
+        sys.modules["docker"] = stub
+    try:
+        yield
+    finally:
+        if original is sentinel:
+            sys.modules.pop("docker", None)
+        else:
+            sys.modules["docker"] = original  # type: ignore[assignment]
 
 
 class TestParseMyqlUrl:
@@ -182,19 +209,10 @@ class TestCleanupOldBackups:
 class TestMysqlDumpLocal:
     """Tests for mysql_dump_local task."""
 
-    def test_task_is_registered(self, mock_celery_app):
-        """Task should be registered with Celery."""
-        from rediska_worker.tasks.maintenance import mysql_dump_local
-
-        assert mysql_dump_local.name == "maintenance.mysql_dump_local"
-
-    def test_task_is_bound(self, mock_celery_app):
-        """Task should be bound (has self access)."""
-        from rediska_worker.tasks.maintenance import mysql_dump_local
-
-        # Bound tasks have __self__ when called or check the _orig_run method
-        # The bind=True option creates a bound task
-        assert hasattr(mysql_dump_local, "run")
+    # test_task_is_registered removed: it only restated the name passed to the
+    # @app.task(name=...) decorator.
+    # test_task_is_bound removed: hasattr(task, "run") is true of EVERY Celery
+    # task, bound or not, so it could never detect bind=True being dropped.
 
     def test_task_has_max_retries(self, mock_celery_app):
         """Task should have max_retries configured."""
@@ -206,11 +224,7 @@ class TestMysqlDumpLocal:
 class TestAttachmentsSnapshotLocal:
     """Tests for attachments_snapshot_local task."""
 
-    def test_task_is_registered(self, mock_celery_app):
-        """Task should be registered with Celery."""
-        from rediska_worker.tasks.maintenance import attachments_snapshot_local
-
-        assert attachments_snapshot_local.name == "maintenance.attachments_snapshot_local"
+    # test_task_is_registered removed: restated the decorator's name argument.
 
     def test_creates_tarball(self, tmp_path, mock_celery_app):
         """Task should create a tarball of attachments."""
@@ -318,20 +332,23 @@ class TestAttachmentsSnapshotLocal:
 class TestRestoreTestLocal:
     """Tests for restore_test_local task."""
 
-    def test_task_is_registered(self, mock_celery_app):
-        """Task should be registered with Celery."""
-        from rediska_worker.tasks.maintenance import restore_test_local
-
-        assert restore_test_local.name == "maintenance.restore_test_local"
+    # test_task_is_registered removed: restated the decorator's name argument.
 
     def test_handles_missing_docker(self, tmp_path, mock_celery_app):
-        """Task should handle missing docker package."""
+        """Without the docker package the task fails with the docker error.
+
+        `assert "status" in result` was true on every return path -- success,
+        no-backup, checksum mismatch -- so it never distinguished this branch.
+        Force the ImportError explicitly (sys.modules[name] = None makes
+        `import name` raise) rather than relying on docker being absent.
+        """
         import rediska_worker.tasks.maintenance as maint
 
         backup_dir = tmp_path / "backups"
         backup_dir.mkdir()
 
-        # Create a fake backup file
+        # A valid backup IS present, so reaching the docker error proves the
+        # import check short-circuits before the backup lookup.
         backup_file = backup_dir / "database_2024-01-01.sql.gz"
         with gzip.open(backup_file, "wt") as f:
             f.write("-- Fake SQL dump\n")
@@ -340,27 +357,58 @@ class TestRestoreTestLocal:
         maint.BACKUPS_PATH = str(backup_dir)
 
         try:
-            result = maint.restore_test_local.apply().get()
-            # Task may fail due to docker unavailability
-            assert "status" in result
+            with docker_module(None):
+                result = maint.restore_test_local.apply().get()
+
+            assert result["status"] == "failed"
+            assert result["error"] == (
+                "Docker is not available. Install docker package to run restore tests."
+            )
+            assert "started_at" in result
+            assert "completed_at" in result
         finally:
             maint.BACKUPS_PATH = orig_backups
 
     def test_handles_no_backup_found(self, tmp_path, mock_celery_app):
-        """Task should handle no backup files found."""
+        """An empty backup directory reports 'No database backup found'.
+
+        This branch was unreachable in the old test: restore_test_local returns
+        on the `import docker` ImportError BEFORE it globs the backup dir, and
+        docker is not installed here, so the assertion only ever saw the docker
+        error. Inject a stub docker module so execution reaches the glob.
+        """
         import rediska_worker.tasks.maintenance as maint
 
         backup_dir = tmp_path / "backups"
-        backup_dir.mkdir()
+        backup_dir.mkdir()  # exists but is empty
 
         orig_backups = maint.BACKUPS_PATH
         maint.BACKUPS_PATH = str(backup_dir)
 
         try:
-            result = maint.restore_test_local.apply().get()
+            # The stub only needs to import; the no-backup branch returns
+            # before any docker API call is made.
+            with docker_module(types.ModuleType("docker")):
+                result = maint.restore_test_local.apply().get()
+
             assert result["status"] == "failed"
-            # Could be "No database backup found" or docker unavailable
-            assert "error" in result
+            assert result["error"] == "No database backup found"
+        finally:
+            maint.BACKUPS_PATH = orig_backups
+
+    def test_handles_missing_backup_directory(self, tmp_path, mock_celery_app):
+        """A backup dir that does not exist is distinguished from an empty one."""
+        import rediska_worker.tasks.maintenance as maint
+
+        orig_backups = maint.BACKUPS_PATH
+        maint.BACKUPS_PATH = str(tmp_path / "does_not_exist")
+
+        try:
+            with docker_module(types.ModuleType("docker")):
+                result = maint.restore_test_local.apply().get()
+
+            assert result["status"] == "failed"
+            assert result["error"] == "Backup directory does not exist"
         finally:
             maint.BACKUPS_PATH = orig_backups
 
@@ -376,21 +424,9 @@ class TestMaintenanceTaskRouting:
         assert routes["rediska_worker.tasks.maintenance.*"]["queue"] == "maintenance"
 
 
-class TestMaintenanceTaskNames:
-    """Tests for maintenance task naming conventions."""
-
-    def test_all_maintenance_tasks_have_correct_prefix(self, mock_celery_app):
-        """All maintenance tasks should have 'maintenance.' prefix."""
-        from rediska_worker.tasks import maintenance
-
-        tasks = [
-            maintenance.mysql_dump_local,
-            maintenance.attachments_snapshot_local,
-            maintenance.restore_test_local,
-        ]
-
-        for task in tasks:
-            assert task.name.startswith("maintenance."), f"{task.name} should start with 'maintenance.'"
+# TestMaintenanceTaskNames removed: test_all_maintenance_tasks_have_correct_prefix
+# only asserted that each @app.task(name="maintenance.X") decorator set the
+# prefix it was literally handed.
 
 
 class TestBackupResultFormat:
@@ -451,9 +487,14 @@ class TestBackupResultFormat:
         try:
             result = maint.attachments_snapshot_local.apply().get()
 
-            # Should be parseable as ISO format
-            datetime.fromisoformat(result["started_at"])
-            datetime.fromisoformat(result["completed_at"])
+            # fromisoformat raises on a malformed value, but assert explicitly
+            # so the intent is visible, and pin the ordering while we're here.
+            started = datetime.fromisoformat(result["started_at"])
+            completed = datetime.fromisoformat(result["completed_at"])
+
+            assert started.tzinfo is not None, "timestamps must carry a UTC offset"
+            assert completed.tzinfo is not None
+            assert completed >= started
         finally:
             maint.BACKUPS_PATH = orig_backups
             maint.ATTACHMENTS_PATH = orig_attachments

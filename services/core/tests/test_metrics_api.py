@@ -24,20 +24,27 @@ class TestMetricsEndpoints:
         """Test that metrics endpoint requires authentication."""
         response = client.get("/api/metrics")
 
-        # Should require auth (401) or redirect (403)
-        assert response.status_code in (401, 403, 200)
+        # Depends(get_current_user) must reject the anonymous caller. Accepting
+        # 200 here would let "metrics served unauthenticated" pass silently.
+        assert response.status_code == 401
 
     def test_get_queue_metrics_requires_auth(self, client):
         """Test getting queue depth metrics requires auth."""
         response = client.get("/api/metrics/queues")
 
-        assert response.status_code in (401, 403, 200)
+        assert response.status_code == 401
 
     def test_get_sync_metrics_requires_auth(self, client):
         """Test getting sync time metrics requires auth."""
         response = client.get("/api/metrics/sync")
 
-        assert response.status_code in (401, 403, 200)
+        assert response.status_code == 401
+
+    def test_get_application_metrics_requires_auth(self, client):
+        """Test getting application metrics requires auth."""
+        response = client.get("/api/metrics/application")
+
+        assert response.status_code == 401
 
 
 class TestHealthEndpoint:
@@ -74,16 +81,19 @@ class TestHealthEndpoint:
         response = client.get("/api/health")
 
         data = response.json()
-        # Version might be optional but is good practice
-        assert "version" in data or "service" in data or response.status_code == 200
+        assert "version" in data
+        assert "service" in data
 
     def test_health_includes_timestamp(self, client):
         """Test that health includes timestamp."""
+        from datetime import datetime
+
         response = client.get("/api/health")
 
         data = response.json()
-        # Timestamp shows when check was performed
-        assert "timestamp" in data or "checked_at" in data or response.status_code == 200
+        # Timestamp shows when check was performed; must be parseable ISO-8601.
+        assert "timestamp" in data
+        assert datetime.fromisoformat(data["timestamp"]).tzinfo is not None
 
 
 class TestReadinessEndpoint:

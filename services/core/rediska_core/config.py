@@ -121,6 +121,15 @@ class Settings(BaseSettings):
         description="Hard cap on labelled cases replayed per prompt replay (most recent first)",
     )
 
+    # Lead triage: scout-sourced leads still `new` after this many days are
+    # auto-expired by maintenance.expire_stale_leads. Off by default: leads are
+    # kept and the Leads page filters by date instead.
+    lead_expiry_days: int = Field(
+        default=0,
+        ge=0,
+        description="Days before an untouched scout lead expires (0 disables, the default)",
+    )
+
     @field_validator("mysql_url")
     @classmethod
     def validate_mysql_url(cls, v: str) -> str:

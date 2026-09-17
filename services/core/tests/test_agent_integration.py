@@ -235,6 +235,13 @@ class TestAgentWithIdentityVoice:
 
         assert result.success
 
+        # `success` is hardcoded True for schema-less configs, so it proves
+        # nothing on its own. Assert the empty voice config contributed
+        # nothing: the system message must be exactly the base prompt.
+        call_args = mock_inference_client.chat.call_args
+        messages = call_args[0][0]  # First positional arg is messages
+        assert messages[0].content == "You are a helpful assistant."
+
 
 # =============================================================================
 # STRUCTURED OUTPUT WITH IDENTITY TESTS

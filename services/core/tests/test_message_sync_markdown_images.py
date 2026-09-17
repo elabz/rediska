@@ -11,53 +11,20 @@ from unittest.mock import MagicMock, patch
 from rediska_core.domain.services.message_sync import MessageSyncService
 
 
-class MockMessageSyncService:
-    """Minimal service mock for testing URL extraction logic."""
-
-    MARKDOWN_IMAGE_PATTERN = r'\[([^\]]*)\]\((https?://[^\)]+)\)'
-    IMAGE_URL_PATTERNS = [
-        r'https?://i\.redd\.it/[^\s\)]+',
-        r'https?://preview\.redd\.it/[^\s\)]+',
-        r'https?://(?:i\.)?imgur\.com/[^\s\)]+\.(?:jpg|jpeg|png|gif|webp)',
-        r'https?://[^\s\)]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\s\)]*)?',
-    ]
-
-    def _extract_image_urls(self, text: str) -> list[str]:
-        """Extract image URLs from message text using the actual MessageSyncService logic."""
-        import re
-
-        if not text:
-            return []
-
-        urls = []
-
-        # Extract markdown image URLs: [text](url)
-        markdown_matches = re.findall(self.MARKDOWN_IMAGE_PATTERN, text)
-        for alt_text, url in markdown_matches:
-            urls.append(url)
-
-        # Extract bare URLs (existing patterns)
-        for pattern in self.IMAGE_URL_PATTERNS:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            urls.extend(matches)
-
-        # Deduplicate while preserving order
-        seen = set()
-        unique_urls = []
-        for url in urls:
-            # Normalize URL (remove trailing punctuation that might have been captured)
-            url = url.rstrip('.,;:!?)')
-            if url not in seen:
-                seen.add(url)
-                unique_urls.append(url)
-
-        return unique_urls[:5]  # Limit to 5 images per message
-
-
 @pytest.fixture
-def message_sync_service() -> MockMessageSyncService:
-    """Create a mock service instance for testing URL extraction."""
-    return MockMessageSyncService()
+def message_sync_service() -> MessageSyncService:
+    """A real MessageSyncService with __init__ bypassed.
+
+    `_extract_image_urls` reads only the class-level regex constants, but
+    `__init__` builds a DB session, settings, and a crypto service. Allocating
+    without initializing keeps these tests on the real implementation.
+
+    This previously used a hand-written `MockMessageSyncService` that carried a
+    verbatim copy of the regexes and the method body -- so every test in this
+    file exercised the copy, and the real extractor could have broken without a
+    single failure.
+    """
+    return MessageSyncService.__new__(MessageSyncService)
 
 
 # =============================================================================
@@ -69,7 +36,7 @@ class TestMarkdownImageExtraction:
     """Tests for extracting image URLs from markdown syntax."""
 
     def test_extract_single_markdown_image_url(
-        self, message_sync_service: MockMessageSyncService
+        self, message_sync_service: MessageSyncService
     ):
         """Test extraction of single markdown image URL."""
         text = 'sent an [image](https://example.com/image.jpg)'
@@ -106,8 +73,10 @@ class TestMarkdownImageExtraction:
         text = 'Check [image (with parentheses)](https://example.com/img.jpg)'
         urls = message_sync_service._extract_image_urls(text)
 
-        # Should not match due to parentheses in alt text interfering with regex
-        # This is a limitation of the simple regex pattern
+        # The markdown pattern's alt-text group is [^\]]* so parentheses in the
+        # alt text do not break it, and the bare-URL pattern would catch the .jpg
+        # regardless. Pinning the value here so a regex change has to be deliberate.
+        assert urls == ['https://example.com/img.jpg']
 
     def test_extract_markdown_with_empty_alt_text(
         self, message_sync_service: MessageSyncService
@@ -266,8 +235,10 @@ class TestEdgeCases:
         text = '[text(https://example.com/image.jpg)'  # Missing closing bracket
         urls = message_sync_service._extract_image_urls(text)
 
-        # Might be extracted as bare URL, or not at all depending on implementation
-        # This is an edge case of malformed markdown
+        # The markdown pattern does not match, but the bare-URL pattern still
+        # picks the .jpg up and the trailing ")" is stripped by the rstrip in
+        # the dedup pass -- so the URL is recovered rather than lost.
+        assert urls == ['https://example.com/image.jpg']
 
     def test_text_with_many_special_characters(
         self, message_sync_service: MessageSyncService

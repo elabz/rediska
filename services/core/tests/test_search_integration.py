@@ -86,8 +86,13 @@ class TestSearchEndpoint:
         assert response.status_code == 422  # Validation error
 
     @pytest.mark.asyncio
-    async def test_search_with_empty_query_returns_empty(self, auth_client):
-        """POST /search with empty query should return empty results."""
+    async def test_search_forwards_empty_query_to_service(self, auth_client):
+        """POST /search should accept an empty query and forward it verbatim.
+
+        The empty-query short-circuit itself lives in SearchService, which is
+        patched out here; it is covered against the real service by
+        test_search_unit.py::test_text_search_empty_query_returns_empty.
+        """
         with patch("rediska_core.api.routes.search.SearchService") as mock_service:
             mock_instance = MagicMock()
             mock_instance.hybrid_search.return_value = {
@@ -100,8 +105,8 @@ class TestSearchEndpoint:
             response = await auth_client.post("/search", json={"query": ""})
 
             assert response.status_code == 200
-            data = response.json()
-            assert data["total"] == 0
+            mock_instance.hybrid_search.assert_called_once()
+            assert mock_instance.hybrid_search.call_args[1]["query"] == ""
 
 
 class TestSearchFilters:
@@ -310,9 +315,16 @@ class TestSearchResponseFormat:
 
             assert response.status_code == 200
             hit = response.json()["hits"][0]
-            assert "id" in hit
-            assert "score" in hit
-            assert "source" in hit
+            # response_model=SearchResponse guarantees the keys exist, so the
+            # values are what actually proves the service result survived
+            # serialization intact.
+            assert hit["id"] == "message:123"
+            assert hit["score"] == 0.95
+            assert hit["source"] == {
+                "doc_type": "message",
+                "entity_id": 123,
+                "content": "Test content",
+            }
 
 
 class TestSearchErrorHandling:

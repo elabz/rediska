@@ -24,15 +24,25 @@ from rediska_core.infrastructure.rate_limiter import (
 
 
 class MockPipeline:
-    """Mock Redis pipeline that supports chaining and async execute."""
+    """Mock Redis pipeline that supports chaining and async execute.
+
+    Records every queued command as (op, args) so tests can assert on what the
+    limiter actually wrote, not merely that a pipeline was requested.
+    """
+
+    def __init__(self):
+        self.calls: list[tuple] = []
 
     def set(self, key, value):
+        self.calls.append(("set", key, value))
         return self
 
     def delete(self, *keys):
+        self.calls.append(("delete", *keys))
         return self
 
     def expire(self, key, seconds):
+        self.calls.append(("expire", key, seconds))
         return self
 
     async def execute(self):
@@ -127,11 +137,18 @@ class TestTokenBucket:
         config = RateLimitConfig(provider_id="reddit", requests_per_minute=60)
         limiter = RateLimiter(mock_async_redis, config)
 
-        # After refill, should have tokens available
         result = await limiter.acquire_token()
 
-        # The limiter should have attempted to refill
-        assert mock_async_redis.get.called
+        # At 60 rpm the refill rate is 1 token/sec, so 60s of elapsed time refills
+        # the bucket from 0 and the acquisition must succeed.
+        assert result is True
+
+        # The refilled count is written back: capped at bucket_size (60), minus the
+        # one just consumed. Parsed as a float because the stored repr depends on
+        # whether min() picked the int cap or the float sum.
+        pipe = mock_async_redis.pipeline.return_value
+        written = {c[1]: c[2] for c in pipe.calls if c[0] == "set"}
+        assert float(written["rate:reddit:tokens"]) == 59.0
 
     @pytest.mark.asyncio
     async def test_token_bucket_keys(self, mock_async_redis):
@@ -146,15 +163,6 @@ class TestTokenBucket:
         # Should use provider-specific keys
         calls = [str(call) for call in mock_async_redis.get.call_args_list]
         assert any("reddit" in call for call in calls)
-
-    @pytest.mark.asyncio
-    async def test_release_token_not_needed(self, mock_async_redis):
-        """Test that releasing a token is a no-op for token bucket."""
-        config = RateLimitConfig(provider_id="reddit")
-        limiter = RateLimiter(mock_async_redis, config)
-
-        # Release should not raise
-        await limiter.release_token()
 
 
 class TestInflightConcurrency:
@@ -524,8 +532,8 @@ class TestRateLimiterReset:
     """Tests for resetting rate limiter state."""
 
     @pytest.mark.asyncio
-    async def test_reset_tokens(self, mock_async_redis):
-        """Test resetting token bucket to full."""
+    async def test_reset_refills_bucket_and_clears_inflight(self, mock_async_redis):
+        """reset() should atomically refill the bucket and drop the inflight counter."""
         config = RateLimitConfig(
             provider_id="reddit",
             bucket_size=100,
@@ -534,16 +542,22 @@ class TestRateLimiterReset:
 
         await limiter.reset()
 
-        # Should have used pipeline to set tokens
-        mock_async_redis.pipeline.assert_called()
+        pipe = mock_async_redis.pipeline.return_value
+
+        # Bucket restored to full capacity...
+        assert ("set", "rate:reddit:tokens", "100") in pipe.calls
+        # ...and the inflight counter deleted rather than set to a stale number.
+        assert ("delete", "rate:reddit:inflight") in pipe.calls
+        # The refill timestamp is rewritten so the next acquire doesn't over-refill.
+        assert any(c[0] == "set" and c[1] == "rate:reddit:last_refill" for c in pipe.calls)
 
     @pytest.mark.asyncio
-    async def test_reset_inflight(self, mock_async_redis):
-        """Test resetting inflight counter."""
-        config = RateLimitConfig(provider_id="reddit")
+    async def test_reset_uses_default_bucket_size(self, mock_async_redis):
+        """With bucket_size unset it defaults to requests_per_minute (see __post_init__)."""
+        config = RateLimitConfig(provider_id="reddit", requests_per_minute=42)
         limiter = RateLimiter(mock_async_redis, config)
 
         await limiter.reset()
 
-        # Should have used pipeline to reset state
-        mock_async_redis.pipeline.assert_called()
+        pipe = mock_async_redis.pipeline.return_value
+        assert ("set", "rate:reddit:tokens", "42") in pipe.calls

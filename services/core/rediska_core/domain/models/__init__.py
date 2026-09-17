@@ -89,6 +89,15 @@ class LeadPostStatus(str):
     IGNORED = "ignored"
     CONTACT_QUEUED = "contact_queued"
     CONTACTED = "contacted"
+    EXPIRED = "expired"
+
+
+class LeadPriority(str):
+    """Lead priority tier values (derived from analysis signals)."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
 
 
 class ProfileItemType(str):
@@ -605,12 +614,20 @@ class LeadPost(Base):
 
     status: Mapped[str] = mapped_column(
         Enum(
-            "new", "saved", "ignored", "contact_queued", "contacted",
+            "new", "saved", "ignored", "contact_queued", "contacted", "expired",
             name="lead_post_status_enum"
         ),
         nullable=False,
         default="new",
     )
+
+    # Triage ranking derived in code from analysis signals (lead_priority.py);
+    # NULL for leads never analysed or analysed before tiering existed.
+    priority: Mapped[Optional[str]] = mapped_column(
+        Enum("high", "medium", "low", name="lead_priority_enum"),
+        nullable=True,
+    )
+    compatibility_score: Mapped[Optional[float]] = mapped_column(nullable=True)
 
     remote_visibility: Mapped[str] = mapped_column(
         Enum(
@@ -676,6 +693,7 @@ class LeadPost(Base):
         Index("idx_author", "author_account_id"),
         Index("idx_status", "status"),
         Index("idx_lead_source", "lead_source"),
+        Index("idx_lead_status_priority_created", "status", "priority", "created_at"),
     )
 
     # Relationships
@@ -1212,10 +1230,19 @@ class ScoutWatchPost(Base):
     # posts (and the run that owns them) are exempt from history retention.
     evaluated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
+    # Needs-review triage: dismissed without a lead, or promoted by a human.
+    # Either one takes the post out of the needs-review queue.
+    dismissed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    triaged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     __table_args__ = (
         UniqueConstraint("watch_id", "external_post_id", name="uq_scout_watch_post"),
         Index("idx_scout_post_pending", "watch_id", "analysis_status"),
         Index("idx_scout_post_evaluated", "evaluated_at"),
+        Index(
+            "idx_scout_post_review_queue",
+            "analysis_recommendation", "dismissed_at", "first_seen_at",
+        ),
     )
 
     # Relationships
@@ -1348,6 +1375,27 @@ class PromptReplay(Base):
     )
 
 
+# =============================================================================
+# Calibration Report Models
+# =============================================================================
+
+
+class CalibrationReport(Base):
+    """Weekly computed snapshot comparing analysis output with user verdicts."""
+
+    __tablename__ = "calibration_reports"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (Index("idx_calibration_period_end", "period_end"),)
+
+
 # Export all models
 __all__ = [
     "Base",
@@ -1374,11 +1422,14 @@ __all__ = [
     "ScoutWatchPost",
     "AnalysisEvaluation",
     "PromptReplay",
+    "CalibrationReport",
     # Enums
     "EvaluationSubjectType",
     "HumanVerdict",
     "ReplayStatus",
     "LeadSource",
+    "LeadPostStatus",
+    "LeadPriority",
     "ScoutRunStatus",
     "ScoutPostStatus",
 ]

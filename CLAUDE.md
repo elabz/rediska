@@ -93,7 +93,7 @@ rediska/
         infra/                 # db engines/sessions
         infrastructure/        # crypto (Fernet), elasticsearch, embeddings, rate_limiter
         observability/
-      alembic/versions/        # head: 018_add_analysis_evaluations
+      alembic/versions/        # head: 019_add_lead_triage_and_feedback
 
     worker/                    # Celery worker (imports core)
       rediska_worker/
@@ -238,6 +238,13 @@ Explicit, append-only human verdicts on analysis output (`/evaluations` UI, `/ev
 - Evaluated scout posts (`evaluated_at`) and the runs that own them are exempt from history cleanup
 - Analysis read models (`/leads/{id}/analysis*`, scout run detail) carry `evaluation` fields; the UI mounts `EvaluationControl` on the recommendation card, dimension cards, scout history posts, and the review queue
 
+### Lead Triage & Calibration
+Turns the lead list into a ranked work queue and closes the feedback loop (`domain/services/lead_priority.py`, `calibration_report.py`):
+- **Priority**: `derive_priority()` starts from the meta agent's `priority_level`, promotes to `high` when compatibility ≥ 0.7 and every gate passed, demotes one tier when compatibility < 0.5. Stored on the lead by `analyze_lead`, `scout.analyze_and_decide`, and manual add-to-leads (from the post's stored results). `GET /leads` sorts priority → newest by default (`sort=newest` override), hides `expired` unless `status=expired`, never lists soft-deleted leads, filters by `posted_within_days` (post date, else save date; the page defaults to 14d), and builds author info with 3 batched queries per page (`build_lead_responses`)
+- **Needs-review queue**: `GET /scout-watches/needs-review` (keyset cursor, newest first, untriaged `needs_review` posts across watches) and `POST /scout-watches/posts/{id}/dismiss`; add-to-leads sets `triaged_at`. Declared before `/{watch_id}` in the router
+- **Expiry** (off by default): `expired` is a timeout, not a verdict — it is not an active lead for author dedupe and not an ignore. Revive by setting `saved`
+- **Calibration report**: plain Python aggregation; lead verdict rates over a 28-day lead cohort, post/dimension metrics over the 7-day period; gate outcomes are best-effort for pre-gate posts
+
 ### External Listing Resolution
 Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `selftext` is empty and whose URL points to an external listing page. `domain/services/external_listing.py` fetches such pages and substitutes the listing's About text as the post body, so browse cards and the LLM analysis pipeline see real content:
 - Registry of supported hosts (initially `weheartbdsm.com/listings/<id>`) maps URL pattern → parser; unregistered hosts are never fetched (no generic scraping)
@@ -258,12 +265,12 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 | `/login`, `/setup/identity`, `/oauth/reddit/callback` | Auth + onboarding (OAuth popup) |
 | `/inbox`, `/inbox/[conversationId]` | Conversation list + thread (drafts, search, lists/labels, star, attachments, remote-delete/scrub, profile panel) |
 | `/browse` | Browse subreddit feeds (sort/time/query presets), save leads |
-| `/leads`, `/leads/[id]` | Lead list + detail with multi-dimension AI analysis panels |
+| `/leads`, `/leads/[id]` | Lead list (priority-first, expired hidden, priority/compatibility badges) + **Needs review** tab (cross-watch triage queue: promote / dismiss / evaluate); detail with multi-dimension AI analysis panels |
 | `/directories` | Analyzed / Contacted / Engaged / Starred contact directories |
 | `/evaluations` | Human evaluation of agent decisions: review queue (contradictions first, stratified), dashboard (agreement per dimension / prompt version, confusion matrix, tags, trend, missing info), JSONL export |
 | `/search` | Global hybrid search across messages/leads/profiles/conversations |
 | `/profile/[accountId]` | Account profile: snapshot, signals, risk flags, posts/comments/images |
-| `/ops` | Job queue, sync, backfills, attachment re-download |
+| `/ops` | Job queue, sync, backfills, attachment re-download, calibration report panel |
 | `/ops/backup` | Inbox export / import / clear with progress tracking |
 | `/audit` | Audit log viewer |
 | `/settings/connection`, `/settings/personas`, `/settings/agents`, `/settings/scout-watches` (+ `/[watchId]/history`) | Reddit connection, voice personas, agent prompts (with per-version evaluation metrics and a Replay tab), scout watches (history posts carry evaluation controls) |
@@ -272,7 +279,7 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 
 ## Key Database Tables
 
-Head migration: `018_add_analysis_evaluations`.
+Head migration: `019_add_lead_triage_and_feedback`.
 
 | Table | Purpose |
 |-------|---------|
@@ -285,11 +292,12 @@ Head migration: `018_add_analysis_evaluations`.
 | `conversation_lists`, `conversation_list_members` | User-defined conversation lists (labels) |
 | `messages` | Messages (threading fields, `send_failed` visibility, `send_error`) |
 | `attachments` | Local file references (sha256, mime, dimensions) |
-| `lead_posts` | Saved posts; recommendation/confidence, summaries, `lead_source` (manual/scout_watch) |
+| `lead_posts` | Saved posts; recommendation/confidence, summaries, `lead_source` (manual/scout_watch), `priority` (high/medium/low) + `compatibility_score`, status incl. `expired` |
 | `lead_analyses` | Multi-agent analysis results (per-dimension JSON + meta) |
 | `analysis_dimensions` | Per-dimension execution tracking (raw responses, model info) |
 | `agent_prompts` | Versioned LLM agent prompts |
-| `scout_watches`, `scout_watch_runs`, `scout_watch_posts` | Scout watch config, run history, seen-post pipeline (`evaluated_at` exempts a post from cleanup) |
+| `scout_watches`, `scout_watch_runs`, `scout_watch_posts` | Scout watch config, run history, seen-post pipeline (`evaluated_at` exempts a post from cleanup; `dismissed_at`/`triaged_at` take it out of the needs-review queue) |
+| `calibration_reports` | Weekly computed precision snapshots (JSON payload per period) |
 | `analysis_evaluations` | Append-only human verdicts on a lead analysis or scout post (final or per dimension), with agent snapshot + prompt versions |
 | `prompt_replays` | Candidate-prompt replays against labelled cases: status, progress, agreement, per-case results |
 | `profile_snapshots` | LLM-generated profile summaries + signals/risk flags |
@@ -354,6 +362,9 @@ HOME_LATITUDE=40.0 / HOME_LONGITUDE=-75.2 / LOCATION_NEAR_THRESHOLD_MILES=200
 
 # Human evaluation: cap on labelled cases per prompt replay
 EVALUATION_REPLAY_MAX_CASES=50
+
+# Lead triage: days before an untouched scout lead auto-expires (0 = disabled, the default)
+LEAD_EXPIRY_DAYS=0
 ```
 
 ---
@@ -398,7 +409,9 @@ Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`,
 - `maintenance.mysql_dump_local` (daily 03:00 UTC)
 - `maintenance.attachments_snapshot_local` (daily 04:00 UTC)
 - `maintenance.restore_test_local` (weekly, Sun 05:00 UTC)
-- `maintenance.cleanup_scout_watch_history` (daily 02:00 UTC, 3-day retention; skips evaluated posts and the runs that own them)
+- `maintenance.cleanup_scout_watch_history` (daily 02:00 UTC, 3-day retention; skips evaluated posts and the runs that own them; posts with analysis output are detached, never deleted)
+- `maintenance.expire_stale_leads` (daily 02:30 UTC, `dry_run=False`; **disabled by default**, `LEAD_EXPIRY_DAYS=0`) — when enabled, scout leads still `new` after N days → `expired` (batch audit). Defaults to dry run when invoked by hand; **every live run is refused until one dry run has completed** (jobs ledger)
+- `maintenance.generate_calibration_report` (weekly Mon 06:00 UTC; also `POST /ops/calibration-reports/generate`) — per-watch/overall suitable→ignored/contacted, contacted→engaged, needs-review triage, gate outcomes, dimension failure rates; one report per day (jobs ledger)
 
 ---
 

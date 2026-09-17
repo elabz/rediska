@@ -7,10 +7,12 @@ from API endpoints down to database persistence.
 import pytest
 from fastapi.testclient import TestClient
 
+from rediska_core.api.deps import get_current_user
 from rediska_core.domain.models import (
     Conversation,
     ExternalAccount,
     Identity,
+    LocalUser,
     Message,
     ProviderCredential,
 )
@@ -23,8 +25,41 @@ from rediska_core.domain.models import (
 
 @pytest.fixture
 def client(test_app):
-    """Create test client."""
+    """Create an *unauthenticated* test client."""
     return TestClient(test_app)
+
+
+@pytest.fixture
+def auth_client(test_app, db_session):
+    """Create a test client whose requests are authenticated.
+
+    The shared `client` fixture carries no session cookie, so every endpoint
+    guarded by `CurrentUser` answers 401 and the request never reaches the
+    route body. Overriding `get_current_user` is how the rest of this suite
+    (see tests/test_sources_integration.py) exercises protected routes.
+
+    No `session` cookie is set, which also means OnboardingGateMiddleware
+    short-circuits before its identity check -- the gate only engages for
+    cookie-bearing requests.
+    """
+    user = LocalUser(username="e2e_tester", password_hash="not-a-real-hash")
+    db_session.add(user)
+    db_session.flush()
+
+    test_app.dependency_overrides[get_current_user] = lambda: user
+    yield TestClient(test_app)
+    test_app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture
+def reddit_provider(db_session):
+    """Create the reddit provider row that identity creation requires."""
+    from rediska_core.domain.models import Provider
+
+    provider = Provider(provider_id="reddit", display_name="Reddit", enabled=True)
+    db_session.add(provider)
+    db_session.commit()
+    return provider
 
 
 @pytest.fixture
@@ -158,22 +193,25 @@ class TestE2EOnboardingFlow:
         assert response.status_code == 200
         assert response.json()["ready"] is True
 
-    def test_onboarding_flow_api_endpoints_exist(self, client):
-        """All onboarding-related endpoints should exist."""
-        endpoints = [
-            ("/setup/status", "GET"),
-            ("/identities", "GET"),
-            ("/identities", "POST"),
-        ]
+    def test_onboarding_endpoints_require_authentication(self, client):
+        """All onboarding-related endpoints reject unauthenticated callers."""
+        assert client.get("/setup/status").status_code == 401
+        assert client.get("/identities").status_code == 401
+        assert client.post("/identities", json={}).status_code == 401
 
-        for path, method in endpoints:
-            if method == "GET":
-                response = client.get(path)
-            else:
-                response = client.post(path, json={})
+    def test_onboarding_endpoints_reachable_when_authenticated(self, auth_client):
+        """With auth, the onboarding endpoints execute their route bodies."""
+        status_response = auth_client.get("/setup/status")
+        assert status_response.status_code == 200
+        assert status_response.json() == {"has_identity": False, "is_complete": False}
 
-            # Should not be 404 (endpoint exists)
-            assert response.status_code != 404, f"{method} {path} not found"
+        list_response = auth_client.get("/identities")
+        assert list_response.status_code == 200
+        assert list_response.json() == {"identities": [], "total": 0}
+
+        # An empty body now fails schema validation rather than auth, which
+        # proves the request reached the route.
+        assert auth_client.post("/identities", json={}).status_code == 422
 
 
 # =============================================================================
@@ -184,9 +222,11 @@ class TestE2EOnboardingFlow:
 class TestE2EIdentityFlow:
     """E2E tests for identity creation and management."""
 
-    def test_create_identity_endpoint_accepts_valid_data(self, client):
+    def test_create_identity_endpoint_accepts_valid_data(
+        self, auth_client, reddit_provider
+    ):
         """Identity creation should accept valid data."""
-        response = client.post(
+        response = auth_client.post(
             "/identities",
             json={
                 "provider_id": "reddit",
@@ -199,16 +239,22 @@ class TestE2EIdentityFlow:
             },
         )
 
-        # May require auth (401/403) or succeed (201)
-        assert response.status_code in (200, 201, 401, 403, 422)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["external_username"] == "new_identity_user"
+        assert data["display_name"] == "New Identity"
+        assert data["voice_config"]["tone"] == "professional"
 
-    def test_list_identities_returns_array(self, client):
+    def test_list_identities_returns_array(self, auth_client, identity_with_credentials):
         """Listing identities should return an array."""
-        response = client.get("/identities")
+        response = auth_client.get("/identities")
 
-        if response.status_code == 200:
-            data = response.json()
-            assert isinstance(data, (list, dict))
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert [i["external_username"] for i in data["identities"]] == [
+            "e2e_test_user"
+        ]
 
 
 # =============================================================================
@@ -219,52 +265,58 @@ class TestE2EIdentityFlow:
 class TestE2EConversationFlow:
     """E2E tests for conversation management."""
 
-    def test_conversation_endpoints_exist(self, client, conversation_with_messages):
-        """All conversation endpoints should exist."""
+    def test_conversation_endpoints_require_authentication(
+        self, client, conversation_with_messages
+    ):
+        """Conversation endpoints exist and reject unauthenticated callers."""
         conv = conversation_with_messages["conversation"]
 
-        endpoints = [
-            (f"/conversations/{conv.id}/messages", "POST"),
-            (f"/conversations/{conv.id}/pending", "GET"),
-        ]
-
-        for path, method in endpoints:
-            if method == "GET":
-                response = client.get(path)
-            else:
-                response = client.post(path, json={"body_text": "Test"})
-
-            assert response.status_code != 404, f"{method} {path} not found"
-
-    def test_send_message_flow(self, client, conversation_with_messages):
-        """Complete flow of sending a message."""
-        conv = conversation_with_messages["conversation"]
-
-        # Attempt to send message
-        response = client.post(
-            f"/conversations/{conv.id}/messages",
-            json={
-                "body_text": "This is a test message from E2E",
-                "attachment_ids": [],
-            },
+        send = client.post(
+            f"/conversations/{conv.id}/messages", json={"body_text": "Test"}
         )
+        assert send.status_code == 401
 
-        # Should accept (202), require auth (401/403), or fail validation (422)
-        assert response.status_code in (202, 401, 403, 422)
+        pending = client.get(f"/conversations/{conv.id}/pending")
+        assert pending.status_code == 401
 
-        if response.status_code == 202:
-            data = response.json()
-            assert "job_id" in data or "message_id" in data
+    def test_send_message_flow(self, auth_client, conversation_with_messages):
+        """Complete flow of sending a message."""
+        from unittest.mock import patch
 
-    def test_get_pending_messages_flow(self, client, conversation_with_messages):
+        conv = conversation_with_messages["conversation"]
+
+        # No broker is running under pytest; without this the route spends ~20s
+        # in Celery's connection retries before swallowing the error.
+        with patch("celery.Celery.send_task") as send_task:
+            response = auth_client.post(
+                f"/conversations/{conv.id}/messages",
+                json={
+                    "body_text": "This is a test message from E2E",
+                    "attachment_ids": [],
+                },
+            )
+
+        # 202: the send is queued for the worker, never performed inline.
+        assert response.status_code == 202
+        data = response.json()
+        assert isinstance(data["job_id"], int)
+        assert isinstance(data["message_id"], int)
+        assert data["status"] == "queued"
+
+        # The task must actually be handed to the worker queue.
+        send_task.assert_called_once()
+        assert send_task.call_args.args[0] == "message.send_manual"
+        assert send_task.call_args.kwargs["queue"] == "messages"
+
+    def test_get_pending_messages_flow(self, auth_client, conversation_with_messages):
         """Flow of checking pending messages."""
         conv = conversation_with_messages["conversation"]
 
-        response = client.get(f"/conversations/{conv.id}/pending")
+        response = auth_client.get(f"/conversations/{conv.id}/pending")
 
-        if response.status_code == 200:
-            data = response.json()
-            assert isinstance(data, list)
+        assert response.status_code == 200
+        # The fixture's messages are all 'visible', so nothing is pending yet.
+        assert response.json() == []
 
 
 # =============================================================================
@@ -275,23 +327,47 @@ class TestE2EConversationFlow:
 class TestE2ESearchFlow:
     """E2E tests for search functionality."""
 
-    def test_search_endpoint_exists(self, client):
-        """Search endpoint should exist."""
+    def test_search_is_post_only(self, client):
+        """/search is declared POST-only, so GET is 405 (not 404)."""
         response = client.get("/search?q=test")
 
-        # Should not be 404
-        assert response.status_code != 404
+        assert response.status_code == 405
 
-    def test_search_with_query(self, client):
-        """Search with query parameter."""
-        response = client.get("/search?q=hello+world")
+    def test_search_requires_authentication(self, client):
+        """Search should reject unauthenticated callers."""
+        response = client.post("/search", json={"query": "hello world"})
 
-        # May require auth, return results, or not be implemented
-        assert response.status_code in (200, 401, 403, 404, 405)
+        assert response.status_code == 401
 
-        if response.status_code == 200:
-            data = response.json()
-            assert "results" in data or "hits" in data or isinstance(data, list)
+    def test_search_with_query(self, test_app, auth_client):
+        """Search returns the hybrid-search results in the response envelope."""
+        from rediska_core.api.routes.search import get_search_service
+
+        class StubSearchService:
+            """Stands in for Elasticsearch, which is not running under pytest."""
+
+            def hybrid_search(self, **kwargs):
+                assert kwargs["query"] == "hello world"
+                return {
+                    "total": 1,
+                    "max_score": 1.5,
+                    "hits": [
+                        {"id": "message:1", "score": 1.5, "source": {"body": "hello"}}
+                    ],
+                }
+
+        test_app.dependency_overrides[get_search_service] = StubSearchService
+        try:
+            response = auth_client.post("/search", json={"query": "hello world"})
+        finally:
+            test_app.dependency_overrides.pop(get_search_service, None)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["max_score"] == 1.5
+        assert data["hits"][0]["id"] == "message:1"
+        assert data["hits"][0]["source"] == {"body": "hello"}
 
 
 # =============================================================================
@@ -302,25 +378,19 @@ class TestE2ESearchFlow:
 class TestE2ELeadsFlow:
     """E2E tests for lead discovery and management."""
 
-    def test_leads_endpoint_exists(self, client):
-        """Leads endpoint should exist."""
+    def test_leads_endpoint_requires_authentication(self, client):
+        """Leads endpoint exists and rejects unauthenticated callers."""
         response = client.get("/leads")
 
-        assert response.status_code != 404
+        assert response.status_code == 401
 
-    def test_leads_list_returns_paginated(self, client):
+    def test_leads_list_returns_paginated(self, auth_client):
         """Leads list should support pagination."""
-        response = client.get("/leads?page=1&page_size=10")
+        response = auth_client.get("/leads?offset=0&limit=10")
 
-        if response.status_code == 200:
-            data = response.json()
-            # Should have pagination info
-            assert (
-                "items" in data
-                or "results" in data
-                or "leads" in data
-                or isinstance(data, list)
-            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"leads": [], "total": 0}
 
 
 # =============================================================================
@@ -331,20 +401,33 @@ class TestE2ELeadsFlow:
 class TestE2EDirectoryFlow:
     """E2E tests for directory (external accounts) functionality."""
 
-    def test_directory_endpoint_exists(self, client):
-        """Directory endpoint should exist or return auth error."""
-        response = client.get("/directories")
+    def test_directory_endpoints_require_authentication(self, client):
+        """Directory endpoints reject unauthenticated callers."""
+        assert client.get("/directories/analyzed").status_code == 401
+        assert client.get("/directories/counts").status_code == 401
 
-        # May not be implemented yet
-        assert response.status_code in (200, 401, 403, 404)
+    def test_directory_counts_on_empty_install(self, auth_client):
+        """Counts should be zero for every directory on a fresh install."""
+        response = auth_client.get("/directories/counts")
 
-    def test_directory_search(self, client):
+        assert response.status_code == 200
+        assert response.json() == {
+            "analyzed": 0,
+            "contacted": 0,
+            "engaged": 0,
+            "starred": 0,
+        }
+
+    def test_directory_search(self, auth_client, conversation_with_messages):
         """Directory should support search."""
-        response = client.get("/directories?q=user")
+        response = auth_client.get("/directories/analyzed?search=counterpart")
 
-        if response.status_code == 200:
-            data = response.json()
-            assert isinstance(data, (list, dict))
+        assert response.status_code == 200
+        data = response.json()
+        assert data["directory_type"] == "analyzed"
+        # The fixture's counterpart has never been analyzed, so it is excluded.
+        assert data["entries"] == []
+        assert data["total"] == 0
 
 
 # =============================================================================
@@ -355,18 +438,20 @@ class TestE2EDirectoryFlow:
 class TestE2EAuditFlow:
     """E2E tests for audit logging functionality."""
 
-    def test_audit_endpoint_exists(self, client):
-        """Audit logs endpoint should exist."""
-        response = client.get("/audit")
-
-        assert response.status_code != 404
-
     def test_audit_logs_require_auth(self, client):
-        """Audit logs should require authentication."""
+        """Audit is sensitive and must reject unauthenticated callers."""
         response = client.get("/audit")
 
-        # Audit is sensitive - should require auth
-        assert response.status_code in (200, 401, 403)
+        assert response.status_code == 401
+
+    def test_audit_logs_readable_when_authenticated(self, auth_client):
+        """With auth, /audit returns its list envelope."""
+        response = auth_client.get("/audit")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["entries"] == []
+        assert data["total"] == 0
 
 
 # =============================================================================
@@ -389,37 +474,21 @@ class TestE2EMetricsFlow:
             response = client.get(endpoint)
             assert response.status_code == 200, f"{endpoint} failed"
 
-    def test_metrics_returns_system_info(self, client):
-        """Metrics endpoint should return system info."""
+    def test_metrics_requires_authentication(self, client):
+        """Metrics expose system internals and must require auth."""
         response = client.get("/api/metrics")
 
-        if response.status_code == 200:
-            data = response.json()
-            assert isinstance(data, dict)
+        assert response.status_code == 401
 
+    def test_metrics_returns_system_info(self, auth_client):
+        """Metrics endpoint should return system info."""
+        response = auth_client.get("/api/metrics")
 
-# =============================================================================
-# E2E: SOURCES FLOW
-# =============================================================================
-
-
-class TestE2ESourcesFlow:
-    """E2E tests for sources (subreddit/community) management."""
-
-    def test_sources_endpoint_exists(self, client):
-        """Sources endpoint should exist or return auth error."""
-        response = client.get("/sources")
-
-        # May not be implemented yet or require auth
-        assert response.status_code in (200, 401, 403, 404)
-
-    def test_sources_list_returns_data(self, client):
-        """Sources list should return data structure."""
-        response = client.get("/sources")
-
-        if response.status_code == 200:
-            data = response.json()
-            assert isinstance(data, (list, dict))
+        assert response.status_code == 200
+        data = response.json()
+        assert "collected_at" in data
+        assert isinstance(data["application"], dict)
+        assert isinstance(data["system"], dict)
 
 
 # =============================================================================
@@ -430,12 +499,14 @@ class TestE2ESourcesFlow:
 class TestE2EAttachmentFlow:
     """E2E tests for attachment handling."""
 
-    def test_attachment_upload_endpoint_exists(self, client):
-        """Attachment upload endpoint should exist or return auth error."""
-        response = client.post("/attachments")
+    def test_attachment_upload_requires_authentication(self, client):
+        """Attachment upload exists at /attachments/upload and requires auth."""
+        response = client.post(
+            "/attachments/upload",
+            files={"file": ("test.txt", b"hello", "text/plain")},
+        )
 
-        # May not be implemented, require auth, or fail validation
-        assert response.status_code in (200, 201, 401, 403, 404, 405, 422)
+        assert response.status_code == 401
 
 
 # =============================================================================
@@ -446,13 +517,12 @@ class TestE2EAttachmentFlow:
 class TestE2EErrorHandling:
     """E2E tests for error handling across flows."""
 
-    def test_invalid_conversation_id_returns_error(self, client):
-        """Invalid conversation ID should return proper error."""
-        response = client.get("/conversations/99999999/pending")
+    def test_invalid_conversation_id_returns_error(self, auth_client):
+        """Unknown conversation ID yields an empty pending list, never a 500."""
+        response = auth_client.get("/conversations/99999999/pending")
 
-        # Should be 404 or auth error, not 500
-        assert response.status_code in (200, 401, 403, 404)
-        assert response.status_code != 500
+        assert response.status_code == 200
+        assert response.json() == []
 
     def test_invalid_json_returns_422(self, client):
         """Invalid JSON should return 422."""
@@ -464,15 +534,18 @@ class TestE2EErrorHandling:
 
         assert response.status_code == 422
 
-    def test_missing_required_fields_returns_422(self, client):
+    def test_missing_required_fields_returns_422(self, auth_client):
         """Missing required fields should return 422."""
-        response = client.post(
+        response = auth_client.post(
             "/identities",
             json={},  # Missing required fields
         )
 
-        # Should be validation error or auth required
-        assert response.status_code in (401, 403, 422)
+        assert response.status_code == 422
+        missing = {tuple(e["loc"]) for e in response.json()["detail"]}
+        assert ("body", "provider_id") in missing
+        assert ("body", "external_username") in missing
+        assert ("body", "display_name") in missing
 
 
 # =============================================================================
@@ -483,55 +556,52 @@ class TestE2EErrorHandling:
 class TestE2EDataPersistence:
     """E2E tests for data persistence across requests."""
 
-    def test_created_data_persists(self, client, db_session):
-        """Data created via API should persist."""
-        from rediska_core.domain.models import Provider
-
-        # Create provider first
-        provider = Provider(
-            provider_id="reddit",
-            display_name="Reddit",
-            enabled=True,
+    def test_created_data_persists(self, auth_client, db_session, reddit_provider):
+        """Data created via API should persist to the database."""
+        response = auth_client.post(
+            "/identities",
+            json={
+                "provider_id": "reddit",
+                "external_username": "persist_test_user",
+                "external_user_id": "t2_persist",
+                "display_name": "Persist Test",
+            },
         )
-        db_session.add(provider)
-        db_session.flush()
+        assert response.status_code == 201
 
-        # Create identity
-        identity = Identity(
-            provider_id="reddit",
-            external_username="persist_test_user",
-            external_user_id="t2_persist",
-            display_name="Persist Test",
-            is_default=False,
-            is_active=True,
+        # The row must exist in the DB, not just in the response body.
+        from_db = (
+            db_session.query(Identity)
+            .filter_by(external_username="persist_test_user")
+            .first()
         )
-        db_session.add(identity)
-        db_session.commit()
-
-        # Verify it persists
-        from_db = db_session.query(Identity).filter_by(
-            external_username="persist_test_user"
-        ).first()
-
         assert from_db is not None
         assert from_db.display_name == "Persist Test"
+        assert from_db.id == response.json()["id"]
 
-    def test_messages_maintain_order(self, db_session, conversation_with_messages):
-        """Messages should maintain chronological order."""
+        # And it must be visible to a subsequent request.
+        listed = auth_client.get("/identities")
+        assert listed.status_code == 200
+        assert [i["external_username"] for i in listed.json()["identities"]] == [
+            "persist_test_user"
+        ]
+
+    def test_messages_maintain_order(self, auth_client, conversation_with_messages):
+        """The messages API returns a conversation's messages newest-first."""
         conv = conversation_with_messages["conversation"]
 
-        messages = (
-            db_session.query(Message)
-            .filter_by(conversation_id=conv.id)
-            .order_by(Message.id)
-            .all()
-        )
+        response = auth_client.get(f"/conversations/{conv.id}/messages")
 
-        # Verify order matches creation order
-        assert len(messages) == 3
-        assert messages[0].body_text == "Hey there!"
-        assert messages[1].body_text == "Hi! How can I help?"
-        assert messages[2].body_text == "I have a question about your product."
+        assert response.status_code == 200
+        data = response.json()
+        assert data["has_more"] is False
+        # Ordered by (sent_at DESC, id DESC); the fixture shares one sent_at,
+        # so this is exactly reverse insertion order.
+        assert [m["body_text"] for m in data["messages"]] == [
+            "I have a question about your product.",
+            "Hi! How can I help?",
+            "Hey there!",
+        ]
 
 
 # =============================================================================
@@ -547,10 +617,14 @@ class TestE2EConcurrentAccess:
         import threading
 
         results = []
+        errors = []
 
         def check_health():
-            response = client.get("/api/health")
-            results.append(response.status_code)
+            try:
+                response = client.get("/api/health")
+                results.append(response.status_code)
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
 
         threads = [threading.Thread(target=check_health) for _ in range(5)]
 
@@ -559,5 +633,8 @@ class TestE2EConcurrentAccess:
         for t in threads:
             t.join()
 
-        # All should succeed
+        # Exceptions inside a thread do not propagate to the test, so an
+        # unchecked `all(...)` over an empty list would pass vacuously.
+        assert errors == []
+        assert len(results) == 5
         assert all(status == 200 for status in results)

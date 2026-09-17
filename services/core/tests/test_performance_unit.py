@@ -224,13 +224,14 @@ class TestDatabaseIndexes:
         assert "idx_msg_conv_time" in index_names
 
     def test_conversation_last_activity_index(self):
-        """Verify Conversation has index on last_activity_at."""
+        """Verify Conversation has indexes for inbox sorting and filtering."""
         from rediska_core.domain.models import Conversation
 
         table = Conversation.__table__
         index_names = [idx.name for idx in table.indexes]
 
-        assert "idx_conv_last_activity" in index_names
+        assert "idx_conv_last_activity" in index_names  # inbox sort
+        assert "idx_conv_identity" in index_names  # identity filter
 
     def test_lead_post_status_index(self):
         """Verify LeadPost has index on status."""
@@ -242,13 +243,14 @@ class TestDatabaseIndexes:
         assert "idx_status" in index_names
 
     def test_audit_log_timestamp_index(self):
-        """Verify AuditLog has index on timestamp."""
+        """Verify AuditLog has indexes for timestamp sorting and action filter."""
         from rediska_core.domain.models import AuditLog
 
         table = AuditLog.__table__
         index_names = [idx.name for idx in table.indexes]
 
-        assert "idx_audit_ts" in index_names
+        assert "idx_audit_ts" in index_names  # timestamp sort
+        assert "idx_audit_action" in index_names  # action_type filter
 
     def test_attachment_message_index(self):
         """Verify Attachment has index on message_id."""
@@ -258,44 +260,6 @@ class TestDatabaseIndexes:
         index_names = [idx.name for idx in table.indexes]
 
         assert "idx_attach_msg" in index_names
-
-
-class TestPaginationIndexOptimization:
-    """Tests for pagination index optimization patterns."""
-
-    def test_conversation_inbox_query_uses_index(self):
-        """Verify inbox query pattern is optimized."""
-        from rediska_core.domain.models import Conversation
-
-        table = Conversation.__table__
-        index_names = [idx.name for idx in table.indexes]
-
-        # Should have index for last_activity_at for inbox sorting
-        assert "idx_conv_last_activity" in index_names
-        # Should have index for identity filtering
-        assert "idx_conv_identity" in index_names
-
-    def test_message_thread_query_uses_index(self):
-        """Verify message thread query pattern is optimized."""
-        from rediska_core.domain.models import Message
-
-        table = Message.__table__
-        index_names = [idx.name for idx in table.indexes]
-
-        # Should have composite index for conversation + time
-        assert "idx_msg_conv_time" in index_names
-
-    def test_audit_log_query_uses_index(self):
-        """Verify audit log query pattern is optimized."""
-        from rediska_core.domain.models import AuditLog
-
-        table = AuditLog.__table__
-        index_names = [idx.name for idx in table.indexes]
-
-        # Should have index for timestamp sorting
-        assert "idx_audit_ts" in index_names
-        # Should have index for action type filtering
-        assert "idx_audit_action" in index_names
 
 
 class TestESQueryWithLimits:

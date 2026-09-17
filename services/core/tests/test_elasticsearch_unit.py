@@ -36,7 +36,9 @@ class TestESClientInitialization:
             client = ElasticsearchClient(url=test_settings.elastic_url)
 
             mock_es.assert_called_once()
-            assert client is not None
+            # The driver is constructed with the configured URL as its only host.
+            assert mock_es.call_args[0][0] == [test_settings.elastic_url]
+            assert client.url == test_settings.elastic_url
 
     def test_client_ping_returns_health(self, test_settings):
         """Client ping should return ES cluster health."""
@@ -209,8 +211,8 @@ class TestDocumentOperations:
             assert result is True
             mock_instance.index.assert_called_once()
 
-    def test_index_document_updates_existing(self, test_settings):
-        """Index document should update an existing document."""
+    def test_index_document_passes_id_body_and_refresh(self, test_settings):
+        """Index document should forward doc_id, body and refresh to the driver."""
         from rediska_core.infrastructure.elasticsearch import ElasticsearchClient
 
         with patch(ES_PATCH_PATH) as mock_es:
@@ -218,18 +220,28 @@ class TestDocumentOperations:
             mock_instance.index.return_value = {"result": "updated", "_id": "msg_123"}
             mock_es.return_value = mock_instance
 
+            document = {
+                "doc_type": "message",
+                "entity_id": 123,
+                "content": "Updated content",
+            }
+
             client = ElasticsearchClient(url=test_settings.elastic_url)
             result = client.index_document(
                 index="rediska_content_docs_v1",
                 doc_id="message:123",
-                document={
-                    "doc_type": "message",
-                    "entity_id": 123,
-                    "content": "Updated content",
-                },
+                document=document,
+                refresh=True,
             )
 
             assert result is True
+            # index_document returns True on any non-exception, so the only
+            # behaviour worth checking is the request it built.
+            kwargs = mock_instance.index.call_args[1]
+            assert kwargs["index"] == "rediska_content_docs_v1"
+            assert kwargs["id"] == "message:123"
+            assert kwargs["body"] == document
+            assert kwargs["refresh"] is True
 
     def test_get_document_returns_doc(self, test_settings):
         """Get document should return the document if exists."""
@@ -421,9 +433,12 @@ class TestSearch:
                 filters={"provider_id": "reddit"},
             )
 
-            # Verify filter was applied in the call
-            call_args = mock_instance.search.call_args
-            assert call_args is not None
+            # Filters become term clauses inside body.query.bool.filter.
+            body = mock_instance.search.call_args[1]["body"]
+            assert body["query"]["bool"]["filter"] == [
+                {"term": {"provider_id": "reddit"}}
+            ]
+            assert body["query"]["bool"]["must"] == [{"match": {"content": "hello"}}]
 
     def test_search_filters_by_identity_id(self, test_settings):
         """Search should support filtering by identity_id."""
@@ -443,8 +458,32 @@ class TestSearch:
                 filters={"identity_id": 1},
             )
 
-            call_args = mock_instance.search.call_args
-            assert call_args is not None
+            body = mock_instance.search.call_args[1]["body"]
+            assert body["query"]["bool"]["filter"] == [{"term": {"identity_id": 1}}]
+
+    def test_search_list_filter_becomes_terms_clause(self, test_settings):
+        """A list-valued filter should become a `terms` clause, not `term`."""
+        from rediska_core.infrastructure.elasticsearch import ElasticsearchClient
+
+        with patch(ES_PATCH_PATH) as mock_es:
+            mock_instance = MagicMock()
+            mock_instance.search.return_value = {
+                "hits": {"total": {"value": 0}, "hits": []}
+            }
+            mock_es.return_value = mock_instance
+
+            client = ElasticsearchClient(url=test_settings.elastic_url)
+            client.search(
+                index="rediska_content_docs_v1",
+                query={"match": {"content": "hello"}},
+                # None-valued filters are dropped entirely.
+                filters={"doc_type": ["message", "lead_post"], "identity_id": None},
+            )
+
+            body = mock_instance.search.call_args[1]["body"]
+            assert body["query"]["bool"]["filter"] == [
+                {"terms": {"doc_type": ["message", "lead_post"]}}
+            ]
 
     def test_search_with_pagination(self, test_settings):
         """Search should support pagination."""
@@ -465,6 +504,7 @@ class TestSearch:
                 size=20,
             )
 
-            call_args = mock_instance.search.call_args
-            assert call_args[1]["from_"] == 10
-            assert call_args[1]["size"] == 20
+            # Pagination goes into the query body, not as driver kwargs.
+            body = mock_instance.search.call_args[1]["body"]
+            assert body["from"] == 10
+            assert body["size"] == 20

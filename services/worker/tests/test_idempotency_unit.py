@@ -116,40 +116,20 @@ class TestComputeDedupeKey:
         assert key is not None
 
 
-class TestIdempotencyManager:
-    """Tests for IdempotencyManager class."""
-
-    @pytest.fixture
-    def manager(self, mock_db_session):
-        """Create IdempotencyManager with mock DB."""
-        from rediska_worker.util.idempotency import IdempotencyManager
-
-        return IdempotencyManager(mock_db_session)
-
-    @pytest.mark.asyncio
-    async def test_acquire_lock_returns_true(self, manager):
-        """acquire_lock should return True (stub implementation)."""
-        result = await manager.acquire_lock("test-dedupe-key")
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_release_lock_no_error(self, manager):
-        """release_lock should not raise errors."""
-        # Should not raise
-        await manager.release_lock("test-dedupe-key")
-
-    @pytest.mark.asyncio
-    async def test_mark_complete_no_error(self, manager):
-        """mark_complete should not raise errors."""
-        # Should not raise
-        await manager.mark_complete("test-dedupe-key")
-
-    @pytest.mark.asyncio
-    async def test_mark_failed_no_error(self, manager):
-        """mark_failed should not raise errors."""
-        # Should not raise
-        await manager.mark_failed("test-dedupe-key", "Test error message")
+# -----------------------------------------------------------------------------
+# IdempotencyManager is NOT tested here, by design.
+#
+# Every one of its methods is an unimplemented stub -- acquire_lock is
+# `# TODO: Implement with database` followed by `return True`, and
+# release_lock / mark_complete / mark_failed are bare `pass`. Tests asserting
+# `acquire_lock(...) is True` or "does not raise" only restate those hardcoded
+# literals: they would keep passing if the manager were deleted, and would
+# start FAILING once the real database-backed locking lands (a genuine
+# acquire_lock must return False when the lock is already held).
+#
+# Add real tests here when the implementation exists. The compute_dedupe_key
+# tests below cover the one part of this module that is actually implemented.
+# -----------------------------------------------------------------------------
 
 
 class TestDedupeKeyProperties:

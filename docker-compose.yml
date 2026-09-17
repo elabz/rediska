@@ -84,6 +84,9 @@ services:
       # Human evaluation: cap on labelled cases per prompt replay
       - EVALUATION_REPLAY_MAX_CASES=${EVALUATION_REPLAY_MAX_CASES:-50}
 
+      # Lead triage: days before an untouched scout lead auto-expires (0 disables)
+      - LEAD_EXPIRY_DAYS=${LEAD_EXPIRY_DAYS:-0}
+
       - CELERY_BROKER_URL=${CELERY_BROKER_URL}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
     volumes:
@@ -163,6 +166,9 @@ services:
 
       # Human evaluation: cap on labelled cases per prompt replay
       - EVALUATION_REPLAY_MAX_CASES=${EVALUATION_REPLAY_MAX_CASES:-50}
+
+      # Lead triage: days before an untouched scout lead auto-expires (0 disables)
+      - LEAD_EXPIRY_DAYS=${LEAD_EXPIRY_DAYS:-0}
     volumes:
       - ${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}:${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}
       - ${BACKUPS_PATH:-/var/lib/rediska/backups}:${BACKUPS_PATH:-/var/lib/rediska/backups}

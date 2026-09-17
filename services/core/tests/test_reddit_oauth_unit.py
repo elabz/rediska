@@ -182,8 +182,16 @@ class TestRedditOAuthService:
         assert service.validate_state(state) is False
 
     @pytest.mark.asyncio
-    async def test_exchange_code_returns_tokens(self, db_session, reddit_config):
-        """exchange_code should return access and refresh tokens."""
+    async def test_exchange_code_posts_authorization_code_grant(
+        self, db_session, reddit_config
+    ):
+        """exchange_code should POST a correctly-shaped authorization_code grant.
+
+        The method returns response.json() verbatim, so asserting on the returned
+        dict would only re-read the mock. The real contract is the *request*:
+        Reddit requires the authorization_code grant, HTTP Basic client auth, a
+        redirect_uri matching the one used to start the flow, and a User-Agent.
+        """
         from rediska_core.providers.reddit.oauth import RedditOAuthService
 
         service = RedditOAuthService(
@@ -194,7 +202,6 @@ class TestRedditOAuthService:
             user_agent=reddit_config["user_agent"],
         )
 
-        # Mock the HTTP client
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -202,7 +209,6 @@ class TestRedditOAuthService:
             "refresh_token": "test_refresh_token",
             "token_type": "bearer",
             "expires_in": 3600,
-            "scope": "identity privatemessages read history",
         }
 
         with patch("httpx.AsyncClient") as mock_client:
@@ -210,12 +216,24 @@ class TestRedditOAuthService:
             mock_client_instance.post.return_value = mock_response
             mock_client.return_value.__aenter__.return_value = mock_client_instance
 
-            tokens = await service.exchange_code("test_auth_code")
+            await service.exchange_code("test_auth_code")
 
-        assert tokens["access_token"] == "test_access_token"
-        assert tokens["refresh_token"] == "test_refresh_token"
-        assert tokens["token_type"] == "bearer"
-        assert tokens["expires_in"] == 3600
+        args, kwargs = mock_client_instance.post.call_args
+
+        assert args[0] == RedditOAuthService.TOKEN_URL
+        assert kwargs["data"] == {
+            "grant_type": "authorization_code",
+            "code": "test_auth_code",
+            "redirect_uri": reddit_config["redirect_uri"],
+        }
+        # Reddit authenticates the app via HTTP Basic, not body params.
+        assert kwargs["auth"] == (
+            reddit_config["client_id"],
+            reddit_config["client_secret"],
+        )
+        assert kwargs["headers"]["User-Agent"] == reddit_config["user_agent"]
+        # The client secret must never leak into the request body.
+        assert reddit_config["client_secret"] not in kwargs["data"].values()
 
     @pytest.mark.asyncio
     async def test_exchange_code_raises_on_error(self, db_session, reddit_config):
@@ -277,8 +295,14 @@ class TestRedditOAuthService:
         assert identity["user_id"] == "t2_abc123"
 
     @pytest.mark.asyncio
-    async def test_refresh_token_returns_new_access_token(self, db_session, reddit_config):
-        """refresh_token should return a new access token."""
+    async def test_refresh_access_token_posts_refresh_token_grant(
+        self, db_session, reddit_config
+    ):
+        """refresh_access_token should POST a refresh_token grant, not re-send the code.
+
+        As with exchange_code, the return value is response.json() verbatim, so the
+        meaningful assertion is on the outgoing request.
+        """
         from rediska_core.providers.reddit.oauth import RedditOAuthService
 
         service = RedditOAuthService(
@@ -295,7 +319,6 @@ class TestRedditOAuthService:
             "access_token": "new_access_token",
             "token_type": "bearer",
             "expires_in": 3600,
-            "scope": "identity privatemessages read history",
         }
 
         with patch("httpx.AsyncClient") as mock_client:
@@ -303,9 +326,20 @@ class TestRedditOAuthService:
             mock_client_instance.post.return_value = mock_response
             mock_client.return_value.__aenter__.return_value = mock_client_instance
 
-            tokens = await service.refresh_access_token("old_refresh_token")
+            await service.refresh_access_token("old_refresh_token")
 
-        assert tokens["access_token"] == "new_access_token"
+        args, kwargs = mock_client_instance.post.call_args
+
+        assert args[0] == RedditOAuthService.TOKEN_URL
+        assert kwargs["data"] == {
+            "grant_type": "refresh_token",
+            "refresh_token": "old_refresh_token",
+        }
+        assert kwargs["auth"] == (
+            reddit_config["client_id"],
+            reddit_config["client_secret"],
+        )
+        assert kwargs["headers"]["User-Agent"] == reddit_config["user_agent"]
 
 
 class TestStoreOAuthCredentials:

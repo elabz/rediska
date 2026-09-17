@@ -2,6 +2,11 @@
 
 These tests verify that the health endpoint works correctly
 with the full application stack.
+
+NOTE: the status/body assertions that used to live here were strict subsets of
+test_health_unit.py running against the same hard-coded handler, so they have
+been removed. What remains is what the unit tests cannot cover: middleware
+behaviour (CORS) and routing (404).
 """
 
 import pytest
@@ -11,49 +16,42 @@ class TestHealthCheckIntegration:
     """Integration tests for health check functionality."""
 
     @pytest.mark.asyncio
-    async def test_health_endpoint_accessible(self, client):
-        """Test that health endpoint is accessible without authentication."""
-        response = await client.get("/healthz")
-
-        # Should be accessible
-        assert response.status_code == 200
-
-    @pytest.mark.asyncio
-    async def test_health_endpoint_returns_json(self, client):
-        """Test that health endpoint returns valid JSON."""
-        response = await client.get("/healthz")
-
-        assert response.headers.get("content-type") == "application/json"
-        # Should not raise
-        data = response.json()
-        assert isinstance(data, dict)
-
-    @pytest.mark.asyncio
     async def test_cors_headers_on_health_endpoint(self, client):
-        """Test that CORS headers are present on health endpoint."""
+        """CORS preflight must actually return the Access-Control-* headers.
+
+        The old test only checked the status code and never inspected a single
+        CORS header, despite its name -- it would have passed with CORSMiddleware
+        removed entirely.
+        """
+        origin = "https://rediska.local"
+
         response = await client.options(
             "/healthz",
             headers={
-                "Origin": "https://rediska.local",
+                "Origin": origin,
                 "Access-Control-Request-Method": "GET",
             },
         )
 
-        # CORS preflight should succeed
         assert response.status_code in (200, 204)
+        # allow_credentials=True means the origin must be echoed back exactly,
+        # never the "*" wildcard (a wildcard is invalid with credentials).
+        assert response.headers.get("access-control-allow-origin") == origin
+        assert response.headers.get("access-control-allow-credentials") == "true"
+        assert "GET" in response.headers.get("access-control-allow-methods", "")
 
     @pytest.mark.asyncio
-    async def test_root_endpoint_returns_api_info(self, client):
-        """Test that root endpoint provides API information."""
-        response = await client.get("/")
+    async def test_cors_rejects_unknown_origin(self, client):
+        """An origin outside the allow-list gets no allow-origin header."""
+        response = await client.options(
+            "/healthz",
+            headers={
+                "Origin": "https://evil.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
 
-        assert response.status_code == 200
-        data = response.json()
-
-        # Verify API info structure
-        assert "name" in data
-        assert "version" in data
-        assert "status" in data
+        assert response.headers.get("access-control-allow-origin") is None
 
     @pytest.mark.asyncio
     async def test_nonexistent_endpoint_returns_404(self, client):

@@ -58,52 +58,8 @@ class TestInferenceConfig:
         assert config.model_name == "default"
         assert config.timeout == 60.0
         assert config.max_tokens == 2048
-        assert config.temperature == 0.7
-
-    def test_config_with_custom_values(self):
-        """Config should accept custom values."""
-        config = InferenceConfig(
-            base_url="http://localhost:8080",
-            model_name="custom-model",
-            timeout=120.0,
-            max_tokens=4096,
-            temperature=0.5,
-        )
-
-        assert config.model_name == "custom-model"
-        assert config.timeout == 120.0
-        assert config.max_tokens == 4096
-        assert config.temperature == 0.5
-
-
-# =============================================================================
-# CHAT MESSAGE TESTS
-# =============================================================================
-
-
-class TestChatMessage:
-    """Tests for ChatMessage dataclass."""
-
-    def test_system_message(self):
-        """Can create a system message."""
-        msg = ChatMessage(role="system", content="You are a helpful assistant.")
-
-        assert msg.role == "system"
-        assert msg.content == "You are a helpful assistant."
-
-    def test_user_message(self):
-        """Can create a user message."""
-        msg = ChatMessage(role="user", content="Hello!")
-
-        assert msg.role == "user"
-        assert msg.content == "Hello!"
-
-    def test_assistant_message(self):
-        """Can create an assistant message."""
-        msg = ChatMessage(role="assistant", content="Hi there!")
-
-        assert msg.role == "assistant"
-        assert msg.content == "Hi there!"
+        # Deliberately below the usual 0.7 for more consistent JSON output.
+        assert config.temperature == 0.6
 
 
 # =============================================================================
@@ -112,30 +68,10 @@ class TestChatMessage:
 
 
 class TestModelInfo:
-    """Tests for ModelInfo dataclass."""
-
-    def test_model_info_fields(self):
-        """ModelInfo should capture model metadata."""
-        info = ModelInfo(
-            model_name="llama-3.2-8b",
-            provider="llama.cpp",
-            temperature=0.7,
-            max_tokens=1024,
-            input_tokens=100,
-            output_tokens=50,
-            latency_ms=1500,
-        )
-
-        assert info.model_name == "llama-3.2-8b"
-        assert info.provider == "llama.cpp"
-        assert info.temperature == 0.7
-        assert info.max_tokens == 1024
-        assert info.input_tokens == 100
-        assert info.output_tokens == 50
-        assert info.latency_ms == 1500
+    """Tests for ModelInfo serialization."""
 
     def test_model_info_to_dict(self):
-        """ModelInfo should convert to dict for storage."""
+        """to_dict() should emit the audit fields and flatten `extra` alongside them."""
         info = ModelInfo(
             model_name="llama-3.2-8b",
             provider="llama.cpp",
@@ -144,65 +80,22 @@ class TestModelInfo:
             input_tokens=100,
             output_tokens=50,
             latency_ms=1500,
+            extra={"chat_template": "llama3"},
         )
 
         data = info.to_dict()
 
-        assert data["model_name"] == "llama-3.2-8b"
-        assert data["provider"] == "llama.cpp"
-        assert data["temperature"] == 0.7
-
-
-# =============================================================================
-# CHAT RESPONSE TESTS
-# =============================================================================
-
-
-class TestChatResponse:
-    """Tests for ChatResponse dataclass."""
-
-    def test_response_fields(self):
-        """ChatResponse should contain content and model info."""
-        model_info = ModelInfo(
-            model_name="llama-3.2-8b",
-            provider="llama.cpp",
-            temperature=0.7,
-            max_tokens=1024,
-            input_tokens=10,
-            output_tokens=20,
-            latency_ms=500,
-        )
-
-        response = ChatResponse(
-            content="Hello! How can I help you?",
-            model_info=model_info,
-            finish_reason="stop",
-        )
-
-        assert response.content == "Hello! How can I help you?"
-        assert response.model_info.model_name == "llama-3.2-8b"
-        assert response.finish_reason == "stop"
-
-    def test_response_with_structured_output(self):
-        """ChatResponse can include parsed structured output."""
-        model_info = ModelInfo(
-            model_name="llama-3.2-8b",
-            provider="llama.cpp",
-            temperature=0.7,
-            max_tokens=1024,
-            input_tokens=10,
-            output_tokens=20,
-            latency_ms=500,
-        )
-
-        response = ChatResponse(
-            content='{"score": 85, "reason": "Good fit"}',
-            model_info=model_info,
-            finish_reason="stop",
-            parsed_output={"score": 85, "reason": "Good fit"},
-        )
-
-        assert response.parsed_output == {"score": 85, "reason": "Good fit"}
+        assert data == {
+            "model_name": "llama-3.2-8b",
+            "provider": "llama.cpp",
+            "temperature": 0.7,
+            "max_tokens": 1024,
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "latency_ms": 1500,
+            # `extra` is spread flat, not nested under an "extra" key.
+            "chat_template": "llama3",
+        }
 
 
 # =============================================================================
@@ -335,10 +228,18 @@ class TestInferenceClient:
 
     @pytest.mark.asyncio
     async def test_chat_tracks_latency(self, inference_config):
-        """chat() should track request latency."""
+        """chat() should measure the elapsed request time in milliseconds."""
         client = InferenceClient(config=inference_config)
 
-        with patch.object(client, "_make_request") as mock_request:
+        # Drive the clock so the measured latency is exact, not merely non-negative:
+        # chat() reads monotonic() once before and once after the request.
+        # 1.5s is exactly representable in binary float, so int() truncation is stable.
+        clock = iter([100.0, 101.5])
+
+        with patch.object(client, "_make_request") as mock_request, patch(
+            "rediska_core.domain.services.inference.time.monotonic",
+            side_effect=lambda: next(clock),
+        ):
             mock_request.return_value = {
                 "choices": [{"message": {"content": "Response"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
@@ -348,8 +249,7 @@ class TestInferenceClient:
 
             response = await client.chat(messages)
 
-            # Latency should be tracked (will be small in tests)
-            assert response.model_info.latency_ms >= 0
+        assert response.model_info.latency_ms == 1500
 
 
 # =============================================================================

@@ -6,6 +6,8 @@ Provides endpoints for:
 - POST /ops/jobs/{id}/retry - Retry a failed job
 - POST /ops/backfill/conversations - Trigger conversation backfill
 - GET /ops/sync/status - Get sync status per identity
+- GET /ops/calibration-reports - List calibration reports (newest first)
+- POST /ops/calibration-reports/generate - Queue a calibration report now
 """
 
 from datetime import datetime, timezone
@@ -636,4 +638,101 @@ async def trigger_redownload_attachments(
         job_id=task.id,
         status="queued",
         message=f"Attachment redownload job queued for {scope}. Max {request.limit} attachments will be downloaded.",
+    )
+
+
+# =============================================================================
+# Calibration Reports
+# =============================================================================
+
+
+class CalibrationReportResponse(BaseModel):
+    """A stored calibration report."""
+
+    id: int
+    period_start: datetime
+    period_end: datetime
+    created_at: datetime
+    report: dict
+
+
+class CalibrationReportListResponse(BaseModel):
+    """Calibration reports, newest first."""
+
+    reports: list[CalibrationReportResponse]
+
+
+class CalibrationReportGenerateResponse(BaseModel):
+    """Response for an on-demand report generation."""
+
+    job_id: str
+    status: str
+    message: str
+
+
+@router.get(
+    "/calibration-reports",
+    response_model=CalibrationReportListResponse,
+    summary="List calibration reports",
+    description="Weekly precision snapshots comparing analysis output with user verdicts, "
+                "newest first.",
+)
+async def list_calibration_reports(
+    current_user: CurrentUser,
+    db: DBSession,
+    limit: int = Query(default=10, ge=1, le=52),
+):
+    """List stored calibration reports (newest first)."""
+    from rediska_core.domain.services.calibration_report import CalibrationReportService
+
+    reports = CalibrationReportService(db).list_reports(limit=limit)
+    return CalibrationReportListResponse(
+        reports=[
+            CalibrationReportResponse(
+                id=r.id,
+                period_start=r.period_start.replace(tzinfo=timezone.utc),
+                period_end=r.period_end.replace(tzinfo=timezone.utc),
+                created_at=r.created_at.replace(tzinfo=timezone.utc),
+                report=r.report_json,
+            )
+            for r in reports
+        ]
+    )
+
+
+@router.post(
+    "/calibration-reports/generate",
+    response_model=CalibrationReportGenerateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Generate a calibration report now",
+    description="Queue maintenance.generate_calibration_report for the period ending now. "
+                "At most one report is stored per day.",
+)
+async def generate_calibration_report(
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """Queue an on-demand calibration report."""
+    task = get_celery_app().send_task(
+        "maintenance.generate_calibration_report",
+        kwargs={},
+        queue="maintenance",
+    )
+
+    db.add(
+        AuditLog(
+            ts=datetime.now(timezone.utc),
+            actor="user",
+            action_type="calibration_report.generate",
+            result="ok",
+            entity_type="calibration_report",
+            response_json={"job_id": task.id},
+        )
+    )
+    db.commit()
+
+    return CalibrationReportGenerateResponse(
+        job_id=task.id,
+        status="queued",
+        message="Calibration report queued. At most one report is stored per day.",
     )

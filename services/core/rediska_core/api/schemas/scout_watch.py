@@ -143,6 +143,10 @@ class ScoutWatchPostResponse(BaseModel):
     evaluated_at: Optional[datetime] = None
     evaluations: dict[str, Optional[EffectiveEvaluation]] = {}
 
+    # Needs-review triage markers
+    dismissed_at: Optional[datetime] = None
+    triaged_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 
@@ -170,6 +174,29 @@ class ScoutWatchPostAddToLeadsResponse(BaseModel):
     message: str
 
 
+class NeedsReviewPostResponse(ScoutWatchPostResponse):
+    """A needs-review queue entry: the scout post plus its watch context."""
+
+    watch_source_location: Optional[str] = None
+    watch_search_query: Optional[str] = None
+    watch_min_confidence: Optional[float] = None
+
+
+class NeedsReviewListResponse(BaseModel):
+    """Cross-watch needs-review queue page."""
+
+    items: list[NeedsReviewPostResponse]
+    total: int
+    next_cursor: Optional[str] = None
+
+
+class ScoutWatchPostDismissResponse(BaseModel):
+    """Response schema for dismissing a needs-review post."""
+
+    post_id: int
+    dismissed_at: datetime
+
+
 # =============================================================================
 # EXPORTS
 # =============================================================================
@@ -187,4 +214,7 @@ __all__ = [
     "ScoutWatchRunDetailResponse",
     "ScoutWatchPostReanalyzeResponse",
     "ScoutWatchPostAddToLeadsResponse",
+    "NeedsReviewPostResponse",
+    "NeedsReviewListResponse",
+    "ScoutWatchPostDismissResponse",
 ]

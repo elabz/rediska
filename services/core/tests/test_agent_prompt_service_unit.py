@@ -85,9 +85,13 @@ def test_get_active_prompt_success(
 def test_get_active_prompt_not_found(
     agent_prompt_service: AgentPromptService,
 ):
-    """Test retrieving non-existent prompt returns None."""
-    prompt = agent_prompt_service.get_active_prompt("nonexistent")
-    assert prompt is None
+    """Test retrieving non-existent prompt raises.
+
+    Callers (multi_agent_analysis, character/interests summary) rely on the
+    raise to fall back to the defaults in agents/default_prompts.py.
+    """
+    with pytest.raises(ValueError, match="No active prompt found"):
+        agent_prompt_service.get_active_prompt("nonexistent")
 
 
 def test_get_active_prompt_ignores_inactive(
@@ -100,8 +104,8 @@ def test_get_active_prompt_ignores_inactive(
     ).update({"is_active": False})
     db_session.flush()
 
-    prompt = agent_prompt_service.get_active_prompt("demographics")
-    assert prompt is None
+    with pytest.raises(ValueError, match="No active prompt found"):
+        agent_prompt_service.get_active_prompt("demographics")
 
 
 # =============================================================================
@@ -115,9 +119,9 @@ def test_get_all_active_prompts_success(
     """Test retrieving all active prompts."""
     prompts = agent_prompt_service.get_all_active_prompts()
 
+    # get_all_active_prompts returns a dict keyed by dimension name.
     assert len(prompts) == 6
-    dimensions = {p.agent_dimension for p in prompts}
-    assert dimensions == {
+    assert set(prompts) == {
         "demographics",
         "preferences",
         "relationship_goals",
@@ -140,8 +144,7 @@ def test_get_all_active_prompts_excludes_inactive(
     prompts = agent_prompt_service.get_all_active_prompts()
 
     assert len(prompts) == 5
-    dimensions = {p.agent_dimension for p in prompts}
-    assert "demographics" not in dimensions
+    assert "demographics" not in prompts
 
 
 # =============================================================================
@@ -265,13 +268,12 @@ def test_list_prompt_versions_multiple(
 
     versions = agent_prompt_service.list_prompt_versions("demographics")
 
+    # Ordered by version descending -- newest first.
     assert len(versions) == 3
-    assert versions[0].version == 1
-    assert versions[1].version == 2
-    assert versions[2].version == 3
-    assert versions[2].is_active is True
+    assert [v.version for v in versions] == [3, 2, 1]
+    assert versions[0].is_active is True
     assert versions[1].is_active is False
-    assert versions[0].is_active is False
+    assert versions[2].is_active is False
 
 
 # =============================================================================
@@ -303,10 +305,11 @@ def test_rollback_to_version_success(
     current = agent_prompt_service.get_active_prompt("demographics")
     assert current.version == 3
 
-    # Rollback to v1
+    # Rollback to v1. This does not reactivate v1 -- it copies v1's content into
+    # a new version on top, so the edit history stays append-only.
     rolled_back = agent_prompt_service.rollback_to_version("demographics", 1)
 
-    assert rolled_back.version == 1
+    assert rolled_back.version == 4
     assert rolled_back.is_active is True
     assert rolled_back.system_prompt == "You are analyzing demographics."
 
@@ -320,17 +323,17 @@ def test_rollback_to_version_success(
 def test_rollback_to_version_not_found(
     agent_prompt_service: AgentPromptService, setup_prompts: dict
 ):
-    """Test rolling back to non-existent version."""
-    result = agent_prompt_service.rollback_to_version("demographics", 999)
-    assert result is None
+    """Test rolling back to non-existent version raises."""
+    with pytest.raises(ValueError, match="Version 999 not found"):
+        agent_prompt_service.rollback_to_version("demographics", 999)
 
 
 def test_rollback_to_version_nonexistent_dimension(
     agent_prompt_service: AgentPromptService,
 ):
-    """Test rolling back for non-existent dimension."""
-    result = agent_prompt_service.rollback_to_version("nonexistent", 1)
-    assert result is None
+    """Test rolling back for non-existent dimension raises."""
+    with pytest.raises(ValueError, match="not found for dimension nonexistent"):
+        agent_prompt_service.rollback_to_version("nonexistent", 1)
 
 
 # =============================================================================
@@ -352,9 +355,9 @@ def test_get_prompt_by_version_success(
 def test_get_prompt_by_version_not_found(
     agent_prompt_service: AgentPromptService,
 ):
-    """Test retrieving non-existent version."""
-    prompt = agent_prompt_service.get_prompt_by_version("demographics", 999)
-    assert prompt is None
+    """Test retrieving non-existent version raises."""
+    with pytest.raises(ValueError, match="Version 999 not found"):
+        agent_prompt_service.get_prompt_by_version("demographics", 999)
 
 
 # =============================================================================
@@ -416,6 +419,7 @@ def test_concurrent_updates_version_increment(
 
 def test_prompt_with_large_schema(
     agent_prompt_service: AgentPromptService,
+    db_session: Session,
 ):
     """Test creating prompt with complex JSON schema."""
     large_schema = {
@@ -444,11 +448,18 @@ def test_prompt_with_large_schema(
         created_by="test",
     )
 
+    # create_prompt only flush()es, so `prompt` is still the same Python
+    # object we passed in — asserting on it never touches the DB. Expire it so
+    # the attribute is reloaded, proving the JSON round-tripped through the
+    # column's serializer intact (nesting and all).
+    db_session.expire(prompt)
+
     assert prompt.output_schema_json == large_schema
 
 
 def test_prompt_with_special_characters(
     agent_prompt_service: AgentPromptService,
+    db_session: Session,
 ):
     """Test creating prompt with special characters in text."""
     special_prompt = """
@@ -463,5 +474,9 @@ def test_prompt_with_special_characters(
         output_schema_json={"type": "object"},
         created_by="test",
     )
+
+    # Expire so the text is re-read from SQLite rather than from the in-memory
+    # instance, proving unicode/special chars survive the storage round-trip.
+    db_session.expire(prompt)
 
     assert prompt.system_prompt == special_prompt

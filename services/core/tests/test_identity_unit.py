@@ -353,8 +353,20 @@ class TestIdentityDelete:
         identity = create_identity(db_session, is_active=False)
         service = IdentityService(db_session)
 
+        was_default = identity.is_default
+        display_name = identity.display_name
+
         # Should not raise
         service.delete_identity(identity.id)
+        db_session.flush()
+        db_session.refresh(identity)
+
+        # The no-op contract: still inactive, and nothing else about the row
+        # was touched (delete_identity returns early before the default-identity
+        # reassignment logic). Previously this test asserted nothing at all.
+        assert identity.is_active is False
+        assert identity.is_default == was_default
+        assert identity.display_name == display_name
 
 
 class TestDefaultIdentity:
@@ -597,7 +609,10 @@ class TestVoiceConfigValidation:
             voice_config=None,
         )
 
-        assert identity.voice_config_json is None or identity.voice_config_json == {}
+        # create_identity stores `voice_config or {}`, so None is normalised to
+        # an empty dict -- never left as NULL. Pin that single contracted value
+        # instead of accepting either.
+        assert identity.voice_config_json == {}
 
     def test_voice_config_empty_dict_is_valid(self, db_session: DBSession):
         """Test that empty dict voice config is valid."""

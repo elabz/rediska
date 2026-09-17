@@ -2,9 +2,7 @@
 
 ## Purpose
 All background work in Rediska is tracked through a `jobs` ledger that enforces idempotency across Celery retries, surfaced to the operator through the `/ops` API and Ops console. Every mutating action — user, system, or agent initiated — is recorded in an append-only `audit_log`. Metrics endpoints expose liveness, readiness, and queue/sync health.
-
 ## Requirements
-
 ### Requirement: Jobs ledger enforces idempotency
 
 The `jobs` table SHALL act as the idempotency ledger for background work: each job carries a `job_type`, JSON payload, a unique `dedupe_key`, `attempts`/`max_attempts` counters, and a status in `queued`, `running`, `retrying`, `failed`, `done`, or `cancelled`. Celery tasks SHALL register in this ledger so that duplicate enqueues of the same logical work are deduplicated.
@@ -75,3 +73,27 @@ The system SHALL expose `GET /audit` with cursor pagination and filters (actor, 
 
 - **WHEN** the user filters the audit page by actor `agent`
 - **THEN** only entries recorded with actor `agent` are listed, newest first, with cursor-based paging
+
+### Requirement: Weekly calibration report
+
+A weekly beat task (`maintenance.generate_calibration_report`) SHALL compute a calibration snapshot from already-recorded data (`lead_posts` statuses, `external_accounts` engagement state, `analysis_dimensions`, scout post triage markers, `audit_log`) and store it as a `calibration_reports` row (period, JSON payload). The payload SHALL include, per watch and overall: suitable→ignored rate, suitable→contacted rate, contacted→engaged rate, needs-review promote/dismiss counts and queue size, gate-failure distribution (best-effort until structured gate results exist), and per-dimension failure rates. The report SHALL involve no LLM calls.
+
+#### Scenario: Weekly snapshot is stored
+
+- **WHEN** the weekly beat fires
+- **THEN** a new `calibration_reports` row exists covering the elapsed period with per-watch and overall metrics
+
+#### Scenario: Report reflects user verdicts
+
+- **WHEN** the user ignored most leads a watch produced during the period
+- **THEN** that watch's suitable→ignored rate in the report reflects it
+
+### Requirement: Calibration reports are exposed via the ops API and console
+
+The core API SHALL expose `GET /ops/calibration-reports` (list, newest first) and `POST /ops/calibration-reports/generate` (queue a report for the period ending now; audit-logged; at most one stored report per day via the `jobs` ledger). The latest report SHALL be rendered as a panel on the `/ops` page, showing overall and per-watch precision signals, gate outcomes, and dimension failure rates so threshold and prompt tuning is evidence-driven, with a selector for earlier reports and empty and error states.
+
+#### Scenario: Operator reviews the latest report
+
+- **WHEN** the operator opens `/ops`
+- **THEN** the latest calibration report panel shows overall and per-watch rates without requiring database access
+

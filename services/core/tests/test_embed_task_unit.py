@@ -361,12 +361,9 @@ class TestBatchEmbedding:
 
         with patch("rediska_core.domain.services.embedding.EmbeddingsClient") as mock_embed:
             with patch("rediska_core.domain.services.embedding.ElasticsearchClient") as mock_es:
+                embeddings = [[0.1] * 768, [0.2] * 768, [0.3] * 768]
                 mock_embed_instance = MagicMock()
-                mock_embed_instance.embed_batch.return_value = [
-                    [0.1] * 768,
-                    [0.2] * 1024,
-                    [0.3] * 1024,
-                ]
+                mock_embed_instance.embed_batch.return_value = embeddings
                 mock_embed.return_value = mock_embed_instance
 
                 mock_es_instance = MagicMock()
@@ -388,6 +385,54 @@ class TestBatchEmbedding:
 
                 assert result["success"] is True
                 assert result["processed"] == 3
+
+                # The counts above come straight out of the stubbed bulk_index
+                # return, so also check the documents the service actually built.
+                documents = mock_es_instance.bulk_index.call_args[1]["documents"]
+                assert [d["_id"] for d in documents] == [
+                    f"message:{msg.id}" for msg in messages
+                ]
+                assert [d["embedding"] for d in documents] == embeddings
+                # Texts are batched in the same order as the input items.
+                assert mock_embed_instance.embed_batch.call_args[0][0] == [
+                    msg.body_text for msg in messages
+                ]
+
+    def test_generate_embeddings_batch_count_mismatch_is_an_error(
+        self, db_session, setup_test_data
+    ):
+        """A short embed_batch response should trip the count-mismatch guard."""
+        from rediska_core.domain.services.embedding import EmbeddingService
+
+        with patch("rediska_core.domain.services.embedding.EmbeddingsClient") as mock_embed:
+            with patch("rediska_core.domain.services.embedding.ElasticsearchClient") as mock_es:
+                mock_embed_instance = MagicMock()
+                # Two embeddings returned for three requested texts.
+                mock_embed_instance.embed_batch.return_value = [[0.1] * 768, [0.2] * 768]
+                mock_embed.return_value = mock_embed_instance
+
+                mock_es_instance = MagicMock()
+                mock_es.return_value = mock_es_instance
+
+                service = EmbeddingService(
+                    db=db_session,
+                    embeddings_url="http://localhost:8080",
+                    embeddings_model="nomic-embed-text",
+                    es_url="http://localhost:9200",
+                )
+
+                items = [
+                    {"doc_type": "message", "entity_id": i, "text": f"Message {i}"}
+                    for i in range(1, 4)
+                ]
+                result = service.generate_embeddings_batch(items)
+
+                assert result["success"] is False
+                assert result["error"] == "Embedding count mismatch"
+                assert result["processed"] == 0
+                assert result["errors"] == 3
+                # Nothing must reach ES when the counts disagree.
+                mock_es_instance.bulk_index.assert_not_called()
 
 
 # =============================================================================
@@ -427,5 +472,7 @@ class TestEmbeddingWithIndexing:
                 )
 
                 assert result["success"] is True
-                # Should use update_document, not index_document
+                # Should use a partial update, never a full re-index, so the
+                # rest of the already-indexed document is preserved.
                 mock_es_instance.update_document.assert_called_once()
+                mock_es_instance.index_document.assert_not_called()

@@ -330,8 +330,14 @@ class TestAnalyzeLead:
 
         result = await service.analyze_lead(setup_lead.id)
 
-        # Should index profile snapshot and profile items
-        assert mock_indexing_service.upsert_content.call_count >= 1
+        # Exact count, not `>= 1`: the fixtures supply 1 snapshot + 2 profile
+        # items, so anything less than 3 means items were silently skipped.
+        assert mock_indexing_service.upsert_content.call_count == 3
+        assert result.indexed_count == 3
+
+        # Both doc types must be indexed, not just the snapshot.
+        indexed_types = [c.args[0] for c in mock_indexing_service.upsert_content.call_args_list]
+        assert indexed_types == ["profile_snapshot", "profile_item", "profile_item"]
 
     @pytest.mark.asyncio
     async def test_analyze_lead_generates_embeddings(
@@ -362,8 +368,17 @@ class TestAnalyzeLead:
 
         result = await service.analyze_lead(setup_lead.id)
 
-        # Should generate embeddings for profile items
-        assert mock_embedding_service.generate_embedding.call_count >= 1
+        # Exact count: both fixture items carry text_content, so both must be
+        # embedded. `>= 1` would pass even if one item were dropped.
+        assert mock_embedding_service.generate_embedding.call_count == 2
+        assert result.embedded_count == 2
+
+        # Embeddings come from the item text, not the snapshot summary.
+        embedded_texts = [
+            c.kwargs["text"] for c in mock_embedding_service.generate_embedding.call_args_list
+        ]
+        assert "This is my first post content." in embedded_texts
+        assert "This is my comment on a post." in embedded_texts
 
     @pytest.mark.asyncio
     async def test_analyze_lead_updates_analysis_state(

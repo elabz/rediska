@@ -126,7 +126,14 @@ def db_session(sync_session_factory) -> Generator[Session, None, None]:
     session = sync_session_factory()
     try:
         yield session
-        session.commit()
+        # A test that deliberately asserts an IntegrityError (e.g. unique
+        # constraint tests) leaves the session needing a rollback. Committing
+        # such a session raises PendingRollbackError during teardown and turns a
+        # passing test into an ERROR, so drop the doomed transaction instead.
+        if session.in_transaction() and not session.is_active:
+            session.rollback()
+        else:
+            session.commit()
     except Exception:
         session.rollback()
         raise

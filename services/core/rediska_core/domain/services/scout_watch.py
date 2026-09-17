@@ -23,7 +23,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import desc, or_
+from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import (
@@ -531,6 +531,94 @@ class ScoutWatchService:
             The ScoutWatchPost or None if not found.
         """
         return self.db.query(ScoutWatchPost).filter(ScoutWatchPost.id == post_id).first()
+
+    # =========================================================================
+    # NEEDS-REVIEW TRIAGE QUEUE
+    # =========================================================================
+
+    @staticmethod
+    def _needs_review_filter(watch_id: Optional[int] = None):
+        """Analysed needs_review posts nobody has triaged yet."""
+        conditions = [
+            ScoutWatchPost.analysis_status == "analyzed",
+            ScoutWatchPost.analysis_recommendation == "needs_review",
+            ScoutWatchPost.dismissed_at.is_(None),
+            ScoutWatchPost.triaged_at.is_(None),
+            ScoutWatchPost.lead_id.is_(None),
+        ]
+        if watch_id is not None:
+            conditions.append(ScoutWatchPost.watch_id == watch_id)
+        return and_(*conditions)
+
+    @staticmethod
+    def encode_queue_cursor(post: ScoutWatchPost) -> str:
+        return f"{post.first_seen_at.isoformat()}_{post.id}"
+
+    @staticmethod
+    def decode_queue_cursor(cursor: str) -> tuple[datetime, int]:
+        """Parse a needs-review cursor; raises ValueError when malformed."""
+        seen, _, post_id = cursor.rpartition("_")
+        return datetime.fromisoformat(seen), int(post_id)
+
+    def list_needs_review(
+        self,
+        cursor: Optional[str] = None,
+        limit: int = 25,
+        watch_id: Optional[int] = None,
+    ) -> tuple[list[ScoutWatchPost], Optional[str]]:
+        """Cross-watch needs-review queue, newest first (keyset-paginated).
+
+        Args:
+            cursor: Opaque cursor from a previous page.
+            limit: Page size.
+            watch_id: Restrict to one watch (optional).
+
+        Returns:
+            (posts, next_cursor) — next_cursor is None on the last page.
+        """
+        query = self.db.query(ScoutWatchPost).filter(self._needs_review_filter(watch_id))
+        if cursor:
+            seen, post_id = self.decode_queue_cursor(cursor)
+            query = query.filter(
+                or_(
+                    ScoutWatchPost.first_seen_at < seen,
+                    and_(ScoutWatchPost.first_seen_at == seen, ScoutWatchPost.id < post_id),
+                )
+            )
+        posts = (
+            query.order_by(desc(ScoutWatchPost.first_seen_at), desc(ScoutWatchPost.id))
+            .limit(limit + 1)
+            .all()
+        )
+        next_cursor = None
+        if len(posts) > limit:
+            posts = posts[:limit]
+            next_cursor = self.encode_queue_cursor(posts[-1])
+        return posts, next_cursor
+
+    def count_needs_review(self, watch_id: Optional[int] = None) -> int:
+        """Size of the needs-review queue."""
+        return (
+            self.db.query(ScoutWatchPost)
+            .filter(self._needs_review_filter(watch_id))
+            .count()
+        )
+
+    def dismiss_post(self, post: ScoutWatchPost) -> ScoutWatchPost:
+        """Take a post out of the needs-review queue without creating a lead.
+
+        Dismissal only sets a marker: the post and its analysis output are
+        retained like any other analysed post.
+
+        Raises:
+            ScoutWatchError: If the post was already promoted to a lead.
+        """
+        if post.lead_id is not None:
+            raise ScoutWatchError(f"Post already added to leads: Lead #{post.lead_id}")
+        if post.dismissed_at is None:
+            post.dismissed_at = datetime.utcnow()
+            self.db.flush()
+        return post
 
     def reset_post_for_reanalysis(self, post: ScoutWatchPost) -> ScoutWatchPost:
         """Reset a post for re-analysis.

@@ -210,13 +210,29 @@ class TestSessionService:
         assert db_session.query(Session).filter_by(id=session_id).first() is None
 
     def test_invalidate_session_nonexistent(self, db_session: DBSession):
-        """Test that invalidating a nonexistent session doesn't raise."""
+        """Invalidating an unknown session id is a silent no-op.
+
+        The documented contract is that it neither raises nor deletes anything
+        else -- a broad/absent filter here would log out every live session.
+        The old test asserted nothing at all.
+        """
+        from rediska_core.domain.models import Session
         from rediska_core.domain.services.auth import AuthService
 
+        user = create_local_user(db_session)
         auth_service = AuthService(db_session)
+
+        keep_id = auth_service.create_session(user.id)
+        db_session.flush()
+        assert db_session.query(Session).count() == 1
 
         # Should not raise
         auth_service.invalidate_session("nonexistent-session-id")
+        db_session.flush()
+
+        # The unrelated live session survives untouched.
+        assert db_session.query(Session).count() == 1
+        assert db_session.query(Session).filter_by(id=keep_id).first() is not None
 
     def test_invalidate_all_user_sessions(self, db_session: DBSession):
         """Test that all sessions for a user can be invalidated."""

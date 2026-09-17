@@ -315,8 +315,20 @@ class TestJobCreation:
     def test_enqueue_uses_dedupe_key(
         self, db_session, setup_conversation, setup_credentials
     ):
-        """Job should have a dedupe key to prevent duplicates."""
-        from rediska_core.domain.services.send_message import SendMessageService
+        """Job's dedupe key must be the real hash of its payload, and a job
+        re-created from that identical payload must be deduped, not duplicated.
+
+        NOTE: this exercises the dedupe guard directly rather than calling
+        enqueue_send twice. enqueue_send mints a fresh message_id per call and
+        embeds it in the payload, so two calls can never collide on the key.
+        See the report: send-level dedupe is inert.
+        """
+        from rediska_core.domain.services.jobs import JobService
+        from rediska_core.domain.services.send_message import (
+            SEND_JOB_QUEUE,
+            SEND_JOB_TYPE,
+            SendMessageService,
+        )
 
         service = SendMessageService(db=db_session)
 
@@ -326,7 +338,27 @@ class TestJobCreation:
         )
 
         job = db_session.query(Job).filter(Job.id == result.job_id).first()
-        assert job.dedupe_key is not None
+
+        # The key is genuinely derived from queue+type+payload, not a placeholder.
+        job_service = JobService(db=db_session)
+        expected_key = job_service.compute_dedupe_key(
+            SEND_JOB_QUEUE, SEND_JOB_TYPE, job.payload_json
+        )
+        assert job.dedupe_key == expected_key
+
+        # Re-creating a job from that same payload returns the SAME job row
+        # rather than enqueuing a second send.
+        duplicate = job_service.create_job(
+            queue_name=SEND_JOB_QUEUE,
+            job_type=SEND_JOB_TYPE,
+            payload=job.payload_json,
+            max_attempts=3,
+            dedupe=True,
+        )
+        assert duplicate.id == job.id
+        assert (
+            db_session.query(Job).filter(Job.job_type == SEND_JOB_TYPE).count() == 1
+        )
 
     def test_enqueue_validates_before_creating(
         self, db_session, setup_conversation, setup_counterpart
@@ -402,28 +434,56 @@ class TestMessageState:
         assert message.remote_visibility == "visible"
         assert message.external_message_id == "t4_abc123"
 
-    def test_mark_message_failed_keeps_unknown_visibility(
+    def test_mark_message_failed_ambiguity_decides_visibility(
         self, db_session, setup_conversation, setup_credentials
     ):
-        """After ambiguous failure, visibility should remain 'unknown'."""
+        """is_ambiguous is the flag that decides whether visibility flips.
+
+        Asserting "unknown" alone is vacuous because enqueue_send already
+        leaves the message at "unknown", so this contrasts both branches on
+        two separate messages: clear failure -> 'send_failed' with the error
+        recorded; ambiguous failure -> untouched at 'unknown' (at-most-once:
+        we do not claim it failed to send when we cannot know).
+        """
         from rediska_core.domain.services.send_message import SendMessageService
 
         service = SendMessageService(db=db_session)
 
-        result = service.enqueue_send(
+        clear = service.enqueue_send(
             conversation_id=setup_conversation.id,
-            body_text="Hello world!",
+            body_text="Clear failure message",
+        )
+        ambiguous = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="Ambiguous failure message",
         )
 
-        # Simulate ambiguous failure
+        # Both start out identical.
+        for r in (clear, ambiguous):
+            msg = db_session.query(Message).filter(Message.id == r.message_id).first()
+            assert msg.remote_visibility == "unknown"
+
         service.mark_message_failed(
-            message_id=result.message_id,
+            message_id=clear.message_id,
+            error="Rate limited - definitely not sent",
+            is_ambiguous=False,
+        )
+        service.mark_message_failed(
+            message_id=ambiguous.message_id,
             error="Network timeout - unknown if sent",
             is_ambiguous=True,
         )
 
-        message = db_session.query(Message).filter(Message.id == result.message_id).first()
-        assert message.remote_visibility == "unknown"
+        clear_msg = db_session.query(Message).filter(Message.id == clear.message_id).first()
+        assert clear_msg.remote_visibility == "send_failed"
+        assert clear_msg.send_error == "Rate limited - definitely not sent"
+
+        ambiguous_msg = (
+            db_session.query(Message).filter(Message.id == ambiguous.message_id).first()
+        )
+        assert ambiguous_msg.remote_visibility == "unknown"
+        # The ambiguous error is deliberately NOT stamped on the message.
+        assert ambiguous_msg.send_error is None
 
 
 # =============================================================================
@@ -454,6 +514,9 @@ class TestAtMostOnceSemantics:
         from rediska_core.domain.services.jobs import JobService
         job_service = JobService(db=db_session)
         job_service.claim_job(job.id)
+        db_session.refresh(job)
+        attempts_after_claim = job.attempts
+        assert job.max_attempts > 1  # retries WOULD be available to a clear failure
 
         # Simulate ambiguous failure (e.g., timeout)
         service.handle_send_failure(
@@ -466,6 +529,17 @@ class TestAtMostOnceSemantics:
         # Job should be marked as failed, not retrying
         db_session.refresh(job)
         assert job.status == "failed"
+        # The AMBIGUOUS: prefix is what distinguishes this from a clear failure
+        # and is the operator-visible marker that the send may have landed.
+        assert job.last_error.startswith("AMBIGUOUS:")
+        assert "Connection timeout" in job.last_error
+        # No further attempt was burned/scheduled: the job short-circuits to
+        # terminal failure instead of going through the retry path, even though
+        # max_attempts (3) has budget left. This is the at-most-once guarantee.
+        assert job.attempts == attempts_after_claim
+        assert job.next_run_at is None
+        # dedupe_key is released so the user can explicitly re-enqueue.
+        assert job.dedupe_key is None
 
     def test_clear_failure_can_retry(
         self, db_session, setup_conversation, setup_credentials
@@ -536,7 +610,26 @@ class TestAtMostOnceSemantics:
 
         assert new_job is not None
         assert new_job.job_id != result.job_id
-        assert new_job.status == "queued"
+
+        # Read the persisted Job row, not the dataclass default, so this
+        # actually proves a queued job exists in the ledger.
+        row = db_session.query(Job).filter(Job.id == new_job.job_id).first()
+        assert row is not None
+        assert row.status == "queued"
+        assert row.attempts == 0
+        # A manual retry is still at-most-once: exactly one attempt allowed.
+        assert row.max_attempts == 1
+        assert row.job_type == "message.send_manual"
+        assert row.payload_json["message_id"] == result.message_id
+        assert row.payload_json["is_retry"] is True
+        assert row.payload_json["body_text"] == "Hello world!"
+        # dedupe=False on retry, so no key blocks a subsequent explicit retry.
+        assert row.dedupe_key is None
+
+        # The message itself is reset to pending, not left as failed.
+        message = db_session.query(Message).filter(Message.id == result.message_id).first()
+        assert message.remote_visibility == "unknown"
+        assert message.send_error is None
 
 
 # =============================================================================

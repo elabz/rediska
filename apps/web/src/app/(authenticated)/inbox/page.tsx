@@ -234,7 +234,6 @@ function InboxContent() {
   // Conversation lists
   const [conversationLists, setConversationLists] = useState<Array<{ id: number; name: string; conversation_count: number; created_at: string; updated_at: string }>>([]);
   const [listFilter, setListFilter] = useState<number | null>(null);
-  const [listConvIds, setListConvIds] = useState<Set<number> | null>(null);
   const [showListManager, setShowListManager] = useState(false);
   const [newListName, setNewListName] = useState('');
   const [creatingList, setCreatingList] = useState(false);
@@ -278,24 +277,6 @@ function InboxContent() {
   }, []);
 
   useEffect(() => { fetchLists(); }, [fetchLists]);
-
-  // When list filter changes, fetch conversation IDs for that list
-  useEffect(() => {
-    if (listFilter === null) {
-      setListConvIds(null);
-      return;
-    }
-    const fetchIds = async () => {
-      try {
-        const res = await fetch(`/api/core/lists/${listFilter}/conversation-ids`, { credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          setListConvIds(new Set(data.conversation_ids || []));
-        }
-      } catch { /* silent */ }
-    };
-    fetchIds();
-  }, [listFilter]);
 
   const handleCreateList = useCallback(async () => {
     if (!newListName.trim() || creatingList) return;
@@ -378,18 +359,6 @@ function InboxContent() {
     return map;
   }, [identities]);
 
-  // Filter conversations by identity and list (only for non-search mode)
-  const filteredConversations = useMemo(() => {
-    let result = conversations;
-    if (identityFilter !== null) {
-      result = result.filter(conv => conv.identity_id === identityFilter);
-    }
-    if (listFilter !== null && listConvIds !== null) {
-      result = result.filter(conv => listConvIds.has(conv.id));
-    }
-    return result;
-  }, [conversations, identityFilter, listFilter, listConvIds]);
-
   // Backend search
   const searchConversations = useCallback(async (query: string) => {
     if (!query.trim()) {
@@ -403,6 +372,9 @@ function InboxContent() {
       const params = new URLSearchParams({ q: query.trim() });
       if (identityFilter !== null) {
         params.set('identity_id', String(identityFilter));
+      }
+      if (listFilter !== null) {
+        params.set('list_id', String(listFilter));
       }
       const response = await fetch(`/api/core/conversations/search?${params.toString()}`, {
         credentials: 'include',
@@ -418,7 +390,7 @@ function InboxContent() {
     } finally {
       setSearchLoading(false);
     }
-  }, [identityFilter]);
+  }, [identityFilter, listFilter]);
 
   // Debounced search input handler
   const handleSearchChange = useCallback((value: string) => {
@@ -447,16 +419,16 @@ function InboxContent() {
     }
   }, []);
 
-  // Re-trigger search when identity filter changes while searching
+  // Re-trigger search when identity or list filter changes while searching
   useEffect(() => {
     if (searchQuery.trim()) {
       searchConversations(searchQuery);
     }
-  }, [identityFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [identityFilter, listFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Determine which conversations to display
   const isSearching = searchResults !== null;
-  const displayConversations = isSearching ? searchResults : filteredConversations;
+  const displayConversations = isSearching ? searchResults : conversations;
 
   const handleToggleStar = useCallback(async (accountId: number) => {
     try {
@@ -505,6 +477,14 @@ function InboxContent() {
       if (hasRepliesFilter) {
         params.set('has_replies', 'true');
       }
+      // Identity and list filters run server-side so every matching
+      // conversation is reachable through pagination, not just loaded pages.
+      if (identityFilter !== null) {
+        params.set('identity_id', String(identityFilter));
+      }
+      if (listFilter !== null) {
+        params.set('list_id', String(listFilter));
+      }
 
       const response = await fetch(`/api/core/conversations?${params.toString()}`, {
         credentials: 'include',
@@ -537,7 +517,7 @@ function InboxContent() {
       setLoadingMore(false);
       setRefreshing(false);
     }
-  }, [hasAttachmentsFilter, hasRepliesFilter]);
+  }, [hasAttachmentsFilter, hasRepliesFilter, identityFilter, listFilter]);
 
   const loadMore = useCallback(() => {
     if (nextCursor && !loadingMore) {
@@ -583,7 +563,10 @@ function InboxContent() {
     );
   }
 
-  if (conversations.length === 0) {
+  const anyFilterActive =
+    hasAttachmentsFilter || hasRepliesFilter || identityFilter !== null || listFilter !== null;
+
+  if (conversations.length === 0 && !anyFilterActive) {
     return (
       <div className="max-w-2xl mx-auto">
         <div className="flex items-center justify-between mb-6">
@@ -825,7 +808,26 @@ function InboxContent() {
             </Button>
           </div>
         </Card>
-      ) : conversations.length === 0 && (hasAttachmentsFilter || hasRepliesFilter) ? (
+      ) : !isSearching && conversations.length === 0 && listFilter !== null && !hasAttachmentsFilter && !hasRepliesFilter ? (
+        <Card className="p-8">
+          <div className="text-center">
+            <List className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            <p className="text-muted-foreground">
+              No conversations in &quot;{conversationLists.find(l => l.id === listFilter)?.name ?? 'this list'}&quot;
+              {identityFilter !== null && ' for this identity'}
+            </p>
+            <Button variant="link" onClick={() => setListFilter(null)} className="mt-2">
+              Show all conversations
+            </Button>
+          </div>
+        </Card>
+      ) : !isSearching && conversations.length === 0 && anyFilterActive && !hasAttachmentsFilter && !hasRepliesFilter ? (
+        <Card className="p-8">
+          <div className="text-center">
+            <p className="text-muted-foreground">No conversations for this identity</p>
+          </div>
+        </Card>
+      ) : !isSearching && conversations.length === 0 && (hasAttachmentsFilter || hasRepliesFilter) ? (
         <Card className="p-8">
           <div className="text-center">
             {hasAttachmentsFilter && hasRepliesFilter ? (

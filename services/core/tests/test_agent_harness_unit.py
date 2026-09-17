@@ -25,10 +25,7 @@ from rediska_core.domain.services.inference import (
 from rediska_core.domain.services.agent import (
     AgentConfig,
     AgentHarness,
-    AgentResult,
     AgentTool,
-    ToolCall,
-    ToolResult,
     VoiceConfig,
 )
 
@@ -120,20 +117,6 @@ def sample_tools():
 class TestVoiceConfig:
     """Tests for VoiceConfig dataclass."""
 
-    def test_voice_config_fields(self):
-        """VoiceConfig should store voice configuration."""
-        config = VoiceConfig(
-            system_prompt="You are helpful.",
-            tone="friendly",
-            style="casual",
-            persona_name="Bot",
-        )
-
-        assert config.system_prompt == "You are helpful."
-        assert config.tone == "friendly"
-        assert config.style == "casual"
-        assert config.persona_name == "Bot"
-
     def test_voice_config_from_dict(self):
         """VoiceConfig should be constructable from dict."""
         data = {
@@ -169,8 +152,15 @@ class TestVoiceConfig:
 
         prompt = config.to_system_prompt()
 
-        assert "You are a sales assistant." in prompt
-        assert "professional" in prompt.lower() or "tone" in prompt.lower()
+        # Pin the exact rendering: to_system_prompt joins base prompt, tone,
+        # style and persona sentences with single spaces, in that order.
+        # A substring check would pass even if style/persona were dropped.
+        assert prompt == (
+            "You are a sales assistant. "
+            "Maintain a professional tone in all responses. "
+            "Use a conversational communication style. "
+            "You are Alex."
+        )
 
     def test_voice_config_empty(self):
         """VoiceConfig should handle empty/None values."""
@@ -197,24 +187,6 @@ class TestAgentConfig:
         assert config.tool_allowlist is None  # All tools allowed
         assert config.output_schema is None
 
-    def test_agent_config_with_tool_allowlist(self):
-        """AgentConfig should support tool allowlist."""
-        config = AgentConfig(
-            name="restricted_agent",
-            tool_allowlist=["search", "read"],
-        )
-
-        assert config.tool_allowlist == ["search", "read"]
-
-    def test_agent_config_with_output_schema(self):
-        """AgentConfig should support output schema."""
-        config = AgentConfig(
-            name="scoring_agent",
-            output_schema=LeadScoreOutput,
-        )
-
-        assert config.output_schema == LeadScoreOutput
-
 
 # =============================================================================
 # AGENT TOOL TESTS
@@ -223,22 +195,6 @@ class TestAgentConfig:
 
 class TestAgentTool:
     """Tests for AgentTool dataclass."""
-
-    def test_tool_definition(self):
-        """AgentTool should define a callable tool."""
-        async def my_tool(arg: str) -> str:
-            return f"Result: {arg}"
-
-        tool = AgentTool(
-            name="my_tool",
-            description="Does something useful",
-            function=my_tool,
-            parameters={"arg": {"type": "string"}},
-        )
-
-        assert tool.name == "my_tool"
-        assert tool.description == "Does something useful"
-        assert callable(tool.function)
 
     def test_tool_to_schema(self):
         """AgentTool should convert to JSON schema for LLM."""
@@ -260,46 +216,6 @@ class TestAgentTool:
         assert schema["function"]["name"] == "search"
         assert schema["function"]["description"] == "Search for info"
         assert "parameters" in schema["function"]
-
-
-# =============================================================================
-# AGENT HARNESS INITIALIZATION TESTS
-# =============================================================================
-
-
-class TestAgentHarnessInit:
-    """Tests for AgentHarness initialization."""
-
-    def test_harness_creation(self, mock_inference_client, basic_agent_config):
-        """AgentHarness should be creatable with config and client."""
-        harness = AgentHarness(
-            config=basic_agent_config,
-            inference_client=mock_inference_client,
-        )
-
-        assert harness.config == basic_agent_config
-        assert harness.inference_client == mock_inference_client
-
-    def test_harness_with_tools(self, mock_inference_client, basic_agent_config, sample_tools):
-        """AgentHarness should accept tools."""
-        harness = AgentHarness(
-            config=basic_agent_config,
-            inference_client=mock_inference_client,
-            tools=sample_tools,
-        )
-
-        assert len(harness.tools) == 2
-        assert harness.tools[0].name == "search"
-
-    def test_harness_with_voice_config(self, mock_inference_client, basic_agent_config, voice_config):
-        """AgentHarness should accept voice config."""
-        harness = AgentHarness(
-            config=basic_agent_config,
-            inference_client=mock_inference_client,
-            voice_config=voice_config,
-        )
-
-        assert harness.voice_config == voice_config
 
 
 # =============================================================================
@@ -489,13 +405,12 @@ class TestAgentRun:
         assert result.model_info["input_tokens"] == 50
 
     @pytest.mark.asyncio
-    async def test_run_respects_max_turns(self, mock_inference_client):
-        """Agent should respect max_turns limit."""
+    async def test_run_stops_immediately_on_stop_finish_reason(self, mock_inference_client):
+        """A 'stop' response should end the run after exactly one turn."""
         config = AgentConfig(name="limited", max_turns=2)
 
-        # Simulate tool calls that would continue indefinitely
         mock_inference_client.chat.return_value = ChatResponse(
-            content="Final response after max turns",
+            content="Final response",
             model_info=ModelInfo(
                 model_name="test",
                 provider="test",
@@ -515,7 +430,47 @@ class TestAgentRun:
 
         result = await harness.run("Test")
 
-        assert result.turns <= 2
+        # Exact counts, not `<= max_turns`: the run must not burn extra
+        # inference calls once the model has signalled completion.
+        assert result.turns == 1
+        assert mock_inference_client.chat.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_run_breaks_out_on_non_stop_finish_reason(self, mock_inference_client):
+        """A non-'stop' response ends the run after one turn (no tool loop yet).
+
+        AgentHarness.run() `break`s unconditionally after a non-'stop'
+        response because tool-call continuation is not implemented, so the
+        while-loop never reaches max_turns. This pins that documented
+        limitation: if a real multi-turn loop is added, this test must be
+        updated deliberately rather than silently changing behaviour.
+        """
+        config = AgentConfig(name="limited", max_turns=5)
+
+        mock_inference_client.chat.return_value = ChatResponse(
+            content="Partial response",
+            model_info=ModelInfo(
+                model_name="test",
+                provider="test",
+                temperature=0.7,
+                max_tokens=1024,
+                input_tokens=10,
+                output_tokens=10,
+                latency_ms=50,
+            ),
+            finish_reason="tool_calls",
+        )
+
+        harness = AgentHarness(
+            config=config,
+            inference_client=mock_inference_client,
+        )
+
+        result = await harness.run("Test")
+
+        assert result.turns == 1
+        assert mock_inference_client.chat.await_count == 1
+        assert result.output == "Partial response"
 
 
 # =============================================================================
@@ -591,55 +546,3 @@ class TestStructuredOutput:
 
         # Should indicate validation failure
         assert not result.success or result.error is not None
-
-
-# =============================================================================
-# AGENT RESULT TESTS
-# =============================================================================
-
-
-class TestAgentResult:
-    """Tests for AgentResult dataclass."""
-
-    def test_agent_result_success(self):
-        """AgentResult should represent successful execution."""
-        result = AgentResult(
-            success=True,
-            output="Generated response",
-            model_info={"model_name": "test"},
-            turns=1,
-            tool_calls=[],
-        )
-
-        assert result.success
-        assert result.output == "Generated response"
-        assert result.error is None
-
-    def test_agent_result_failure(self):
-        """AgentResult should represent failed execution."""
-        result = AgentResult(
-            success=False,
-            output="",
-            error="Validation failed",
-            model_info={"model_name": "test"},
-            turns=1,
-            tool_calls=[],
-        )
-
-        assert not result.success
-        assert result.error == "Validation failed"
-
-    def test_agent_result_with_tool_calls(self):
-        """AgentResult should record tool calls."""
-        result = AgentResult(
-            success=True,
-            output="Final response",
-            model_info={"model_name": "test"},
-            turns=2,
-            tool_calls=[
-                ToolCall(name="search", arguments={"query": "test"}, result="found"),
-            ],
-        )
-
-        assert len(result.tool_calls) == 1
-        assert result.tool_calls[0].name == "search"

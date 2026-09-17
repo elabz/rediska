@@ -518,6 +518,23 @@ class TestSetupStatusEndpoint:
 
 
 class TestOnboardingGate:
+    @pytest.fixture(autouse=True)
+    def route_middleware_to_test_db(self, sync_session_factory):
+        """Point the onboarding middleware at the test database.
+
+        The middleware opens its own session via get_sync_session_factory()
+        rather than the overridden get_db dependency. Left alone it reaches for
+        the configured MySQL instance, raises, and falls open -- so the gate
+        never engages and these tests silently pass on a 200.
+        """
+        from unittest.mock import patch
+
+        with patch(
+            "rediska_core.api.middleware.onboarding.get_sync_session_factory",
+            return_value=sync_session_factory,
+        ):
+            yield
+
     """Integration tests for onboarding gate middleware."""
 
     @pytest.mark.asyncio

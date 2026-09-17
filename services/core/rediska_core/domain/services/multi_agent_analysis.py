@@ -32,6 +32,7 @@ from rediska_core.domain.services.lead_gates import (
     UserConstraints,
     evaluate_gates,
 )
+from rediska_core.domain.services.lead_priority import priority_for_analysis
 
 
 class MultiAgentAnalysisService:
@@ -380,6 +381,9 @@ class MultiAgentAnalysisService:
             lead.latest_analysis_id = analysis.id
             lead.analysis_recommendation = analysis.final_recommendation
             lead.analysis_confidence = analysis.confidence_score
+            lead.priority, lead.compatibility_score = priority_for_analysis(
+                dimension_results, meta_output, verdict
+            )
 
             self.db.commit()
 

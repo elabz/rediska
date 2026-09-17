@@ -11,6 +11,7 @@ Tests the database layer including:
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import (
@@ -59,11 +60,11 @@ def setup_lead(db_session: Session, setup_provider_and_account):
         provider_id="reddit",
         source_location="r/personals",
         external_post_id="post_abc123",
+        post_url="https://example.com/comments/post_abc123",
         author_account_id=account.id,
         title="Test Post",
         body_text="Test body",
-        external_created_at=datetime.now(timezone.utc),
-        local_saved_at=datetime.now(timezone.utc),
+        post_created_at=datetime.now(timezone.utc),
     )
     db_session.add(lead)
     db_session.flush()
@@ -130,9 +131,15 @@ def test_agent_prompt_version_uniqueness(db_session: Session):
     )
     db_session.add(prompt2)
 
-    # Commit should fail due to unique constraint
-    with pytest.raises(Exception):  # SQLAlchemy integrity error
+    # Commit should fail due to the (agent_dimension, version) unique constraint.
+    # Match on IntegrityError specifically -- a bare `Exception` would also be
+    # satisfied by an unrelated failure and would not prove the constraint fired.
+    with pytest.raises(IntegrityError):
         db_session.commit()
+
+    # The failed commit leaves the session needing a rollback; without this the
+    # db_session fixture's teardown commit raises PendingRollbackError.
+    db_session.rollback()
 
 
 def test_agent_prompt_different_versions_allowed(db_session: Session):
@@ -173,8 +180,11 @@ def test_agent_prompt_default_values(db_session: Session):
     db_session.flush()
 
     assert prompt.temperature == 0.7
-    assert prompt.max_tokens == 2048
-    assert prompt.is_active is False  # Default is inactive
+    assert prompt.max_tokens == 8192
+    # The column default is active. Note that AgentPromptService.create_prompt
+    # overrides this with is_active=False so new versions never auto-activate --
+    # nothing reaches this default except direct model construction.
+    assert prompt.is_active is True
     assert prompt.created_at is not None
 
 
@@ -248,6 +258,7 @@ def test_agent_prompt_json_field_storage(db_session: Session):
 def test_lead_analysis_creation(db_session: Session, setup_lead: LeadPost):
     """Test creating a LeadAnalysis record."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.RUNNING,
@@ -270,6 +281,7 @@ def test_lead_analysis_relationship_to_lead(
 ):
     """Test LeadAnalysis relationship to LeadPost."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.PENDING,
@@ -277,12 +289,15 @@ def test_lead_analysis_relationship_to_lead(
     )
     db_session.add(analysis)
     db_session.commit()
+    analysis_id = analysis.id
 
-    # Verify relationship works
-    stored_lead = db_session.query(LeadPost).filter(
-        LeadPost.id == setup_lead.id
-    ).first()
-    # Should be able to access analysis through relationship if it exists
+    # commit() expired everything, so this walks the relationship off a
+    # freshly loaded row rather than the in-session object.
+    reloaded = db_session.get(LeadAnalysis, analysis_id)
+    assert reloaded is not None
+    assert reloaded.lead_post is not None
+    assert reloaded.lead_post.id == setup_lead.id
+    assert reloaded.lead_post.title == setup_lead.title
 
 
 def test_lead_analysis_complete_results(
@@ -332,6 +347,7 @@ def test_lead_analysis_status_enum(db_session: Session, setup_lead: LeadPost):
 
     for status in statuses:
         analysis = LeadAnalysis(
+            prompt_versions_json={},
             lead_id=setup_lead.id,
             account_id=setup_lead.author_account_id,
             status=status,
@@ -359,6 +375,7 @@ def test_lead_analysis_recommendation_enum(
 
     for rec in recommendations:
         analysis = LeadAnalysis(
+            prompt_versions_json={},
             lead_id=setup_lead.id,
             account_id=setup_lead.author_account_id,
             status=AnalysisStatus.COMPLETED,
@@ -384,6 +401,7 @@ def test_lead_analysis_error_detail_field(
     error_msg = "Inference service timeout after 120 seconds"
 
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.FAILED,
@@ -410,6 +428,7 @@ def test_analysis_dimension_creation(
 ):
     """Test creating an AnalysisDimension record."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.RUNNING,
@@ -419,6 +438,7 @@ def test_analysis_dimension_creation(
     db_session.flush()
 
     dimension = AnalysisDimension(
+        input_data_json={},
         analysis_id=analysis.id,
         dimension="demographics",
         status=DimensionStatus.COMPLETED,
@@ -444,6 +464,7 @@ def test_analysis_dimension_relationship_to_analysis(
 ):
     """Test AnalysisDimension relationship to LeadAnalysis."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.RUNNING,
@@ -455,6 +476,7 @@ def test_analysis_dimension_relationship_to_analysis(
     # Create multiple dimensions for one analysis
     for dim in ["demographics", "preferences", "relationship_goals"]:
         dimension = AnalysisDimension(
+            input_data_json={},
             analysis_id=analysis.id,
             dimension=dim,
             status=DimensionStatus.COMPLETED,
@@ -480,6 +502,7 @@ def test_analysis_dimension_relationship_to_analysis(
 def test_analysis_dimension_status_enum(db_session: Session, setup_lead: LeadPost):
     """Test all dimension status values."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.RUNNING,
@@ -497,6 +520,7 @@ def test_analysis_dimension_status_enum(db_session: Session, setup_lead: LeadPos
 
     for i, status in enumerate(statuses):
         dimension = AnalysisDimension(
+            input_data_json={},
             analysis_id=analysis.id,
             dimension=f"test_dim_{i}",
             status=status,
@@ -519,6 +543,7 @@ def test_analysis_dimension_status_enum(db_session: Session, setup_lead: LeadPos
 def test_analysis_dimension_cascade_delete(db_session: Session, setup_lead: LeadPost):
     """Test that AnalysisDimension records cascade delete with LeadAnalysis."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.COMPLETED,
@@ -530,6 +555,7 @@ def test_analysis_dimension_cascade_delete(db_session: Session, setup_lead: Lead
     # Create dimensions
     for dim in ["demographics", "preferences"]:
         dimension = AnalysisDimension(
+            input_data_json={},
             analysis_id=analysis.id,
             dimension=dim,
             status=DimensionStatus.COMPLETED,
@@ -566,6 +592,7 @@ def test_lead_post_latest_analysis_relationship(
     assert setup_lead.latest_analysis_id is None
 
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.COMPLETED,
@@ -598,6 +625,7 @@ def test_lead_post_multiple_analyses(db_session: Session, setup_lead: LeadPost):
 
     for i in range(3):
         analysis = LeadAnalysis(
+            prompt_versions_json={},
             lead_id=setup_lead.id,
             account_id=setup_lead.author_account_id,
             status=AnalysisStatus.COMPLETED,
@@ -629,6 +657,7 @@ def test_model_timestamps_in_utc(db_session: Session, setup_lead: LeadPost):
     now = datetime.now(timezone.utc)
 
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.RUNNING,
@@ -637,13 +666,19 @@ def test_model_timestamps_in_utc(db_session: Session, setup_lead: LeadPost):
     db_session.add(analysis)
     db_session.flush()
 
+    # The schema uses naive DATETIME columns throughout and stores UTC by
+    # convention (model defaults are datetime.utcnow). A tz-aware value passed
+    # in survives the flush; server-defaulted columns come back naive.
     assert analysis.started_at.tzinfo == timezone.utc
-    assert analysis.created_at.tzinfo == timezone.utc
+    assert analysis.created_at.tzinfo is None
+    # Still UTC, just not labelled as such.
+    assert abs((analysis.created_at - now.replace(tzinfo=None)).total_seconds()) < 60
 
 
 def test_analysis_created_at_auto_set(db_session: Session, setup_lead: LeadPost):
     """Test that created_at is automatically set."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.PENDING,
@@ -658,18 +693,21 @@ def test_analysis_created_at_auto_set(db_session: Session, setup_lead: LeadPost)
 def test_analysis_updated_at_auto_set(db_session: Session, setup_lead: LeadPost):
     """Test that updated_at is automatically managed."""
     analysis = LeadAnalysis(
+        prompt_versions_json={},
         lead_id=setup_lead.id,
         account_id=setup_lead.author_account_id,
         status=AnalysisStatus.PENDING,
         started_at=datetime.now(timezone.utc),
     )
     db_session.add(analysis)
-    db_session.flush()
+    db_session.commit()
 
     original_updated_at = analysis.updated_at
+    assert original_updated_at is not None
 
-    # Modify and check updated_at changes
+    # The column carries onupdate=datetime.utcnow, so any UPDATE must bump it.
     analysis.status = AnalysisStatus.RUNNING
-    db_session.flush()
+    db_session.commit()
+    db_session.refresh(analysis)
 
-    # Note: Updated at behavior depends on database configuration
+    assert analysis.updated_at > original_updated_at

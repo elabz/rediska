@@ -180,7 +180,8 @@ class TestAnalyzedDirectoryEndpoint:
         ) as client:
             response = await client.get("/directories/analyzed")
 
-            assert response.status_code in [401, 403]
+            # get_current_user raises 401 (not 403) for a missing session cookie.
+            assert response.status_code == 401
 
 
 # =============================================================================
@@ -300,7 +301,8 @@ class TestDirectoryCountsEndpoint:
         ) as client:
             response = await client.get("/directories/counts")
 
-            assert response.status_code in [401, 403]
+            # get_current_user raises 401 (not 403) for a missing session cookie.
+            assert response.status_code == 401
 
 
 # =============================================================================

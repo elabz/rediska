@@ -463,8 +463,9 @@ class TestGenericProviderMapping:
         # Should not raise, just use defaults
         result = mapper.map_account_status(profile_data, provider_id="unknown_provider")
 
-        # Without specific rules, defaults to UNKNOWN
-        assert result.status in (AccountStatus.ACTIVE, AccountStatus.UNKNOWN)
+        # The generic rules honour an explicit "active" flag, so this is ACTIVE
+        # deterministically — UNKNOWN is only the fallback when no flag is set.
+        assert result.status == AccountStatus.ACTIVE
 
     def test_generic_deleted_indicator(self):
         """Generic deleted indicator should be detected."""

@@ -608,3 +608,211 @@ def cleanup_scout_watch_history(self, retention_days: int = 3) -> dict:
             "started_at": started_at.isoformat(),
             "completed_at": completed_at.isoformat(),
         }
+
+
+def _run_ledgered(session: Any, dedupe_key: str, job_type: str, payload: dict, work) -> Any:
+    """Run ``work()`` inside a `jobs` ledger row keyed by ``dedupe_key``.
+
+    The row is marked running, then done (committing the work) or failed
+    (rolling the work back and recording the error before re-raising).
+    """
+    from sqlalchemy import select
+
+    from rediska_core.domain.models import Job
+
+    job = session.execute(select(Job).where(Job.dedupe_key == dedupe_key)).scalar()
+    if not job:
+        job = Job(
+            queue_name="maintenance",
+            job_type=job_type,
+            payload_json=payload,
+            dedupe_key=dedupe_key,
+            status="running",
+            attempts=1,
+        )
+        session.add(job)
+    else:
+        job.status = "running"
+        job.payload_json = payload
+        job.attempts = (job.attempts or 0) + 1
+    session.commit()
+
+    try:
+        result = work()
+        job.status = "done"
+        job.last_error = None
+        session.commit()
+        return result
+    except Exception as exc:
+        session.rollback()
+        job.status = "failed"
+        job.last_error = str(exc)[:2000]
+        session.commit()
+        raise
+
+
+EXPIRE_DRY_RUN_KEY = "maintenance.expire_stale_leads:dry_run"
+EXPIRE_LIVE_KEY = "maintenance.expire_stale_leads:live"
+
+
+@app.task(name="maintenance.expire_stale_leads", bind=True, max_retries=3)
+def expire_stale_leads(self, dry_run: bool = True, expiry_days: int | None = None) -> dict:
+    """Expire scout-sourced leads still `new` after LEAD_EXPIRY_DAYS.
+
+    Defaults to a dry run that reports the would-expire count. A live run is
+    refused until a dry run has completed at least once (recorded in the
+    `jobs` ledger), so the first run against a pre-existing backlog — whether
+    from the daily beat or by hand — is always preceded by a reviewable count.
+
+    Args:
+        dry_run: When True (the default), report without mutating.
+        expiry_days: Override for LEAD_EXPIRY_DAYS (0 disables).
+
+    Returns:
+        Dict with status, dry_run, count, and timestamps.
+    """
+    started_at = _now_utc()
+
+    try:
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import Session as SQLSession
+
+        from rediska_core.config import get_settings
+        from rediska_core.domain.models import Job
+        from rediska_core.domain.services.leads import LeadsService
+
+        days = get_settings().lead_expiry_days if expiry_days is None else expiry_days
+
+        engine = create_engine(MYSQL_URL)
+        with SQLSession(engine) as session:
+            if not dry_run:
+                reviewed = session.execute(
+                    select(Job).where(
+                        Job.dedupe_key == EXPIRE_DRY_RUN_KEY, Job.status == "done"
+                    )
+                ).scalar()
+                if not reviewed:
+                    return {
+                        "status": "dry_run_required",
+                        "dry_run": dry_run,
+                        "expiry_days": days,
+                        "message": "Run maintenance.expire_stale_leads with dry_run=True "
+                        "and review the count before the first live run.",
+                        "started_at": started_at.isoformat(),
+                    }
+
+            report = _run_ledgered(
+                session,
+                EXPIRE_DRY_RUN_KEY if dry_run else EXPIRE_LIVE_KEY,
+                "expire_stale_leads",
+                {"dry_run": dry_run, "expiry_days": days},
+                lambda: LeadsService(session).expire_stale_leads(
+                    expiry_days=days, dry_run=dry_run
+                ),
+            )
+
+        completed_at = _now_utc()
+        return {
+            "status": "disabled" if report["disabled"] else "success",
+            "dry_run": dry_run,
+            "expiry_days": days,
+            "cutoff": report["cutoff"],
+            "count": report["count"],
+            "lead_ids_sample": report["lead_ids"][:50],
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "duration_seconds": int((completed_at - started_at).total_seconds()),
+        }
+
+    except Exception as exc:
+        completed_at = _now_utc()
+
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "dry_run": dry_run,
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+        }
+
+
+@app.task(name="maintenance.generate_calibration_report", bind=True, max_retries=3)
+def generate_calibration_report(self, period_end: str | None = None) -> dict:
+    """Compute and store the weekly calibration report.
+
+    Idempotent per period: the `jobs` ledger is keyed on the period end date,
+    so a retried or duplicate delivery for the same day stores no second
+    report.
+
+    Args:
+        period_end: ISO datetime (UTC, naive) ending the period; defaults to now.
+
+    Returns:
+        Dict with status, report_id, and the period.
+    """
+    started_at = _now_utc()
+
+    try:
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import Session as SQLSession
+
+        from rediska_core.domain.models import Job
+        from rediska_core.domain.services.calibration_report import (
+            CalibrationReportService,
+        )
+
+        end = (
+            datetime.fromisoformat(period_end)
+            if period_end
+            else started_at.replace(tzinfo=None)
+        )
+        dedupe_key = f"maintenance.generate_calibration_report:{end.date().isoformat()}"
+
+        engine = create_engine(MYSQL_URL)
+        with SQLSession(engine) as session:
+            existing = session.execute(
+                select(Job).where(Job.dedupe_key == dedupe_key, Job.status == "done")
+            ).scalar()
+            if existing:
+                return {
+                    "status": "skipped",
+                    "reason": "report already generated for this period",
+                    "period_end": end.isoformat(),
+                }
+
+            report = _run_ledgered(
+                session,
+                dedupe_key,
+                "generate_calibration_report",
+                {"period_end": end.isoformat()},
+                lambda: CalibrationReportService(session).generate(period_end=end),
+            )
+            report_id = report.id
+            period_start = report.period_start.isoformat()
+
+        completed_at = _now_utc()
+        return {
+            "status": "success",
+            "report_id": report_id,
+            "period_start": period_start,
+            "period_end": end.isoformat(),
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "duration_seconds": int((completed_at - started_at).total_seconds()),
+        }
+
+    except Exception as exc:
+        completed_at = _now_utc()
+
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+        }

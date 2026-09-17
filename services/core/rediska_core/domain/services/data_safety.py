@@ -6,6 +6,7 @@ This service implements the no-remote-delete policy:
 - Purge permanently removes data and associated files
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -19,6 +20,8 @@ from rediska_core.config import Settings
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 
 class EntityType(Enum):
@@ -492,31 +495,48 @@ class DataSafetyService:
         try:
             from rediska_core.domain import models
 
-            import json
-            import uuid
-
             details = {
                 "action": action,
                 "entity_type": entity_type,
                 "entity_id": entity_id,
                 "reason": reason,
+                "actor_id": actor_id,
             }
             if extra_data:
                 details.update(extra_data)
 
+            # entity_id is a BigInteger column but callers pass it as a string.
+            try:
+                numeric_entity_id = int(entity_id)
+            except (TypeError, ValueError):
+                numeric_entity_id = None
+
             audit_log = models.AuditLog(
-                id=str(uuid.uuid4()),
-                action=f"data_safety.{action}",
-                actor_id=actor_id,
+                ts=datetime.now(timezone.utc),
+                # `actor` is an enum (user/system/agent); the specific user goes
+                # into request_json as actor_id.
+                actor="user" if actor_id else "system",
+                action_type=f"data_safety.{action}",
                 entity_type=entity_type,
-                entity_id=entity_id,
-                details=json.dumps(details),
-                created_at=datetime.now(timezone.utc),
+                entity_id=numeric_entity_id,
+                request_json=details,
+                result="ok",
             )
 
             session.add(audit_log)
-            return audit_log.id
+            # Flush so the autoincrement id is populated for the return value.
+            await session.flush()
+            return str(audit_log.id)
 
         except Exception:
-            # Audit log creation is best-effort
+            # Best-effort so a logging failure cannot abort a delete, but it must
+            # be visible: this silently returned None for every soft_delete and
+            # purge because the kwargs did not match the AuditLog columns, so no
+            # destructive operation was ever audited.
+            logger.exception(
+                "Failed to write data_safety audit log for %s %s/%s",
+                action,
+                entity_type,
+                entity_id,
+            )
             return None

@@ -118,6 +118,7 @@ async def list_conversations(
     include_archived: bool = Query(False, description="Include archived conversations"),
     has_attachments: Optional[bool] = Query(None, description="Filter to conversations with attachments"),
     has_replies: Optional[bool] = Query(None, description="Filter to conversations with incoming replies"),
+    list_id: Optional[int] = Query(None, description="Filter to members of a conversation list"),
 ):
     """List conversations with cursor-based pagination.
 
@@ -181,6 +182,16 @@ async def list_conversations(
         )
         query = query.filter(Conversation.id.in_(
             db.query(conversations_with_replies.c.conversation_id)
+        ))
+
+    # Filter to members of a conversation list (server-side, so every member is
+    # reachable through pagination rather than only those already loaded)
+    if list_id is not None:
+        from rediska_core.domain.models import ConversationListMember
+
+        query = query.filter(Conversation.id.in_(
+            db.query(ConversationListMember.conversation_id)
+            .filter(ConversationListMember.list_id == list_id)
         ))
 
     # Create a subquery to get the max message sent_at for each conversation
@@ -323,6 +334,7 @@ async def search_conversations(
     db: DBSession,
     q: str = Query(..., min_length=1, description="Search query"),
     identity_id: Optional[int] = Query(None, description="Filter by identity ID"),
+    list_id: Optional[int] = Query(None, description="Filter to members of a conversation list"),
 ):
     """Search conversations by message content.
 
@@ -374,6 +386,17 @@ async def search_conversations(
                 exact_per_conv[conv_id] = hit
     except SearchError as e:
         logging.error(f"Phrase conversation search failed: {e}")
+
+    if list_id is not None:
+        from rediska_core.domain.models import ConversationListMember
+
+        member_ids = {
+            row[0]
+            for row in db.query(ConversationListMember.conversation_id)
+            .filter(ConversationListMember.list_id == list_id)
+            .all()
+        }
+        exact_per_conv = {k: v for k, v in exact_per_conv.items() if k in member_ids}
 
     fuzzy_per_conv: dict[int, dict] = {}
     all_conv_ids = list(exact_per_conv.keys()) + list(fuzzy_per_conv.keys())

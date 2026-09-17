@@ -15,6 +15,20 @@ The system SHALL NOT send any outgoing message without an explicit user action i
 - **THEN** no provider send occurs
 - **AND** the draft is only transmitted if the user explicitly sends it
 
+### Requirement: Compose box sends only on an explicit shortcut
+
+The conversation compose textarea SHALL be 7 lines tall by default (user-resizable). Plain Enter SHALL insert a newline; only Cmd+Enter (Ctrl+Enter on non-macOS keyboards) or the Send button SHALL send.
+
+#### Scenario: Enter inserts a newline
+
+- **WHEN** the user presses Enter (with or without Shift) in the compose box
+- **THEN** a newline is inserted and nothing is sent
+
+#### Scenario: Cmd+Enter sends
+
+- **WHEN** the user presses Cmd+Enter (or Ctrl+Enter) with non-empty text
+- **THEN** the message is sent exactly as if the Send button had been clicked
+
 ### Requirement: Manual send with at-most-once semantics
 
 `POST /conversations/{id}/messages` SHALL create a local outgoing message record and enqueue the `message.send_manual` Celery task. The task SHALL run with `max_retries=0`: ambiguous failures (e.g. timeouts) fail without automatic retry so a message can never be delivered twice; only the user can retry.

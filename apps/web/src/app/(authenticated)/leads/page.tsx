@@ -24,6 +24,9 @@ import {
   Eye,
   Search,
   X,
+  RotateCcw,
+  Gauge,
+  Flag,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -43,6 +46,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { EmptyState } from '@/components';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { NeedsReviewQueue } from './components/NeedsReviewQueue';
 
 interface AuthorInfo {
   username: string;
@@ -75,6 +80,8 @@ interface Lead {
   analysis_recommendation: string | null;
   analysis_confidence: number | null;
   lead_source: string | null;
+  priority: 'high' | 'medium' | 'low' | null;
+  compatibility_score: number | null;
 }
 
 interface LeadsResponse {
@@ -89,7 +96,26 @@ const STATUS_OPTIONS = [
   { value: 'ignored', label: 'Ignored' },
   { value: 'contact_queued', label: 'Contact Queued' },
   { value: 'contacted', label: 'Contacted' },
+  { value: 'expired', label: 'Expired' },
 ];
+
+const POSTED_WITHIN_OPTIONS = [
+  { value: '7', label: 'Last 7 days' },
+  { value: '14', label: 'Last 14 days' },
+  { value: '30', label: 'Last 30 days' },
+  { value: 'all', label: 'All time' },
+];
+
+const SORT_OPTIONS = [
+  { value: 'priority', label: 'Priority, then newest' },
+  { value: 'newest', label: 'Newest first' },
+];
+
+const PRIORITY_STYLES: Record<string, string> = {
+  high: 'bg-rose-500/10 text-rose-600 border-rose-500/30',
+  medium: 'bg-amber-500/10 text-amber-600 border-amber-500/30',
+  low: 'bg-slate-500/10 text-slate-600 border-slate-500/30',
+};
 
 const SOURCE_OPTIONS = [
   { value: 'all', label: 'All sources' },
@@ -103,6 +129,7 @@ const STATUS_COLORS: Record<string, string> = {
   ignored: 'bg-muted text-muted-foreground',
   contact_queued: 'bg-purple-500/10 text-purple-600 border-purple-500/20',
   contacted: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
+  expired: 'bg-muted text-muted-foreground border-dashed',
 };
 
 const TIMEZONE = 'America/New_York';
@@ -311,13 +338,35 @@ function LeadCard({
           </div>
         </div>
 
-        {/* Status Badge */}
-        <Badge
-          variant="outline"
-          className={`${STATUS_COLORS[lead.status] || ''} shrink-0`}
-        >
-          {lead.status.replace('_', ' ')}
-        </Badge>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {lead.priority && (
+            <Badge
+              variant="outline"
+              className={`text-xs ${PRIORITY_STYLES[lead.priority] || ''}`}
+              title="Priority tier derived from the analysis"
+            >
+              <Flag className="h-3 w-3 mr-1" />
+              {lead.priority}
+            </Badge>
+          )}
+          {lead.compatibility_score !== null && (
+            <Badge
+              variant="outline"
+              className="text-xs"
+              title="Preferences compatibility score"
+            >
+              <Gauge className="h-3 w-3 mr-1" />
+              {Math.round(lead.compatibility_score * 100)}% match
+            </Badge>
+          )}
+          {/* Status Badge */}
+          <Badge
+            variant="outline"
+            className={STATUS_COLORS[lead.status] || ''}
+          >
+            {lead.status.replace('_', ' ')}
+          </Badge>
+        </div>
       </div>
 
       {/* Body */}
@@ -419,6 +468,12 @@ function LeadCard({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              {lead.status === 'expired' && (
+                <DropdownMenuItem onClick={() => onStatusChange('saved')}>
+                  <RotateCcw className="h-4 w-4 mr-2 text-blue-600" />
+                  Revive (mark as Saved)
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={() => onStatusChange('saved')}>
                 <CheckCircle className="h-4 w-4 mr-2 text-amber-600" />
                 Mark as Saved
@@ -451,6 +506,10 @@ export default function LeadsPage() {
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState('all');
+  const [sort, setSort] = useState('priority');
+  const [postedWithin, setPostedWithin] = useState('14');
+  const [tab, setTab] = useState('leads');
+  const [needsReviewCount, setNeedsReviewCount] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [updatingLeads, setUpdatingLeads] = useState<Set<number>>(new Set());
@@ -468,7 +527,9 @@ export default function LeadsPage() {
       const params = new URLSearchParams({
         limit: String(LIMIT),
         offset: String(newOffset),
+        sort,
       });
+      if (postedWithin !== 'all') params.set('posted_within_days', postedWithin);
       if (statusFilter && statusFilter !== 'all') params.set('status', statusFilter);
       if (sourceFilter && sourceFilter !== 'all') params.set('lead_source', sourceFilter);
       if (searchQuery) params.set('search', searchQuery);
@@ -491,11 +552,20 @@ export default function LeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, sourceFilter, searchQuery]);
+  }, [statusFilter, sourceFilter, searchQuery, sort, postedWithin]);
 
   useEffect(() => {
     fetchLeads();
   }, [fetchLeads]);
+
+  useEffect(() => {
+    fetch('/api/core/scout-watches/needs-review?limit=1', { credentials: 'include' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (data) setNeedsReviewCount(data.total);
+      })
+      .catch(() => undefined);
+  }, []);
 
   // Debounce search input
   useEffect(() => {
@@ -618,195 +688,238 @@ export default function LeadsPage() {
 
   const refresh = () => fetchLeads();
 
-  if (loading && leads.length === 0) {
-    return (
-      <div className="max-w-4xl mx-auto">
-        <div className="flex items-center justify-center h-64">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
-  }
-
-  if (error && leads.length === 0) {
-    return (
-      <div className="max-w-4xl mx-auto">
-        <Card className="p-8">
-          <div className="text-center">
-            <AlertCircle className="h-12 w-12 text-destructive mx-auto mb-4" />
-            <p className="text-destructive font-medium">{error}</p>
-            <Button variant="outline" onClick={refresh} className="mt-4">
-              Try Again
-            </Button>
-          </div>
-        </Card>
-      </div>
-    );
-  }
-
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Leads</h1>
           <p className="text-muted-foreground mt-1">
-            {total} saved lead{total !== 1 ? 's' : ''}
+            {total} lead{total !== 1 ? 's' : ''}
+            {postedWithin !== 'all' ? ` posted in the last ${postedWithin} days` : ''}
           </p>
         </div>
-        <Button variant="ghost" size="sm" onClick={refresh} disabled={loading}>
-          {loading ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCw className="h-4 w-4" />
-          )}
-        </Button>
+        {tab === 'leads' && (
+          <Button variant="ghost" size="sm" onClick={refresh} disabled={loading}>
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+          </Button>
+        )}
       </div>
 
-      {/* Search and Filters */}
-      <Card className="p-4">
-        {/* Search Input */}
-        <div className="mb-4">
-          <label className="text-xs text-muted-foreground mb-1 block">Search</label>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              type="text"
-              placeholder="Search by title, author, subreddit, or content..."
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              className="pl-9 pr-9 h-9"
-            />
-            {searchInput && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleSearchClear}
-                className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
-              >
-                <X className="h-4 w-4" />
-              </Button>
+      <Tabs value={tab} onValueChange={setTab} className="space-y-6">
+        <TabsList>
+          <TabsTrigger value="leads">Leads</TabsTrigger>
+          <TabsTrigger value="needs-review">
+            Needs review
+            {needsReviewCount !== null && (
+              <Badge variant="secondary" className="ml-2 h-5 px-1.5 text-xs">
+                {needsReviewCount}
+              </Badge>
             )}
-          </div>
-        </div>
+          </TabsTrigger>
+        </TabsList>
 
-        {/* Filters */}
-        <div className="flex items-center gap-2 mb-3">
-          <Filter className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium">Filters</span>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Status</label>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="h-9">
-                <SelectValue placeholder="All statuses" />
-              </SelectTrigger>
-              <SelectContent>
-                {STATUS_OPTIONS.map(opt => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Source</label>
-            <Select value={sourceFilter} onValueChange={setSourceFilter}>
-              <SelectTrigger className="h-9">
-                <SelectValue placeholder="All sources" />
-              </SelectTrigger>
-              <SelectContent>
-                {SOURCE_OPTIONS.map(opt => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-      </Card>
+        <TabsContent value="needs-review">
+          <NeedsReviewQueue onCountChange={setNeedsReviewCount} />
+        </TabsContent>
 
-      {/* Error Alert */}
-      {contactError && (
-        <div className="rounded-lg border border-destructive bg-destructive/10 p-3">
-          <div className="flex items-start gap-2">
-            <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm font-medium text-destructive">
-                Failed to start conversation
-              </p>
-              <p className="text-sm text-destructive/80 mt-1">
-                {contactError}
-              </p>
+        <TabsContent value="leads" className="space-y-6">
+          {/* Search and Filters */}
+          <Card className="p-4">
+            {/* Search Input */}
+            <div className="mb-4">
+              <label className="text-xs text-muted-foreground mb-1 block">Search</label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  type="text"
+                  placeholder="Search by title, author, subreddit, or content..."
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  className="pl-9 pr-9 h-9"
+                />
+                {searchInput && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleSearchClear}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setContactError(null)}
-              className="h-6 w-6 p-0"
-            >
-              <XCircle className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-      )}
 
-      {/* Leads List */}
-      {leads.length === 0 ? (
-        <EmptyState
-          icon="🎯"
-          title="No leads found"
-          description={
-            searchQuery
-              ? `No leads matching "${searchQuery}". Try a different search term.`
-              : statusFilter && statusFilter !== 'all'
-              ? `No leads with status "${statusFilter}". Try a different filter or browse for new leads.`
-              : "You haven't saved any leads yet. Browse subreddits to find and save potential leads."
-          }
-        />
-      ) : (
-        <>
-          <div className="space-y-3">
-            {leads.map((lead) => (
-              <LeadCard
-                key={lead.id}
-                lead={lead}
-                onStatusChange={(status) => updateLeadStatus(lead.id, status)}
-                onAnalyze={() => analyzeLead(lead.id)}
-                onContact={() => contactLead(lead.id)}
-                isUpdating={updatingLeads.has(lead.id)}
-                isAnalyzing={analyzingLeads.has(lead.id)}
-                isContacting={contactingLeads.has(lead.id)}
-              />
-            ))}
-          </div>
+            {/* Filters */}
+            <div className="flex items-center gap-2 mb-3">
+              <Filter className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-medium">Filters</span>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Posted</label>
+                <Select value={postedWithin} onValueChange={setPostedWithin}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="Last 14 days" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {POSTED_WITHIN_OPTIONS.map(opt => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Status</label>
+                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="All statuses" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {STATUS_OPTIONS.map(opt => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Source</label>
+                <Select value={sourceFilter} onValueChange={setSourceFilter}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="All sources" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SOURCE_OPTIONS.map(opt => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Sort</label>
+                <Select value={sort} onValueChange={setSort}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="Priority, then newest" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SORT_OPTIONS.map(opt => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </Card>
 
-          {/* Pagination */}
-          {total > LIMIT && (
-            <div className="flex items-center justify-center gap-4">
-              <Button
-                variant="outline"
-                onClick={() => fetchLeads(Math.max(0, offset - LIMIT))}
-                disabled={offset === 0 || loading}
-              >
-                Previous
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                {offset + 1}-{Math.min(offset + LIMIT, total)} of {total}
-              </span>
-              <Button
-                variant="outline"
-                onClick={() => fetchLeads(offset + LIMIT)}
-                disabled={offset + LIMIT >= total || loading}
-              >
-                Next
-              </Button>
+          {/* Error Alert */}
+          {contactError && (
+            <div className="rounded-lg border border-destructive bg-destructive/10 p-3">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-destructive">
+                    Failed to start conversation
+                  </p>
+                  <p className="text-sm text-destructive/80 mt-1">
+                    {contactError}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setContactError(null)}
+                  className="h-6 w-6 p-0"
+                >
+                  <XCircle className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           )}
-        </>
-      )}
+
+          {/* Leads List */}
+          {loading && leads.length === 0 ? (
+            <div className="flex items-center justify-center h-64">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : error && leads.length === 0 ? (
+            <Card className="p-8">
+              <div className="text-center">
+                <AlertCircle className="h-12 w-12 text-destructive mx-auto mb-4" />
+                <p className="text-destructive font-medium">{error}</p>
+                <Button variant="outline" onClick={refresh} className="mt-4">
+                  Try Again
+                </Button>
+              </div>
+            </Card>
+          ) : leads.length === 0 ? (
+            <EmptyState
+              icon="🎯"
+              title="No leads found"
+              description={
+                searchQuery
+                  ? `No leads matching "${searchQuery}". Try a different search term.`
+                  : statusFilter && statusFilter !== 'all'
+                  ? `No leads with status "${statusFilter}". Try a different filter or browse for new leads.`
+                  : postedWithin !== 'all'
+                  ? `No leads posted in the last ${postedWithin} days. Widen the Posted filter to see older leads.`
+                  : "You haven't saved any leads yet. Browse subreddits to find and save potential leads."
+              }
+            />
+          ) : (
+            <>
+              <div className="space-y-3">
+                {leads.map((lead) => (
+                  <LeadCard
+                    key={lead.id}
+                    lead={lead}
+                    onStatusChange={(status) => updateLeadStatus(lead.id, status)}
+                    onAnalyze={() => analyzeLead(lead.id)}
+                    onContact={() => contactLead(lead.id)}
+                    isUpdating={updatingLeads.has(lead.id)}
+                    isAnalyzing={analyzingLeads.has(lead.id)}
+                    isContacting={contactingLeads.has(lead.id)}
+                  />
+                ))}
+              </div>
+
+              {/* Pagination */}
+              {total > LIMIT && (
+                <div className="flex items-center justify-center gap-4">
+                  <Button
+                    variant="outline"
+                    onClick={() => fetchLeads(Math.max(0, offset - LIMIT))}
+                    disabled={offset === 0 || loading}
+                  >
+                    Previous
+                  </Button>
+                  <span className="text-sm text-muted-foreground">
+                    {offset + 1}-{Math.min(offset + LIMIT, total)} of {total}
+                  </span>
+                  <Button
+                    variant="outline"
+                    onClick={() => fetchLeads(offset + LIMIT)}
+                    disabled={offset + LIMIT >= total || loading}
+                  >
+                    Next
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

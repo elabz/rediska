@@ -447,7 +447,8 @@ class TestAnalyzeLeadEndpoint:
         ) as client:
             response = await client.post("/leads/1/analyze")
 
-            assert response.status_code in [401, 403]
+            # get_current_user raises 401 (not 403) for a missing session cookie.
+            assert response.status_code == 401
 
 
 # =============================================================================

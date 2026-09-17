@@ -27,9 +27,10 @@ Usage:
     leads = service.list_leads(status="saved", source_location="r/programming")
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ExternalAccount, LeadPost
@@ -42,12 +43,28 @@ from rediska_core.domain.services.profile_item_utils import upsert_profile_item_
 # =============================================================================
 
 
-VALID_STATUSES = {"new", "saved", "ignored", "contact_queued", "contacted"}
+VALID_STATUSES = {"new", "saved", "ignored", "contact_queued", "contacted", "expired"}
 
 # A lead is "active" for author-level dedupe unless the user ignored it or it
 # was locally deleted. An ignored lead is a standing negative verdict: it is
 # neither resurrected nor duplicated by new posts from the same author.
 INACTIVE_STATUSES = {"ignored"}
+
+# `expired` is a timeout, not a verdict: an expired lead is no longer active
+# (a new post from the author starts a fresh lead) but it never counts as a
+# rejection of the author's content.
+NOT_ACTIVE_STATUSES = INACTIVE_STATUSES | {"expired"}
+
+EXPIRED_STATUS = "expired"
+
+# Listing sorts: priority tier (high -> medium -> low -> unranked) then recency,
+# or plain recency.
+SORT_PRIORITY = "priority"
+SORT_NEWEST = "newest"
+VALID_SORTS = {SORT_PRIORITY, SORT_NEWEST}
+
+# Lead ids per audit row written by the expiry task.
+EXPIRY_AUDIT_BATCH = 500
 
 
 # =============================================================================
@@ -221,7 +238,7 @@ class LeadsService:
             .filter(
                 LeadPost.provider_id == provider_id,
                 LeadPost.author_account_id == account_id,
-                LeadPost.status.notin_(INACTIVE_STATUSES),
+                LeadPost.status.notin_(NOT_ACTIVE_STATUSES),
                 LeadPost.deleted_at.is_(None),
             )
             .order_by(LeadPost.created_at.desc())
@@ -321,6 +338,7 @@ class LeadsService:
         status: Optional[str] = None,
         lead_source: Optional[str] = None,
         search: Optional[str] = None,
+        posted_within_days: Optional[int] = None,
     ):
         """Build a query for leads with filters.
 
@@ -330,13 +348,17 @@ class LeadsService:
             status: Filter by status (optional).
             lead_source: Filter by lead source ('manual', 'scout_watch') (optional).
             search: Search term for title, body, source_location (optional).
+            posted_within_days: Only leads posted in the last N days; leads
+                without a post date fall back to when they were saved.
 
         Returns:
             SQLAlchemy query object.
         """
-        from sqlalchemy import or_
+        from sqlalchemy import func, or_
 
-        query = self.db.query(LeadPost)
+        # Soft-deleted leads (e.g. losers of the duplicate-author merge) are
+        # retained for history but never listed or counted.
+        query = self.db.query(LeadPost).filter(LeadPost.deleted_at.is_(None))
 
         if provider_id:
             query = query.filter(LeadPost.provider_id == provider_id)
@@ -346,9 +368,18 @@ class LeadsService:
 
         if status:
             query = query.filter(LeadPost.status == status)
+        else:
+            # Expired leads are only listed when asked for explicitly.
+            query = query.filter(LeadPost.status != EXPIRED_STATUS)
 
         if lead_source:
             query = query.filter(LeadPost.lead_source == lead_source)
+
+        if posted_within_days:
+            since = datetime.utcnow() - timedelta(days=posted_within_days)
+            query = query.filter(
+                func.coalesce(LeadPost.post_created_at, LeadPost.created_at) >= since
+            )
 
         if search:
             search_term = f"%{search}%"
@@ -377,6 +408,8 @@ class LeadsService:
         search: Optional[str] = None,
         offset: int = 0,
         limit: int = 20,
+        sort: str = SORT_PRIORITY,
+        posted_within_days: Optional[int] = None,
     ) -> list[LeadPost]:
         """List leads with optional filters.
 
@@ -388,6 +421,7 @@ class LeadsService:
             search: Search term for title, body, author, source_location (optional).
             offset: Pagination offset.
             limit: Maximum results.
+            sort: 'priority' (tier, then newest; the default) or 'newest'.
 
         Returns:
             List of LeadPost objects.
@@ -398,10 +432,21 @@ class LeadsService:
             status=status,
             lead_source=lead_source,
             search=search,
+            posted_within_days=posted_within_days,
         )
 
-        # Order by created_at descending (newest first)
-        query = query.order_by(LeadPost.created_at.desc())
+        if sort == SORT_NEWEST:
+            query = query.order_by(LeadPost.created_at.desc(), LeadPost.id.desc())
+        else:
+            priority_rank = case(
+                (LeadPost.priority == "high", 0),
+                (LeadPost.priority == "medium", 1),
+                (LeadPost.priority == "low", 2),
+                else_=3,
+            )
+            query = query.order_by(
+                priority_rank, LeadPost.created_at.desc(), LeadPost.id.desc()
+            )
 
         return query.offset(offset).limit(limit).all()
 
@@ -412,6 +457,7 @@ class LeadsService:
         status: Optional[str] = None,
         lead_source: Optional[str] = None,
         search: Optional[str] = None,
+        posted_within_days: Optional[int] = None,
     ) -> int:
         """Count leads with optional filters.
 
@@ -431,6 +477,7 @@ class LeadsService:
             status=status,
             lead_source=lead_source,
             search=search,
+            posted_within_days=posted_within_days,
         )
 
         return query.count()
@@ -459,7 +506,7 @@ class LeadsService:
             self.db.query(LeadPost)
             .filter(
                 LeadPost.author_account_id.isnot(None),
-                LeadPost.status.notin_(INACTIVE_STATUSES),
+                LeadPost.status.notin_(NOT_ACTIVE_STATUSES),
                 LeadPost.deleted_at.is_(None),
             )
             .all()
@@ -540,6 +587,103 @@ class LeadsService:
         }
 
     # =========================================================================
+    # AUTO-EXPIRY
+    # =========================================================================
+
+    def expire_stale_leads(
+        self,
+        expiry_days: int,
+        dry_run: bool = True,
+        now: Optional[datetime] = None,
+    ) -> dict:
+        """Expire scout-sourced leads still `new` after `expiry_days`.
+
+        Manual leads never expire, rows are never deleted, and expiry is
+        reversible (the status can be set back like any other). Applied runs
+        write one audit row per batch of lead ids; dry runs write a single
+        audit row with the would-expire count and mutate nothing.
+
+        Args:
+            expiry_days: Age in days after which an untouched lead expires;
+                0 (or less) disables expiry.
+            dry_run: When True (the default), report without mutating.
+            now: Reference time (defaults to utcnow).
+
+        Returns:
+            Dict with dry_run, expiry_days, cutoff, count and lead_ids.
+        """
+        from rediska_core.domain.models import AuditLog
+
+        now = now or datetime.utcnow()
+        if expiry_days <= 0:
+            return {
+                "dry_run": dry_run,
+                "disabled": True,
+                "expiry_days": expiry_days,
+                "cutoff": None,
+                "count": 0,
+                "lead_ids": [],
+            }
+
+        cutoff = now - timedelta(days=expiry_days)
+        lead_ids = [
+            row[0]
+            for row in self.db.query(LeadPost.id)
+            .filter(
+                LeadPost.lead_source == "scout_watch",
+                LeadPost.status == "new",
+                LeadPost.deleted_at.is_(None),
+                LeadPost.created_at < cutoff,
+            )
+            .order_by(LeadPost.id)
+            .all()
+        ]
+
+        if dry_run:
+            self.db.add(
+                AuditLog(
+                    ts=now,
+                    actor="system",
+                    action_type="lead.expire_dry_run",
+                    result="ok",
+                    entity_type="lead_post",
+                    request_json={"expiry_days": expiry_days, "cutoff": cutoff.isoformat()},
+                    response_json={"would_expire": len(lead_ids)},
+                )
+            )
+        else:
+            for start in range(0, len(lead_ids), EXPIRY_AUDIT_BATCH):
+                batch = lead_ids[start:start + EXPIRY_AUDIT_BATCH]
+                self.db.query(LeadPost).filter(LeadPost.id.in_(batch)).update(
+                    {LeadPost.status: EXPIRED_STATUS, LeadPost.updated_at: now},
+                    synchronize_session=False,
+                )
+                self.db.add(
+                    AuditLog(
+                        ts=now,
+                        actor="system",
+                        action_type="lead.expire",
+                        result="ok",
+                        entity_type="lead_post",
+                        request_json={
+                            "expiry_days": expiry_days,
+                            "cutoff": cutoff.isoformat(),
+                        },
+                        response_json={"lead_ids": batch, "count": len(batch)},
+                    )
+                )
+        self.db.flush()
+
+        return {
+            "dry_run": dry_run,
+            "disabled": False,
+            "expiry_days": expiry_days,
+            "cutoff": cutoff.isoformat(),
+            "count": len(lead_ids),
+            "lead_ids": lead_ids,
+        }
+
+    # =========================================================================
     # UPDATE STATUS
     # =========================================================================
 
@@ -577,4 +721,6 @@ __all__ = [
     "LeadsService",
     "VALID_STATUSES",
     "INACTIVE_STATUSES",
+    "NOT_ACTIVE_STATUSES",
+    "VALID_SORTS",
 ]

@@ -209,13 +209,22 @@ class TestHybridSearch:
                 mock_embed.return_value = mock_embed_instance
 
                 mock_client = MagicMock()
+                # Opposite rankings so the two weights land on different RRF
+                # denominators; identical ranks would make every weight split
+                # produce the same blended score.
                 mock_client.search.return_value = {
-                    "total": 1,
-                    "hits": [{"id": "message:1", "score": 10.0, "source": {}}],
+                    "total": 2,
+                    "hits": [
+                        {"id": "message:1", "score": 10.0, "source": {}},
+                        {"id": "message:2", "score": 8.0, "source": {}},
+                    ],
                 }
                 mock_client.knn_search.return_value = {
-                    "total": 1,
-                    "hits": [{"id": "message:1", "score": 0.5, "source": {}}],
+                    "total": 2,
+                    "hits": [
+                        {"id": "message:2", "score": 0.9, "source": {}},
+                        {"id": "message:1", "score": 0.5, "source": {}},
+                    ],
                 }
                 mock_es.return_value = mock_client
 
@@ -225,9 +234,24 @@ class TestHybridSearch:
                     embeddings_model="nomic-embed-text",
                 )
 
-                # Default weights
+                # RRF with k=60: score = weight / (60 + rank + 1), summed
+                # across both result lists. message:1 is BM25 rank 0 and kNN
+                # rank 1; message:2 is the reverse.
                 result = service.hybrid_search(query="test")
-                assert result["hits"][0]["score"] > 0
+                scores = {hit["id"]: hit["score"] for hit in result["hits"]}
+                assert scores["message:1"] == pytest.approx(0.3 / 61 + 0.7 / 62)
+                assert scores["message:2"] == pytest.approx(0.3 / 62 + 0.7 / 61)
+                # kNN-weighted by default, so message:2 wins.
+                assert result["hits"][0]["id"] == "message:2"
+
+                # Flipping the weights must change the scores and the order.
+                bm25_heavy = service.hybrid_search(
+                    query="test", bm25_weight=0.9, knn_weight=0.1
+                )
+                heavy_scores = {h["id"]: h["score"] for h in bm25_heavy["hits"]}
+                assert heavy_scores["message:1"] == pytest.approx(0.9 / 61 + 0.1 / 62)
+                assert heavy_scores["message:1"] != scores["message:1"]
+                assert bm25_heavy["hits"][0]["id"] == "message:1"
 
     def test_hybrid_search_falls_back_to_text_only(self, test_settings):
         """Hybrid search should fall back to text-only when embeddings unavailable."""
@@ -302,8 +326,9 @@ class TestSearchFilters:
             service.text_search(query="test", doc_types=["message", "lead_post"])
 
             call_args = mock_client.search.call_args
-            # doc_type filter should be applied
-            assert call_args is not None
+            filters = call_args[1].get("filters", {})
+            # doc_types is passed through under the singular ES field name.
+            assert filters.get("doc_type") == ["message", "lead_post"]
 
     def test_exclude_deleted_by_default(self, test_settings):
         """Search should exclude locally deleted documents by default."""
@@ -321,8 +346,16 @@ class TestSearchFilters:
             filters = call_args[1].get("filters", {})
             assert filters.get("local_deleted") is False
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "KNOWN BUG: SearchService._build_filters accepts exclude_visibility "
+            "and silently drops it, so removed/deleted content is never excluded "
+            "even though the API plumbs the parameter all the way down."
+        ),
+    )
     def test_exclude_removed_visibility(self, test_settings):
-        """Search should optionally exclude removed/deleted visibility."""
+        """Search should exclude the requested remote_visibility values."""
         from rediska_core.domain.services.search import SearchService
 
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
@@ -336,9 +369,10 @@ class TestSearchFilters:
                 exclude_visibility=["removed", "deleted_by_author"],
             )
 
-            # Should have exclusion filters applied
-            call_args = mock_client.search.call_args
-            assert call_args is not None
+            filters = mock_client.search.call_args[1].get("filters", {})
+            # The excluded values must show up somewhere in the filter payload.
+            assert "removed" in repr(filters)
+            assert "deleted_by_author" in repr(filters)
 
 
 # =============================================================================
@@ -392,8 +426,10 @@ class TestSearchPagination:
             service = SearchService(es_url="http://localhost:9200")
             service.text_search(query="test", limit=10000)
 
+            from rediska_core.domain.services.search import MAX_LIMIT
+
             call_args = mock_client.search.call_args
-            assert call_args[1]["size"] <= 100  # Max limit
+            assert call_args[1]["size"] == MAX_LIMIT
 
 
 # =============================================================================
@@ -476,45 +512,73 @@ class TestSearchResultFormatting:
             result = service.text_search(query="test", include_highlights=True)
 
             assert result["total"] == 1
+            # text_search returns the ES result unchanged, so a highlight
+            # payload from ES must survive to the caller untouched.
+            assert result["hits"][0]["highlight"] == {
+                "content": ["This is a <em>test</em> message"]
+            }
 
-    def test_results_include_doc_type(self, test_settings):
-        """Search results should include doc_type for each hit."""
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "KNOWN BUG: include_highlights is accepted by text_search but never "
+            "added to the ES request, so ES never returns highlights at all."
+        ),
+    )
+    def test_include_highlights_requests_highlighting_from_es(self, test_settings):
+        """include_highlights=True should ask ES for a highlight section."""
         from rediska_core.domain.services.search import SearchService
 
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
             mock_client = MagicMock()
-            mock_client.search.return_value = {
-                "total": 1,
-                "hits": [{
-                    "id": "message:1",
-                    "score": 5.0,
-                    "source": {"doc_type": "message", "content": "Test"},
-                }],
-            }
+            mock_client.search.return_value = {"total": 0, "hits": []}
             mock_es.return_value = mock_client
 
             service = SearchService(es_url="http://localhost:9200")
-            result = service.text_search(query="test")
+            service.text_search(query="test", include_highlights=True)
 
-            assert result["hits"][0]["source"]["doc_type"] == "message"
+            assert "highlight" in mock_client.search.call_args[1]
 
-    def test_results_include_entity_id(self, test_settings):
-        """Search results should include entity_id for each hit."""
+    def test_text_search_builds_multi_match_request(self, test_settings):
+        """text_search should build a boosted, fuzzy multi_match over the index.
+
+        Hits are returned from ES unchanged, so the request is the only part
+        of text_search worth asserting on.
+        """
+        from rediska_core.domain.services.search import SearchService
+        from rediska_core.infrastructure.elasticsearch import CONTENT_DOCS_INDEX
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            mock_client = MagicMock()
+            mock_client.search.return_value = {"total": 0, "hits": []}
+            mock_es.return_value = mock_client
+
+            service = SearchService(es_url="http://localhost:9200")
+            service.text_search(query="test")
+
+            kwargs = mock_client.search.call_args[1]
+            assert kwargs["index"] == CONTENT_DOCS_INDEX
+            assert kwargs["query"] == {
+                "multi_match": {
+                    "query": "test",
+                    "fields": ["content^2", "title^3"],
+                    "type": "best_fields",
+                    "fuzziness": "AUTO",
+                }
+            }
+
+    def test_phrase_mode_disables_fuzziness(self, test_settings):
+        """phrase=True should switch to a phrase match with no fuzziness."""
         from rediska_core.domain.services.search import SearchService
 
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
             mock_client = MagicMock()
-            mock_client.search.return_value = {
-                "total": 1,
-                "hits": [{
-                    "id": "message:123",
-                    "score": 5.0,
-                    "source": {"entity_id": 123, "doc_type": "message"},
-                }],
-            }
+            mock_client.search.return_value = {"total": 0, "hits": []}
             mock_es.return_value = mock_client
 
             service = SearchService(es_url="http://localhost:9200")
-            result = service.text_search(query="test")
+            service.text_search(query="exact words", phrase=True)
 
-            assert result["hits"][0]["source"]["entity_id"] == 123
+            multi_match = mock_client.search.call_args[1]["query"]["multi_match"]
+            assert multi_match["type"] == "phrase"
+            assert "fuzziness" not in multi_match

@@ -22,40 +22,49 @@ import pytest
 class TestEmbeddingsClientInitialization:
     """Tests for embeddings client initialization."""
 
-    def test_client_initializes_with_url(self, test_settings):
-        """Client should initialize with embeddings URL."""
+    def test_client_strips_trailing_slash_from_url(self, test_settings):
+        """Client should normalize the base URL by stripping trailing slashes.
+
+        This is the only transformation __init__ performs; passing an already
+        clean URL would never exercise it.
+        """
         from rediska_core.infrastructure.embeddings import EmbeddingsClient
 
         client = EmbeddingsClient(
-            url="http://localhost:8080",
-            model="nomic-embed-text",
-        )
-
-        assert client.url == "http://localhost:8080"
-        assert client.model == "nomic-embed-text"
-
-    def test_client_initializes_with_api_key(self, test_settings):
-        """Client should accept optional API key."""
-        from rediska_core.infrastructure.embeddings import EmbeddingsClient
-
-        client = EmbeddingsClient(
-            url="http://localhost:8080",
+            url="http://localhost:8080/",
             model="nomic-embed-text",
             api_key="test-api-key",
         )
 
+        assert client.url == "http://localhost:8080"
+        assert client.model == "nomic-embed-text"
         assert client.api_key == "test-api-key"
+        assert client.timeout > 0
 
-    def test_client_uses_default_timeout(self, test_settings):
-        """Client should have a default timeout."""
+    def test_stripped_url_yields_single_slash_endpoint(self, test_settings):
+        """The normalized URL should produce a well-formed endpoint path."""
         from rediska_core.infrastructure.embeddings import EmbeddingsClient
 
-        client = EmbeddingsClient(
-            url="http://localhost:8080",
-            model="nomic-embed-text",
-        )
+        with patch("httpx.Client") as mock_http:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "data": [{"embedding": [0.1, 0.2, 0.3]}],
+            }
+            mock_client.post.return_value = mock_response
+            mock_http.return_value.__enter__.return_value = mock_client
 
-        assert client.timeout > 0
+            client = EmbeddingsClient(
+                url="http://localhost:8080/",
+                model="nomic-embed-text",
+            )
+            client.embed("Hello")
+
+            assert (
+                mock_client.post.call_args[0][0]
+                == "http://localhost:8080/v1/embeddings"
+            )
 
 
 # =============================================================================
@@ -270,7 +279,6 @@ class TestErrorHandling:
             mock_response = MagicMock()
             mock_response.status_code = 500
             mock_response.text = "Internal Server Error"
-            mock_response.raise_for_status.side_effect = Exception("500 Error")
             mock_client.post.return_value = mock_response
             mock_http.return_value.__enter__.return_value = mock_client
 
@@ -282,7 +290,10 @@ class TestErrorHandling:
             with pytest.raises(EmbeddingsError) as exc_info:
                 client.embed("Test text")
 
-            assert "500" in str(exc_info.value) or "Error" in str(exc_info.value)
+            # The status code must actually appear; matching the mock's own
+            # response.text would pass even if the code were dropped.
+            assert str(exc_info.value).startswith("API error: 500")
+            assert "Internal Server Error" in str(exc_info.value)
 
     def test_embed_handles_connection_failure(self, test_settings):
         """embed() should handle connection failures gracefully."""

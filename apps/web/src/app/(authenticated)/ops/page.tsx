@@ -22,7 +22,9 @@ import {
   Trash2,
   ExternalLink,
   ImageDown,
+  Archive,
 } from 'lucide-react';
+import { CalibrationReportPanel } from './components/CalibrationReportPanel';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -956,6 +958,34 @@ export default function OpsPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Backup & Restore Card */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-500/10">
+                <Archive className="h-5 w-5 text-violet-500" />
+              </div>
+              <div>
+                <CardTitle className="text-lg">Backup &amp; Restore</CardTitle>
+                <CardDescription>Export, import, or clear the inbox</CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Dump all conversations, messages, and attachment metadata to a portable JSON
+              file, restore from a previous dump, or clear the inbox.
+            </p>
+
+            <Button asChild className="w-full" size="lg" variant="secondary">
+              <Link href="/ops/backup">
+                <Archive className="h-4 w-4 mr-2" />
+                Open Backup &amp; Restore
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
       </div>
 
       {/* Re-download Attachments Card */}
@@ -1033,6 +1063,9 @@ export default function OpsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Calibration Report Panel */}
+      <CalibrationReportPanel />
 
       {/* Sync Status Panel */}
       <SyncStatusPanel />

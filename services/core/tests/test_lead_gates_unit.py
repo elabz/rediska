@@ -378,11 +378,11 @@ def setup_lead(db_session: Session, setup_provider, setup_account):
         provider_id="reddit",
         source_location="r/personals",
         external_post_id="post_abc123",
+        post_url="https://example.com/comments/post_abc123",
         author_account_id=setup_account.id,
         title="Looking for someone special",
         body_text="I'm 25, looking for genuine connection.",
-        external_created_at=datetime.now(timezone.utc),
-        local_saved_at=datetime.now(timezone.utc),
+        post_created_at=datetime.now(timezone.utc),
     )
     db_session.add(lead)
     db_session.flush()
@@ -393,10 +393,10 @@ def setup_lead(db_session: Session, setup_provider, setup_account):
 def setup_profile_snapshot(db_session: Session, setup_account):
     snapshot = ProfileSnapshot(
         account_id=setup_account.id,
-        provider_id="reddit",
-        external_username="test_author",
-        profile_data_json={"username": "test_author"},
         fetched_at=datetime.now(timezone.utc),
+        summary_text="Synthetic profile summary for gate tests.",
+        signals_json=[],
+        risk_flags_json=[],
         created_at=datetime.now(timezone.utc),
     )
     db_session.add(snapshot)

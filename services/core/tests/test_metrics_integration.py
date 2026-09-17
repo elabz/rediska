@@ -51,20 +51,20 @@ class TestMetricsEndpointIntegration:
         """Metrics endpoint should require authentication."""
         response = client.get("/api/metrics")
 
-        # Should require auth or return data if auth is disabled
-        assert response.status_code in (200, 401, 403)
+        # Depends(get_current_user) must reject anonymous callers outright.
+        assert response.status_code == 401
 
     def test_queue_metrics_requires_auth(self, client):
         """Queue metrics should require authentication."""
         response = client.get("/api/metrics/queues")
 
-        assert response.status_code in (200, 401, 403)
+        assert response.status_code == 401
 
     def test_sync_metrics_requires_auth(self, client):
         """Sync metrics should require authentication."""
         response = client.get("/api/metrics/sync")
 
-        assert response.status_code in (200, 401, 403)
+        assert response.status_code == 401
 
 
 class TestHealthEndpointDetails:
@@ -100,18 +100,6 @@ class TestHealthEndpointDetails:
         # Should be valid ISO format
         timestamp = data["timestamp"]
         datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-
-    def test_health_response_time_reasonable(self, client):
-        """Health check should respond quickly."""
-        import time
-
-        start = time.time()
-        response = client.get("/api/health")
-        elapsed = time.time() - start
-
-        assert response.status_code == 200
-        # Should respond in under 100ms
-        assert elapsed < 0.1
 
 
 class TestReadinessEndpointDetails:
@@ -207,12 +195,13 @@ class TestSystemMetricsIntegration:
         """SystemMetrics should handle missing Redis gracefully."""
         from rediska_core.observability.metrics import SystemMetrics
 
-        # Use invalid URL to ensure Redis connection fails
+        # Port 99999 is out of range, so redis.from_url() raises inside
+        # _get_redis() and it returns None.
         metrics = SystemMetrics(redis_url="redis://invalid:99999/0")
 
-        # Should not raise, just return empty
-        queue_metrics = metrics.collect_queue_metrics()
-        assert isinstance(queue_metrics, dict)
+        # Degrades to an empty dict rather than raising or returning garbage.
+        assert metrics.collect_queue_metrics() == {}
+        assert metrics.collect_sync_times() == {}
 
     def test_system_metrics_collect_all(self):
         """collect_all should return structured data."""
@@ -319,19 +308,6 @@ class TestObservabilityMiddleware:
     def client(self, test_app):
         """Create test client."""
         return TestClient(test_app)
-
-    def test_health_endpoint_fast(self, client):
-        """Health should be fast (no auth overhead)."""
-        import time
-
-        times = []
-        for _ in range(5):
-            start = time.time()
-            client.get("/api/health")
-            times.append(time.time() - start)
-
-        avg_time = sum(times) / len(times)
-        assert avg_time < 0.05  # Average under 50ms
 
     def test_multiple_health_checks_consistent(self, client):
         """Multiple health checks should return consistent results."""

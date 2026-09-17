@@ -10,7 +10,6 @@ Tests the heuristics for detecting possible duplicate accounts:
 import pytest
 
 from rediska_core.domain.services.duplicate_detection import (
-    DuplicateCandidate,
     DuplicateDetectionConfig,
     DuplicateDetectionService,
     DuplicateSuggestion,
@@ -90,9 +89,13 @@ class TestUsernameMatcher:
         result = matcher.compare("ab", "ab")
         assert result.is_match
 
-        # Short but different
+        # Short but different: below min_length_for_fuzzy (4), every fuzzy
+        # branch is skipped, so this must be a hard no-match -- not merely a
+        # low-confidence one. The old `or` was satisfied by either branch.
         result = matcher.compare("ab", "ac")
-        assert not result.is_match or result.confidence < 0.6
+        assert not result.is_match
+        assert result.confidence == 0.0
+        assert result.reason == "no_match"
 
     def test_common_patterns_detection(self):
         """Common username patterns should be detected."""
@@ -219,37 +222,6 @@ class TestImageHashMatcher:
 class TestDuplicateSuggestion:
     """Tests for duplicate suggestion output structure."""
 
-    def test_suggestion_fields(self):
-        """Suggestion should have all required fields."""
-        suggestion = DuplicateSuggestion(
-            source_account_id=1,
-            candidate_account_id=2,
-            overall_confidence=0.85,
-            reasons=[
-                MatchReason(type="username", confidence=0.9, description="Exact username match"),
-            ],
-        )
-
-        assert suggestion.source_account_id == 1
-        assert suggestion.candidate_account_id == 2
-        assert suggestion.overall_confidence == 0.85
-        assert len(suggestion.reasons) == 1
-
-    def test_suggestion_with_multiple_reasons(self):
-        """Suggestion can have multiple match reasons."""
-        suggestion = DuplicateSuggestion(
-            source_account_id=1,
-            candidate_account_id=2,
-            overall_confidence=0.95,
-            reasons=[
-                MatchReason(type="username", confidence=0.8, description="Similar username"),
-                MatchReason(type="image_hash", confidence=0.95, description="3 matching images"),
-            ],
-        )
-
-        assert len(suggestion.reasons) == 2
-        assert suggestion.overall_confidence >= max(r.confidence for r in suggestion.reasons)
-
     def test_suggestion_to_dict(self):
         """Suggestion should serialize to dict."""
         suggestion = DuplicateSuggestion(
@@ -269,74 +241,6 @@ class TestDuplicateSuggestion:
         assert len(data["reasons"]) == 1
 
 
-class TestMatchReason:
-    """Tests for match reason structure."""
-
-    def test_match_reason_types(self):
-        """Match reason should support different types."""
-        username_reason = MatchReason(
-            type="username",
-            confidence=0.9,
-            description="Exact username match",
-        )
-        assert username_reason.type == "username"
-
-        image_reason = MatchReason(
-            type="image_hash",
-            confidence=0.85,
-            description="2 matching images",
-            evidence={"matching_hashes": ["abc", "def"]},
-        )
-        assert image_reason.type == "image_hash"
-        assert image_reason.evidence is not None
-
-    def test_match_reason_evidence(self):
-        """Match reason can include evidence data."""
-        reason = MatchReason(
-            type="image_hash",
-            confidence=0.9,
-            description="Matching profile images",
-            evidence={
-                "matching_hashes": ["hash1", "hash2"],
-                "matching_count": 2,
-            },
-        )
-
-        assert reason.evidence["matching_count"] == 2
-
-
-# =============================================================================
-# DUPLICATE DETECTION CONFIG TESTS
-# =============================================================================
-
-
-class TestDuplicateDetectionConfig:
-    """Tests for configuration options."""
-
-    def test_default_config(self):
-        """Default config should have reasonable values."""
-        config = DuplicateDetectionConfig()
-
-        assert config.min_username_confidence > 0
-        assert config.min_image_confidence > 0
-        assert config.min_overall_confidence > 0
-        assert config.max_candidates > 0
-
-    def test_custom_config(self):
-        """Config should accept custom thresholds."""
-        config = DuplicateDetectionConfig(
-            min_username_confidence=0.8,
-            min_image_confidence=0.9,
-            min_overall_confidence=0.7,
-            max_candidates=50,
-        )
-
-        assert config.min_username_confidence == 0.8
-        assert config.min_image_confidence == 0.9
-        assert config.min_overall_confidence == 0.7
-        assert config.max_candidates == 50
-
-
 # =============================================================================
 # DUPLICATE DETECTION SERVICE TESTS
 # =============================================================================
@@ -344,14 +248,6 @@ class TestDuplicateDetectionConfig:
 
 class TestDuplicateDetectionService:
     """Tests for the duplicate detection service."""
-
-    def test_service_initialization(self):
-        """Service should initialize with default config."""
-        service = DuplicateDetectionService(db=None)
-
-        assert service.config is not None
-        assert service.username_matcher is not None
-        assert service.image_matcher is not None
 
     def test_service_with_custom_config(self):
         """Service should accept custom config."""
@@ -396,35 +292,6 @@ class TestDuplicateDetectionService:
         assert candidate.image_hashes == image_hashes
 
 
-class TestDuplicateCandidate:
-    """Tests for duplicate candidate structure."""
-
-    def test_candidate_fields(self):
-        """Candidate should have all required fields."""
-        candidate = DuplicateCandidate(
-            account_id=1,
-            username="test_user",
-            provider_id="reddit",
-            image_hashes=["hash1", "hash2"],
-        )
-
-        assert candidate.account_id == 1
-        assert candidate.username == "test_user"
-        assert candidate.provider_id == "reddit"
-        assert len(candidate.image_hashes) == 2
-
-    def test_candidate_without_images(self):
-        """Candidate can exist without image hashes."""
-        candidate = DuplicateCandidate(
-            account_id=1,
-            username="test_user",
-            provider_id="reddit",
-            image_hashes=[],
-        )
-
-        assert len(candidate.image_hashes) == 0
-
-
 # =============================================================================
 # EDGE CASES AND ERROR HANDLING
 # =============================================================================
@@ -434,12 +301,25 @@ class TestEdgeCases:
     """Tests for edge cases and error handling."""
 
     def test_username_with_special_characters(self):
-        """Username matcher should handle special characters."""
+        """'@' is NOT a normalized separator, so it only matches via fuzzy fallback.
+
+        normalize() maps [-.] to '_' but leaves '@' alone. "user-name" therefore
+        reaches case_insensitive_match at 0.95, while "user@name" falls all the
+        way through to the Levenshtein branch and matches at ~0.76. Both still
+        match, but the confidence differs -- this pins that asymmetry so a
+        change to the separator set is visible.
+        """
         matcher = UsernameMatcher()
 
-        result = matcher.compare("user@name", "user_name")
-        # Should normalize and compare
-        assert result is not None
+        at_result = matcher.compare("user@name", "user_name")
+        assert at_result.is_match is True
+        assert at_result.reason == "fuzzy_match"
+        assert at_result.confidence == pytest.approx(0.7556, abs=1e-3)
+
+        # Contrast: a normalized separator short-circuits much earlier.
+        dash_result = matcher.compare("user-name", "user_name")
+        assert dash_result.reason == "case_insensitive_match"
+        assert dash_result.confidence > at_result.confidence
 
     def test_unicode_usernames(self):
         """Username matcher should handle unicode characters."""

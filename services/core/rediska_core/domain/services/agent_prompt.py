@@ -126,22 +126,41 @@ class AgentPromptService:
         Returns:
             AgentPrompt: New active prompt version
         """
-        # Get current active prompt to inherit unspecified values
-        current = self.get_active_prompt(dimension)
+        # Get current active prompt to inherit unspecified values. Dimensions
+        # have no seeded rows -- agents fall back to the module-level defaults in
+        # agents/default_prompts.py until someone edits one -- so the first edit
+        # of a dimension has nothing to inherit from and creates v1 instead.
+        try:
+            current = self.get_active_prompt(dimension)
+        except ValueError:
+            current = None
 
         # Create new version with updated values
         new_prompt = self.create_prompt(
             dimension=dimension,
             system_prompt=system_prompt,
-            output_schema_json=output_schema_json or current.output_schema_json,
-            temperature=temperature if temperature is not None else current.temperature,
-            max_tokens=max_tokens if max_tokens is not None else current.max_tokens,
+            output_schema_json=(
+                output_schema_json
+                if output_schema_json is not None
+                else (current.output_schema_json if current else {})
+            ),
+            temperature=(
+                temperature
+                if temperature is not None
+                else (current.temperature if current else 0.7)
+            ),
+            max_tokens=(
+                max_tokens
+                if max_tokens is not None
+                else (current.max_tokens if current else 8192)
+            ),
             notes=notes,
             created_by=created_by,
         )
 
         # Deactivate old prompt
-        current.is_active = False
+        if current is not None:
+            current.is_active = False
 
         # Activate new prompt
         new_prompt.is_active = True

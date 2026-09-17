@@ -21,9 +21,7 @@ from rediska_core.domain.services.inference import (
 from rediska_core.domain.services.draft_intro import (
     DraftIntroAgent,
     DraftIntroInput,
-    DraftIntroOutput,
     DraftIntroService,
-    DraftMessage,
 )
 
 
@@ -78,126 +76,12 @@ def sample_lead_context():
 
 
 # =============================================================================
-# DRAFT MESSAGE TESTS
-# =============================================================================
-
-
-class TestDraftMessage:
-    """Tests for DraftMessage schema."""
-
-    def test_draft_message_fields(self):
-        """DraftMessage should have required fields."""
-        draft = DraftMessage(
-            subject="Quick question about your CRM needs",
-            body="Hi! I noticed your post about looking for a CRM solution...",
-            tone_used="professional",
-            personalization_notes=["Referenced their CRM search", "Mentioned Slack integration"],
-        )
-
-        assert draft.subject is not None
-        assert draft.body is not None
-        assert draft.tone_used == "professional"
-        assert len(draft.personalization_notes) == 2
-
-    def test_draft_message_without_subject(self):
-        """DraftMessage should work without subject (for DMs)."""
-        draft = DraftMessage(
-            subject=None,
-            body="Hey! Saw your post and thought I could help...",
-            tone_used="casual",
-        )
-
-        assert draft.subject is None
-        assert draft.body is not None
-
-
-# =============================================================================
-# DRAFT INTRO OUTPUT TESTS
-# =============================================================================
-
-
-class TestDraftIntroOutput:
-    """Tests for DraftIntroOutput schema."""
-
-    def test_output_schema_fields(self):
-        """Output should have primary draft and alternatives."""
-        output = DraftIntroOutput(
-            primary_draft=DraftMessage(
-                subject="Introduction",
-                body="Hi there! I noticed...",
-                tone_used="friendly",
-            ),
-            alternatives=[
-                DraftMessage(
-                    subject="Quick question",
-                    body="Hey! I saw your post...",
-                    tone_used="casual",
-                ),
-            ],
-            personalization_used=["company stage", "industry"],
-            reasoning="Used friendly approach based on their casual posting style.",
-        )
-
-        assert output.primary_draft is not None
-        assert len(output.alternatives) == 1
-        assert len(output.personalization_used) == 2
-
-    def test_output_with_no_alternatives(self):
-        """Output can have no alternatives."""
-        output = DraftIntroOutput(
-            primary_draft=DraftMessage(
-                subject="Hello",
-                body="Hi!",
-                tone_used="neutral",
-            ),
-            alternatives=[],
-            personalization_used=[],
-        )
-
-        assert len(output.alternatives) == 0
-
-
-# =============================================================================
 # DRAFT INTRO INPUT TESTS
 # =============================================================================
 
 
 class TestDraftIntroInput:
     """Tests for DraftIntroInput."""
-
-    def test_input_from_profile(self, sample_target_profile, sample_lead_context):
-        """Input should accept target profile and lead context."""
-        input_data = DraftIntroInput(
-            target_profile=sample_target_profile,
-            lead_context=sample_lead_context,
-        )
-
-        assert input_data.target_profile["username"] == "startup_ceo"
-        assert "CRM" in input_data.lead_context["title"]
-
-    def test_input_with_custom_instructions(self, sample_target_profile):
-        """Input should accept custom instructions."""
-        input_data = DraftIntroInput(
-            target_profile=sample_target_profile,
-            custom_instructions="Keep the message under 100 words. Focus on ROI.",
-        )
-
-        assert input_data.custom_instructions is not None
-
-    def test_input_with_product_context(self, sample_target_profile):
-        """Input should accept product context."""
-        product_context = {
-            "product_name": "SuperCRM",
-            "key_features": ["Slack integration", "automation", "analytics"],
-            "pricing": "$49/user/month",
-        }
-
-        input_data = DraftIntroInput(
-            target_profile=sample_target_profile,
-            product_context=product_context,
-        )
-
-        assert input_data.product_context["product_name"] == "SuperCRM"
 
     def test_input_to_prompt(self, sample_target_profile, sample_lead_context):
         """Input should generate a prompt for the agent."""
@@ -211,6 +95,35 @@ class TestDraftIntroInput:
         assert "startup_ceo" in prompt
         assert "CRM" in prompt
         assert "B2B SaaS" in prompt
+
+    def test_to_prompt_renders_product_context_and_instructions(self, sample_target_profile):
+        """Optional sections should be rendered, with lists comma-joined."""
+        input_data = DraftIntroInput(
+            target_profile=sample_target_profile,
+            product_context={
+                "product_name": "SuperCRM",
+                "key_features": ["Slack integration", "automation", "analytics"],
+            },
+            custom_instructions="Keep the message under 100 words. Focus on ROI.",
+        )
+
+        prompt = input_data.to_prompt()
+
+        assert "## Product Context" in prompt
+        assert "- product_name: SuperCRM" in prompt
+        # list values are joined, not repr'd
+        assert "- key_features: Slack integration, automation, analytics" in prompt
+        assert "## Special Instructions" in prompt
+        assert "Keep the message under 100 words. Focus on ROI." in prompt
+
+    def test_to_prompt_omits_absent_optional_sections(self, sample_target_profile):
+        """Sections with no data must not appear as empty headers."""
+        prompt = DraftIntroInput(target_profile=sample_target_profile).to_prompt()
+
+        assert "## Lead Post Context" not in prompt
+        assert "## Product Context" not in prompt
+        assert "## Special Instructions" not in prompt
+        assert "## Task" in prompt
 
 
 # =============================================================================
@@ -352,10 +265,21 @@ class TestDraftIntroAgent:
         result = await agent.draft(input_data)
 
         assert result.success
-        assert len(result.output.personalization_used) >= 2
-        # Message should reference their specific situation
-        body = result.output.primary_draft.body.lower()
-        assert "series a" in body or "b2b" in body or "saas" in body
+
+        # The agent only parses the model's reply, so asserting on the drafted
+        # body would just read back the canned mock. What the agent actually
+        # controls is the prompt: assert the target-profile signals and lead
+        # context it was given are all present in the user message.
+        user_prompt = mock_inference_client.chat.call_args[0][0][1].content
+
+        assert "startup_ceo" in user_prompt
+        assert "founder/CEO" in user_prompt  # signals[].name/value pairs
+        assert "B2B SaaS" in user_prompt
+        assert "Series A" in user_prompt
+        assert "AI, developer tools, startups" in user_prompt  # interests joined
+        assert "Looking for a CRM solution" in user_prompt  # lead title
+        assert "r/startups" in user_prompt  # lead source_location
+        assert "integrates with Slack" in user_prompt  # lead body_text
 
     @pytest.mark.asyncio
     async def test_agent_provides_alternatives(
@@ -409,7 +333,21 @@ class TestDraftIntroAgent:
         result = await agent.draft(input_data)
 
         assert result.success
-        assert len(result.output.alternatives) >= 1
+        assert result.output is not None
+
+        # Exact count and field mapping: `>= 1` would pass even if the parser
+        # silently dropped an alternative. The second alternative has a null
+        # subject, which pins Optional[str] handling on the nested model.
+        assert len(result.output.alternatives) == 2
+        assert result.output.alternatives[0].tone_used == "casual"
+        assert result.output.alternatives[1].subject is None
+        assert result.output.alternatives[1].tone_used == "direct"
+
+        # The agent controls the prompt, not the reply: assert the target
+        # profile it was handed actually reached the user message.
+        user_prompt = mock_inference_client.chat.call_args[0][0][1].content
+        assert "startup_ceo" in user_prompt
+        assert "B2B SaaS" in user_prompt
 
     @pytest.mark.asyncio
     async def test_agent_returns_model_info(
@@ -612,8 +550,19 @@ class TestDraftIntroSystemPrompt:
 
         prompt = agent.get_system_prompt()
 
-        assert "draft" in prompt.lower() or "message" in prompt.lower()
-        assert "intro" in prompt.lower() or "introduction" in prompt.lower()
+        # Assert the structural contract rather than incidental prose: the
+        # prompt must name every JSON key DraftIntroOutput/DraftMessage
+        # require, otherwise the model cannot produce a parseable reply.
+        for required_key in (
+            '"primary_draft"',
+            '"alternatives"',
+            '"personalization_used"',
+            '"reasoning"',
+            '"body"',
+            '"tone_used"',
+            '"personalization_notes"',
+        ):
+            assert required_key in prompt, f"system prompt missing {required_key}"
 
     def test_system_prompt_includes_voice_config(self):
         """System prompt should incorporate voice config."""

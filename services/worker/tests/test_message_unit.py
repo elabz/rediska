@@ -1,162 +1,173 @@
 """Unit tests for message tasks.
 
 Tests cover:
-- send_manual task
-- At-most-once delivery semantics
-- Error handling
+- send_manual task configuration (at-most-once)
+- Payload validation
+
+NOTE ON THE STUBBED IMPORTS
+send_manual imports a stack of rediska_core symbols at the TOP of its function
+body, before the `if not all([...])` payload validation. Off-container
+rediska_core is not installed, so those imports raise ModuleNotFoundError and
+the validation branch never executes -- which is why the validation tests here
+used to be wrapped in try/except + pytest.skip and never actually ran.
+
+Rather than restructuring the source, `stub_rediska_core` injects minimal
+placeholder modules into sys.modules so the imports resolve. An invalid payload
+then returns BEFORE any of those stubs is called (get_settings() is only
+reached after validation passes), so the stubs are never exercised -- the real
+validation branch is.
 """
 
-from unittest.mock import MagicMock, patch, AsyncMock
+import sys
+import types
+from unittest.mock import MagicMock
 
 import pytest
 
 
-class TestSendManualTask:
-    """Tests for send_manual task."""
+# =============================================================================
+# FIXTURES
+# =============================================================================
 
-    def test_task_is_registered(self, mock_celery_app):
-        """Task should be registered with Celery."""
-        from rediska_worker.tasks.message import send_manual
 
-        assert send_manual.name == "message.send_manual"
+_STUBBED_MODULES = {
+    "rediska_core": [],
+    "rediska_core.config": ["get_settings"],
+    "rediska_core.domain": [],
+    "rediska_core.domain.models": ["Conversation", "ExternalAccount", "Message", "Attachment"],
+    "rediska_core.domain.services": [],
+    "rediska_core.domain.services.credentials": ["CredentialsService"],
+    "rediska_core.domain.services.send_message": ["SendMessageService"],
+    "rediska_core.infra": [],
+    "rediska_core.infra.db": ["get_sync_session_factory"],
+    "rediska_core.infrastructure": [],
+    "rediska_core.infrastructure.crypto": ["CryptoService"],
+    "rediska_core.providers": [],
+    "rediska_core.providers.reddit": [],
+    "rediska_core.providers.reddit.adapter": ["RedditAdapter"],
+}
+
+
+@pytest.fixture
+def stub_rediska_core():
+    """Install placeholder rediska_core modules for the duration of a test.
+
+    Only lets send_manual's import block succeed; every attribute is a MagicMock
+    that an invalid payload never reaches.
+    """
+    if "rediska_core" in sys.modules:
+        # Running on-container with the real package: nothing to stub.
+        yield
+        return
+
+    created = []
+    for module_name, attrs in _STUBBED_MODULES.items():
+        module = types.ModuleType(module_name)
+        for attr in attrs:
+            setattr(module, attr, MagicMock(name=f"{module_name}.{attr}"))
+        sys.modules[module_name] = module
+        created.append(module_name)
+
+    try:
+        yield
+    finally:
+        for module_name in created:
+            sys.modules.pop(module_name, None)
+
+
+# =============================================================================
+# TASK CONFIGURATION (AT-MOST-ONCE)
+# =============================================================================
+
+
+class TestSendManualTaskConfig:
+    """The task's Celery configuration IS the at-most-once guarantee."""
 
     def test_task_has_no_retries(self, mock_celery_app):
-        """Task should have max_retries=0 for at-most-once."""
+        """max_retries=0: a failed send is never automatically re-attempted."""
         from rediska_worker.tasks.message import send_manual
 
         assert send_manual.max_retries == 0
 
     def test_task_acks_early(self, mock_celery_app):
-        """Task should ack early to prevent redelivery."""
+        """acks_late=False: the broker never redelivers this task.
+
+        With acks_late=True a worker crash mid-send would requeue the task and
+        the message could go out twice.
+        """
         from rediska_worker.tasks.message import send_manual
 
         assert send_manual.acks_late is False
 
-    def test_missing_required_fields_returns_error(self, mock_celery_app):
-        """Task should return error for missing required fields."""
-        from rediska_worker.tasks.message import send_manual
 
-        # Missing most fields - task validates before DB calls
-        # Note: Task imports rediska_core which may not be available
-        try:
-            result = send_manual.apply(args=[{"message_id": 123}]).get()
-            assert result["status"] == "error"
-        except ModuleNotFoundError:
-            # rediska_core not available in isolated test
-            pytest.skip("rediska_core not available")
+# =============================================================================
+# PAYLOAD VALIDATION
+# =============================================================================
 
-    def test_missing_message_id_returns_error(self, mock_celery_app):
-        """Task should return error when message_id is missing."""
-        from rediska_worker.tasks.message import send_manual
 
-        payload = {
-            "conversation_id": 1,
-            "identity_id": 1,
+class TestSendManualPayloadValidation:
+    """The `if not all([...])` guard, actually executed."""
+
+    REQUIRED = ("message_id", "conversation_id", "identity_id", "provider_id", "body_text")
+
+    def _valid_payload(self):
+        return {
+            "message_id": 1,
+            "conversation_id": 2,
+            "identity_id": 3,
             "provider_id": "reddit",
             "body_text": "Test message",
         }
 
-        try:
-            result = send_manual.apply(args=[payload]).get()
-            assert result["status"] == "error"
-        except ModuleNotFoundError:
-            pytest.skip("rediska_core not available")
-
-    def test_missing_body_text_returns_error(self, mock_celery_app):
-        """Task should return error when body_text is missing."""
+    @pytest.mark.parametrize("missing_field", REQUIRED)
+    def test_missing_required_field_returns_error(
+        self, mock_celery_app, stub_rediska_core, missing_field
+    ):
+        """Each required field, dropped individually, must be rejected."""
         from rediska_worker.tasks.message import send_manual
 
-        payload = {
-            "message_id": 1,
-            "conversation_id": 1,
-            "identity_id": 1,
-            "provider_id": "reddit",
-        }
+        payload = self._valid_payload()
+        del payload[missing_field]
 
-        try:
-            result = send_manual.apply(args=[payload]).get()
-            assert result["status"] == "error"
-        except ModuleNotFoundError:
-            pytest.skip("rediska_core not available")
+        result = send_manual.apply(args=[payload]).get()
 
+        assert result["status"] == "error"
+        assert result["error"] == "Missing required payload fields"
+        # No send was attempted for the incomplete payload.
+        assert "external_message_id" not in result
 
-class TestSendManualPayloadValidation:
-    """Tests for payload validation in send_manual."""
+    def test_empty_body_text_is_rejected(self, mock_celery_app, stub_rediska_core):
+        """An empty body is falsy, so `all([...])` rejects it like a missing one.
 
-    def test_valid_payload_structure(self):
-        """Test expected payload structure."""
-        valid_payload = {
-            "message_id": 123,
-            "conversation_id": 456,
-            "identity_id": 789,
-            "provider_id": "reddit",
-            "body_text": "Hello, this is a test message.",
-            "attachment_ids": [1, 2, 3],
-        }
-
-        # Verify all keys are present
-        required_keys = {"message_id", "conversation_id", "identity_id", "provider_id", "body_text"}
-        assert required_keys.issubset(valid_payload.keys())
-
-
-class TestAtMostOnceSemantics:
-    """Tests for at-most-once delivery semantics."""
-
-    def test_no_automatic_retries_configured(self, mock_celery_app):
-        """Task should not have automatic retries."""
+        This matters: an empty outbound message must never reach the provider.
+        """
         from rediska_worker.tasks.message import send_manual
 
-        # max_retries=0 means no automatic retries
-        assert send_manual.max_retries == 0
+        payload = self._valid_payload()
+        payload["body_text"] = ""
 
-    def test_acks_late_disabled(self, mock_celery_app):
-        """Task should acknowledge immediately, not after execution."""
+        result = send_manual.apply(args=[payload]).get()
+
+        assert result["status"] == "error"
+        assert result["error"] == "Missing required payload fields"
+
+    def test_empty_payload_returns_error(self, mock_celery_app, stub_rediska_core):
+        """A completely empty payload is rejected rather than crashing."""
         from rediska_worker.tasks.message import send_manual
 
-        # acks_late=False means acknowledge immediately
-        assert send_manual.acks_late is False
+        result = send_manual.apply(args=[{}]).get()
 
+        assert result["status"] == "error"
+        assert result["error"] == "Missing required payload fields"
+        assert result["message_id"] is None
 
-class TestSendManualErrorHandling:
-    """Tests for error handling in send_manual.
-
-    Note: These tests require the core service imports, so they test
-    the import structure rather than full functionality.
-    """
-
-    def test_task_handles_import_errors_gracefully(self, mock_celery_app):
-        """Task should handle missing dependencies gracefully."""
+    def test_error_response_echoes_message_id(self, mock_celery_app, stub_rediska_core):
+        """The rejection carries message_id back so the row can be reconciled."""
         from rediska_worker.tasks.message import send_manual
 
-        # Running task with valid payload but without core services
-        # should either work (if mocked) or fail gracefully
-        payload = {
-            "message_id": 1,
-            "conversation_id": 999,
-            "identity_id": 1,
-            "provider_id": "reddit",
-            "body_text": "Test",
-        }
+        payload = self._valid_payload()
+        del payload["body_text"]
 
-        # When core service is not available, it will fail with import error
-        # or module error, which should be caught as an exception
-        try:
-            result = send_manual.apply(args=[payload]).get()
-            # If it returns, should have error status
-            assert result["status"] in ("error", "failed")
-        except Exception:
-            # Import/module errors are acceptable in isolated test
-            pass
+        result = send_manual.apply(args=[payload]).get()
 
-
-class TestMessageTaskRouting:
-    """Tests for message task routing."""
-
-    def test_message_tasks_have_correct_routing(self, mock_celery_app):
-        """Message tasks should have appropriate queue routing."""
-        # Note: message tasks don't have explicit routing in current config
-        # This test documents the expected behavior
-        from rediska_worker.tasks.message import send_manual
-
-        # Task should be callable
-        assert callable(send_manual)
+        assert result["message_id"] == 1

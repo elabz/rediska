@@ -16,31 +16,6 @@ from rediska_core.domain.services.data_safety import (
 class TestRemoteDeleteEvent:
     """Tests for RemoteDeleteEvent dataclass."""
 
-    def test_create_message_delete_event(self):
-        """Test creating a remote delete event for a message."""
-        event = RemoteDeleteEvent(
-            entity_type="message",
-            entity_id="msg-123",
-            detected_at=datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
-            remote_visibility="deleted_by_author",
-        )
-
-        assert event.entity_type == "message"
-        assert event.entity_id == "msg-123"
-        assert event.remote_visibility == "deleted_by_author"
-
-    def test_create_account_delete_event(self):
-        """Test creating a remote delete event for an account."""
-        event = RemoteDeleteEvent(
-            entity_type="account",
-            entity_id="acc-456",
-            detected_at=datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
-            remote_status="deleted",
-        )
-
-        assert event.entity_type == "account"
-        assert event.remote_status == "deleted"
-
     def test_event_to_dict(self):
         """Test converting event to dictionary for audit logging."""
         event = RemoteDeleteEvent(
@@ -254,8 +229,14 @@ class TestNoRemoteDeletePolicy:
             remote_visibility="deleted_by_author",
         )
 
-        # Should still succeed, timestamp may be updated
         assert result.success is True
+        # Re-detection must actually advance the recorded timestamp on the
+        # entity (and report it), not leave the stale 2024-01-10 value.
+        assert mock_message.remote_deleted_at > original_time
+        assert result.remote_deleted_at == mock_message.remote_deleted_at
+        # Local content is still not deleted by a re-detected remote delete.
+        assert mock_message.remote_visibility == "deleted_by_author"
+        assert result.local_data_preserved is True
 
 
 class TestQueryRemotelyDeletedEntities:
@@ -275,51 +256,98 @@ class TestQueryRemotelyDeletedEntities:
 
     @pytest.mark.asyncio
     async def test_get_remotely_deleted_messages(
-        self, data_safety_service, mock_session
+        self, data_safety_service, async_db_session
     ):
-        """Test fetching messages that were deleted remotely."""
-        mock_message1 = MagicMock()
-        mock_message1.id = "msg-1"
-        mock_message1.remote_visibility = "deleted_by_author"
-        mock_message1.remote_deleted_at = datetime(2024, 1, 15, tzinfo=timezone.utc)
+        """Only messages with remote_deleted_at set come back.
 
-        mock_message2 = MagicMock()
-        mock_message2.id = "msg-2"
-        mock_message2.remote_visibility = "removed"
-        mock_message2.remote_deleted_at = datetime(2024, 1, 14, tzinfo=timezone.utc)
+        Run against a real session with a MIX of deleted and visible rows so
+        the WHERE clause -- the only logic in this method -- is exercised. A
+        preloaded mock would return whatever it was handed even if the filter
+        were dropped entirely.
+        """
+        from rediska_core.domain.models import Conversation, Message, Provider
 
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [mock_message1, mock_message2]
-        mock_session.execute.return_value = mock_result
+        async_db_session.add(
+            Provider(provider_id="reddit", display_name="Reddit", enabled=True)
+        )
+        conversation = Conversation(
+            provider_id="reddit",
+            identity_id=1,
+            counterpart_account_id=1,
+            external_conversation_id="conv_1",
+        )
+        async_db_session.add(conversation)
+        await async_db_session.flush()
+
+        def make_message(visibility, remote_deleted_at):
+            return Message(
+                provider_id="reddit",
+                conversation_id=conversation.id,
+                direction="in",
+                sent_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                body_text="body",
+                remote_visibility=visibility,
+                remote_deleted_at=remote_deleted_at,
+            )
+
+        deleted_a = make_message(
+            "deleted_by_author", datetime(2024, 1, 15, tzinfo=timezone.utc)
+        )
+        deleted_b = make_message("removed", datetime(2024, 1, 14, tzinfo=timezone.utc))
+        # Decoys the filter must exclude.
+        visible = make_message("visible", None)
+        unknown = make_message("unknown", None)
+
+        async_db_session.add_all([deleted_a, deleted_b, visible, unknown])
+        await async_db_session.flush()
 
         result = await data_safety_service.get_remotely_deleted(
-            session=mock_session,
+            session=async_db_session,
             entity_type="message",
         )
 
-        assert len(result) == 2
+        assert {m.id for m in result} == {deleted_a.id, deleted_b.id}
         assert all(m.remote_deleted_at is not None for m in result)
 
     @pytest.mark.asyncio
     async def test_get_remotely_deleted_accounts(
-        self, data_safety_service, mock_session
+        self, data_safety_service, async_db_session
     ):
-        """Test fetching accounts that were deleted remotely."""
-        mock_account = MagicMock()
-        mock_account.id = "acc-1"
-        mock_account.remote_status = "deleted"
+        """Accounts are filtered on remote_status, not remote_deleted_at.
 
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [mock_account]
-        mock_session.execute.return_value = mock_result
+        DELETED_ACCOUNT_STATES covers deleted/suspended/banned; active and
+        unknown accounts must be excluded.
+        """
+        from rediska_core.domain.models import ExternalAccount, Provider
+
+        async_db_session.add(
+            Provider(provider_id="reddit", display_name="Reddit", enabled=True)
+        )
+
+        def make_account(username, status):
+            return ExternalAccount(
+                provider_id="reddit",
+                external_username=username,
+                external_user_id=f"t2_{username}",
+                remote_status=status,
+            )
+
+        deleted = make_account("gone_user", "deleted")
+        suspended = make_account("suspended_user", "suspended")
+        # Decoys.
+        active = make_account("active_user", "active")
+        unknown = make_account("unknown_user", "unknown")
+
+        async_db_session.add_all([deleted, suspended, active, unknown])
+        await async_db_session.flush()
 
         result = await data_safety_service.get_remotely_deleted(
-            session=mock_session,
+            session=async_db_session,
             entity_type="account",
         )
 
-        assert len(result) == 1
-        assert result[0].remote_status == "deleted"
+        assert {a.id for a in result} == {deleted.id, suspended.id}
+        assert all(a.remote_status in ("deleted", "suspended") for a in result)
 
     @pytest.mark.asyncio
     async def test_is_remotely_deleted_returns_true_for_deleted(
@@ -364,65 +392,8 @@ class TestQueryRemotelyDeletedEntities:
         assert is_deleted is False
 
 
-class TestLocalDeleteResult:
-    """Tests for LocalDeleteResult dataclass."""
-
-    def test_create_success_result(self):
-        """Test creating a successful local delete result."""
-        result = LocalDeleteResult(
-            success=True,
-            entity_type="message",
-            entity_id="msg-123",
-            deleted_at=datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
-            audit_log_id="audit-001",
-        )
-
-        assert result.success is True
-        assert result.entity_id == "msg-123"
-        assert result.audit_log_id is not None
-
-    def test_create_failure_result(self):
-        """Test creating a failed local delete result."""
-        result = LocalDeleteResult(
-            success=False,
-            entity_type="message",
-            entity_id="msg-123",
-            error="Entity not found",
-        )
-
-        assert result.success is False
-        assert result.error == "Entity not found"
-
-
 class TestPurgeResult:
     """Tests for PurgeResult dataclass."""
-
-    def test_create_success_result(self):
-        """Test creating a successful purge result."""
-        result = PurgeResult(
-            success=True,
-            entity_type="attachment",
-            entity_id="att-123",
-            purged_at=datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
-            files_removed=["file1.jpg", "file2.jpg"],
-            audit_log_id="audit-002",
-        )
-
-        assert result.success is True
-        assert len(result.files_removed) == 2
-        assert result.audit_log_id is not None
-
-    def test_create_failure_result(self):
-        """Test creating a failed purge result."""
-        result = PurgeResult(
-            success=False,
-            entity_type="attachment",
-            entity_id="att-123",
-            error="File not found",
-        )
-
-        assert result.success is False
-        assert result.error == "File not found"
 
     def test_to_dict(self):
         """Test converting purge result to dictionary."""
@@ -505,10 +476,24 @@ class TestLocalSoftDelete:
             reason="Spam content",
         )
 
-        # Should have called session.add for audit log
         assert result.success is True
-        # The audit log ID may be None if the model import fails in test
-        # but the soft delete should still succeed
+
+        # Assert the audit row is really constructed and added. This used to be
+        # left as a comment, which hid a live bug: _create_audit_log passed
+        # column names the AuditLog model does not have, so it raised TypeError
+        # into a bare `except` and no delete was ever audited.
+        from rediska_core.domain.models import AuditLog
+
+        added = [call.args[0] for call in mock_session.add.call_args_list]
+        entries = [obj for obj in added if isinstance(obj, AuditLog)]
+        assert len(entries) == 1
+
+        entry = entries[0]
+        assert entry.action_type == "data_safety.soft_delete"
+        assert entry.actor == "user"
+        assert entry.entity_type == "message"
+        assert entry.request_json["actor_id"] == "user-001"
+        assert entry.request_json["reason"] == "Spam content"
 
     @pytest.mark.asyncio
     async def test_soft_delete_preserves_data(
@@ -741,7 +726,22 @@ class TestPurgeOperation:
         )
 
         assert result.success is True
-        # Audit log should be created (session.add called)
+
+        # A purge is permanently destructive, so the audit row matters most
+        # here. Previously this was only a comment and no purge was ever
+        # audited -- see test_soft_delete_creates_audit_log.
+        from rediska_core.domain.models import AuditLog
+
+        added = [call.args[0] for call in mock_session.add.call_args_list]
+        entries = [obj for obj in added if isinstance(obj, AuditLog)]
+        assert len(entries) == 1
+
+        entry = entries[0]
+        assert entry.action_type == "data_safety.purge"
+        assert entry.actor == "user"
+        assert entry.request_json["actor_id"] == "admin-001"
+        assert entry.request_json["reason"] == "GDPR deletion request"
+        assert "files_removed" in entry.request_json
 
     @pytest.mark.asyncio
     async def test_purge_nonexistent_entity_fails(
@@ -807,8 +807,12 @@ class TestPurgeOperation:
                 entity_id="att-456",
             )
 
-            assert result.files_removed is not None
-            assert isinstance(result.files_removed, list)
+            # Name the exact file. `is not None` / isinstance(list) were both
+            # guaranteed by PurgeResult's default_factory=list, so they passed
+            # even when file removal silently no-opped.
+            assert result.files_removed == [os.path.basename(temp_file_path)]
+            # ...and the file really is gone from disk.
+            assert not os.path.exists(temp_file_path)
 
         finally:
             if os.path.exists(temp_file_path):

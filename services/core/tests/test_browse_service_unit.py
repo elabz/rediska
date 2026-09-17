@@ -253,10 +253,30 @@ class TestPostNormalization:
 
         result = service.browse_location("reddit", "r/test")
 
-        post = result["posts"][0]
-        assert "post_created_at" in post
-        # Should be ISO format string or datetime
-        assert post["post_created_at"] is not None
+        # created_utc 1704067200 is 2024-01-01T00:00:00 UTC; _normalize_post
+        # converts it to a timezone-aware ISO 8601 string.
+        assert result["posts"][0]["post_created_at"] == "2024-01-01T00:00:00+00:00"
+        assert result["posts"][1]["post_created_at"] == "2024-01-02T00:00:00+00:00"
+
+    def test_timestamp_is_none_when_absent(
+        self, db_session, setup_provider, mock_provider_client
+    ):
+        """Posts without any creation timestamp should yield None, not a crash."""
+        from rediska_core.domain.services.browse import BrowseService
+
+        mock_provider_client.browse_location.return_value = {
+            "posts": [{"id": "post9", "title": "No timestamp", "author": "user9"}],
+            "after": None,
+        }
+
+        service = BrowseService(
+            db=db_session,
+            provider_client=mock_provider_client,
+        )
+
+        result = service.browse_location("reddit", "r/test")
+
+        assert result["posts"][0]["post_created_at"] is None
 
 
 class TestBrowseErrorHandling:

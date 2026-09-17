@@ -169,9 +169,13 @@ class StructuredLogger:
         if context:
             kwargs.update(context.to_dict())
 
-        # Create log record with extra fields
+        # Create log record with extra fields.
+        # stacklevel=3 walks back past this wrapper and the public debug/info/
+        # warning/error/critical method so pathname/lineno/funcName point at the
+        # real caller. Without it every WARNING+ record's "source" block in
+        # JsonFormatter reported this file and this function instead.
         extra = {k: v for k, v in kwargs.items()}
-        self._logger.log(level, msg, exc_info=exc_info, extra=extra)
+        self._logger.log(level, msg, exc_info=exc_info, extra=extra, stacklevel=3)
 
     def debug(
         self,

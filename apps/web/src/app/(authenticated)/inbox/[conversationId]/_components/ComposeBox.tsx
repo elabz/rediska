@@ -127,7 +127,8 @@ export function ComposeBox({ conversationId, counterpart, identityId, onSent }: 
   }, [conversationId]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Plain Enter inserts a newline; only Cmd+Enter (Ctrl+Enter off macOS) sends.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       sendMessage();
     }
@@ -152,11 +153,11 @@ export function ComposeBox({ conversationId, counterpart, identityId, onSent }: 
           placeholder={
             isRecipientUnsendable
               ? `Cannot send to ${counterpart.remote_status} user`
-              : 'Type a message... (Enter to send, Shift+Enter for new line)'
+              : 'Type a message... (Cmd+Enter to send)'
           }
-          className="min-h-[44px] max-h-60 resize-y flex-1 min-w-0"
+          className="min-h-[44px] resize-y flex-1 min-w-0"
           disabled={sending || isRecipientUnsendable}
-          rows={1}
+          rows={7}
         />
         <div className="flex gap-1 shrink-0">
           <Button

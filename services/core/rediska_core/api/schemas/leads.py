@@ -70,6 +70,10 @@ class LeadResponse(BaseModel):
     analysis_recommendation: Optional[str] = Field(default=None, description="Latest analysis recommendation")
     analysis_confidence: Optional[float] = Field(default=None, description="Latest analysis confidence score")
 
+    # Triage ranking (derived in code from the latest analysis)
+    priority: Optional[str] = Field(default=None, description="Priority tier ('high', 'medium', 'low')")
+    compatibility_score: Optional[float] = Field(default=None, description="Preferences compatibility score")
+
     class Config:
         from_attributes = True
 
@@ -106,7 +110,7 @@ class UpdateLeadStatusRequest(BaseModel):
 
     status: str = Field(
         ...,
-        description="New status ('new', 'saved', 'ignored', 'contact_queued', 'contacted')",
+        description="New status ('new', 'saved', 'ignored', 'contact_queued', 'contacted', 'expired')",
     )
 
 

@@ -9,9 +9,10 @@ import logging
 import re
 import httpx
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional, Sequence
 from pathlib import Path
 
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from rediska_core.config import get_settings
@@ -27,6 +28,20 @@ from rediska_core.infrastructure.crypto import CryptoService
 from rediska_core.providers.reddit.adapter import RedditAdapter
 
 logger = logging.getLogger(__name__)
+
+# Scheduled syncs stop after this many listing pages (100 messages each) even
+# without an early exit, so a run that cannot recognise already-stored messages
+# costs a bounded number of Reddit requests. Full walks belong to the backfills.
+PERIODIC_SYNC_MAX_PAGES = 5
+# The on-demand "Sync now" gets more room to catch up after downtime.
+MANUAL_SYNC_MAX_PAGES = 20
+# On-demand syncs and backfills wait this long for a running sync to finish.
+ON_DEMAND_LOCK_WAIT_SECONDS = 60
+
+SYNC_LOCK_KEY = "rediska:lock:message_sync:reddit:{identity_id}"
+# Outlives the Celery hard time limit (600s) so a killed task's lock expires on
+# its own; long backfills renew it after every page.
+SYNC_LOCK_TIMEOUT_SECONDS = 660
 
 
 class SyncError(Exception):
@@ -51,6 +66,12 @@ class MessageSyncResult:
         self.new_conversations = new_conversations
         self.new_messages = new_messages
         self.errors = errors or []
+        # Listing pages requested from the provider during the run
+        self.pages_fetched = 0
+        # Another sync for the same identity held the lock, so nothing ran
+        self.skipped = False
+        # A database failure stopped the run; pages committed before it are kept
+        self.aborted = False
 
 
 class MessageSyncService:
@@ -81,11 +102,13 @@ class MessageSyncService:
         'image/webp',
     }
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, redis_client: Any = None):
         self.db = db
         self.settings = get_settings()
         crypto = CryptoService(self.settings.encryption_key)
         self.credentials_service = CredentialsService(db=db, crypto=crypto)
+        # Injectable for tests; created lazily from settings otherwise
+        self._redis = redis_client
 
     def _extract_media_attachments_from_reddit(self, msg_data: dict) -> list[str]:
         """Extract attachment URLs from Reddit private message data.
@@ -794,26 +817,80 @@ class MessageSyncService:
 
         return result
 
+    def _acquire_sync_lock(self, identity_id: int, wait_seconds: float) -> tuple[bool, Any]:
+        """Take the per-identity message sync lock.
+
+        Returns ``(acquired, lock)``. When Redis is unreachable the sync runs
+        unlocked (``lock`` is None): per-message savepoints still absorb a
+        concurrent insert, so this costs efficiency rather than correctness.
+        """
+        try:
+            if self._redis is None:
+                import redis as redis_lib
+
+                self._redis = redis_lib.Redis.from_url(self.settings.redis_url, socket_timeout=5)
+            lock = self._redis.lock(
+                SYNC_LOCK_KEY.format(identity_id=identity_id),
+                timeout=SYNC_LOCK_TIMEOUT_SECONDS,
+            )
+            if wait_seconds > 0:
+                acquired = lock.acquire(blocking=True, blocking_timeout=wait_seconds)
+            else:
+                acquired = lock.acquire(blocking=False)
+        except Exception as e:
+            logger.warning(f"Message sync lock unavailable, syncing unlocked: {e}")
+            return True, None
+        return bool(acquired), lock
+
+    @staticmethod
+    def _renew_sync_lock(lock: Any) -> None:
+        """Push the lock's expiry out again so a long backfill keeps holding it."""
+        if lock is None:
+            return
+        try:
+            lock.reacquire()
+        except Exception as e:
+            logger.warning(f"Failed to renew message sync lock: {e}")
+
+    @staticmethod
+    def _release_sync_lock(lock: Any) -> None:
+        if lock is None:
+            return
+        try:
+            lock.release()
+        except Exception as e:
+            logger.warning(f"Failed to release message sync lock: {e}")
+
     async def sync_reddit_messages(
         self,
         identity_id: Optional[int] = None,
         inbox_only: bool = False,
+        endpoints: Optional[Sequence[str]] = None,
+        max_pages: Optional[int] = None,
+        lock_wait_seconds: float = 0,
     ) -> MessageSyncResult:
         """Sync messages from Reddit for an identity.
 
         Uses early-exit optimization: stops pagination when encountering
         consecutive existing messages (since Reddit returns newest first).
 
+        Only one sync per identity runs at a time; a run that cannot get the
+        lock returns with ``skipped`` set. Each page is committed on its own and
+        each message is written in a savepoint, so a duplicate insert from a
+        concurrent writer affects only that message. Any other database failure
+        stops the run (``aborted``) instead of paging on with a broken session.
+
         Args:
             identity_id: Specific identity to sync, or None for default active identity.
             inbox_only: If True, only sync inbox (not sent). Faster for catching new messages.
+            endpoints: Listing endpoints to walk; overrides ``inbox_only`` when given.
+            max_pages: Stop each endpoint after this many pages. None walks to the end.
+            lock_wait_seconds: How long to wait for a sync that is already running.
+                0 skips immediately.
 
         Returns:
             MessageSyncResult with counts of synced items.
         """
-        # Early exit threshold: stop after this many consecutive existing messages
-        EARLY_EXIT_THRESHOLD = 10
-
         result = MessageSyncResult()
 
         # Get identity
@@ -840,196 +917,313 @@ class MessageSyncService:
         if not identity:
             raise SyncError("No active Reddit identity found")
 
-        try:
-            adapter = self._get_reddit_adapter(identity)
-        except SyncError as e:
-            result.errors.append(str(e))
+        acquired, lock = self._acquire_sync_lock(identity.id, lock_wait_seconds)
+        if not acquired:
+            logger.info(f"Message sync for identity {identity.id} is already running; skipping")
+            result.skipped = True
             return result
 
-        my_username = identity.external_username.lower()
+        adapter: Optional[RedditAdapter] = None
+        try:
+            try:
+                adapter = self._get_reddit_adapter(identity)
+            except SyncError as e:
+                result.errors.append(str(e))
+                return result
 
-        # Fetch messages from inbox (and optionally sent)
-        conversation_cache: dict[str, tuple] = {}  # conv_id -> (Conversation, counterpart)
-        processed_message_ids: set[str] = set()
+            if endpoints is None:
+                endpoints = ["/message/inbox"] if inbox_only else ["/message/inbox", "/message/sent"]
 
-        # Choose endpoints based on inbox_only flag
-        if inbox_only:
-            endpoints = ["/message/inbox"]
-        else:
-            endpoints = ["/message/inbox", "/message/sent"]
+            my_username = identity.external_username.lower()
+            conversation_cache: dict[str, Conversation] = {}
+            processed_message_ids: set[str] = set()
 
-        for endpoint in endpoints:
-            cursor = None
-            pages_fetched = 0
-            endpoint_messages = 0
-            consecutive_existing = 0  # Track consecutive existing messages for early exit
+            for endpoint in endpoints:
+                keep_going = await self._sync_endpoint(
+                    adapter=adapter,
+                    endpoint=endpoint,
+                    identity=identity,
+                    my_username=my_username,
+                    conversation_cache=conversation_cache,
+                    processed_message_ids=processed_message_ids,
+                    result=result,
+                    max_pages=max_pages,
+                    lock=lock,
+                )
+                if not keep_going:
+                    break
+
+            return result
+        finally:
+            if adapter is not None:
+                await adapter.aclose()
+            self._release_sync_lock(lock)
+
+    async def _sync_endpoint(
+        self,
+        adapter: RedditAdapter,
+        endpoint: str,
+        identity: Identity,
+        my_username: str,
+        conversation_cache: dict[str, Conversation],
+        processed_message_ids: set[str],
+        result: MessageSyncResult,
+        max_pages: Optional[int],
+        lock: Any,
+    ) -> bool:
+        """Walk one listing endpoint newest-first. Returns False if the run must stop."""
+        # Early exit threshold: stop after this many consecutive existing messages
+        EARLY_EXIT_THRESHOLD = 10
+
+        cursor = None
+        pages_fetched = 0
+        endpoint_messages = 0
+        consecutive_existing = 0
+        logger.info(f"Starting to fetch messages from {endpoint}")
+
+        while True:
+            if max_pages is not None and pages_fetched >= max_pages:
+                logger.info(
+                    f"{endpoint}: Stopped at page cap of {max_pages} "
+                    f"({endpoint_messages} messages processed)"
+                )
+                return True
+
+            try:
+                messages_page = await adapter.fetch_inbox_messages(
+                    cursor=cursor, limit=100, endpoint=endpoint
+                )
+            except Exception as e:
+                logger.error(f"Failed to fetch messages from {endpoint}: {e}")
+                result.errors.append(f"Failed to fetch messages from {endpoint}: {e}")
+                return True
+            pages_fetched += 1
+            result.pages_fetched += 1
+
+            if not messages_page.items:
+                return True
+
             early_exit = False
-            logger.info(f"Starting to fetch messages from {endpoint}")
+            for msg_data in messages_page.items:
+                msg_id = msg_data.get("id", "")
 
-            while True:  # Continue until Reddit returns no more data or early exit
+                # Skip if missing data or already processed
+                if not msg_data.get("author") or not msg_data.get("dest") or not msg_id:
+                    continue
+                if msg_id in processed_message_ids:
+                    continue
+                processed_message_ids.add(msg_id)
+
                 try:
-                    # Fetch a page of raw messages
-                    messages_page = await adapter.fetch_inbox_messages(
-                        cursor=cursor, limit=100, endpoint=endpoint
+                    is_new = await self._ingest_reddit_message(
+                        msg_data, identity, my_username, conversation_cache, result
                     )
-                    pages_fetched += 1
+                except SQLAlchemyError as e:
+                    # Not a duplicate insert (those are absorbed per message): the
+                    # database failed, e.g. a deadlock, which on MySQL discards the
+                    # whole transaction. Paging on would fail every later message
+                    # the same way without ever reaching the early exit, so stop.
+                    self.db.rollback()
+                    logger.error(f"{endpoint}: database error on message {msg_id}, stopping sync: {e}")
+                    result.errors.append(f"Database error on message {msg_id}: {e}")
+                    result.aborted = True
+                    return False
                 except Exception as e:
-                    result.errors.append(f"Failed to fetch messages from {endpoint}: {e}")
+                    logger.warning(f"{endpoint}: failed to process message {msg_id}: {e}")
+                    result.errors.append(f"Failed to process message {msg_id}: {e}")
+                    continue
+
+                if is_new is None:
+                    continue
+                result.messages_synced += 1
+                endpoint_messages += 1
+
+                if is_new:
+                    consecutive_existing = 0
+                    continue
+
+                # Reddit returns newest first, so a run of already-stored messages
+                # means everything older was synced before
+                consecutive_existing += 1
+                if consecutive_existing >= EARLY_EXIT_THRESHOLD:
+                    logger.info(
+                        f"{endpoint}: Early exit after {EARLY_EXIT_THRESHOLD} consecutive "
+                        f"existing messages (page {pages_fetched}, {endpoint_messages} processed)"
+                    )
+                    early_exit = True
                     break
 
-                if not messages_page.items:
-                    break
+            try:
+                self.db.commit()
+            except SQLAlchemyError as e:
+                self.db.rollback()
+                logger.error(f"{endpoint}: commit failed on page {pages_fetched}, stopping sync: {e}")
+                result.errors.append(f"Commit failed on {endpoint} page {pages_fetched}: {e}")
+                result.aborted = True
+                return False
+            self._renew_sync_lock(lock)
 
-                for msg_data in messages_page.items:
-                    try:
-                        author = msg_data.get("author", "")
-                        dest = msg_data.get("dest", "")
-                        msg_id = msg_data.get("id", "")
-                        first_message_name = msg_data.get("first_message_name") or msg_data.get("name", "")
+            if early_exit:
+                return True
 
-                        # Skip if missing data or already processed
-                        if not author or not dest or not msg_id:
-                            continue
-                        if msg_id in processed_message_ids:
-                            continue
-                        processed_message_ids.add(msg_id)
+            # Log progress every 10 pages
+            if pages_fetched % 10 == 0:
+                logger.info(
+                    f"{endpoint}: Page {pages_fetched}, "
+                    f"{endpoint_messages} messages processed, "
+                    f"{result.new_messages} new"
+                )
 
-                        # Determine counterpart (the other person)
-                        if author.lower() == my_username:
-                            counterpart_username = dest
-                            direction = "out"
-                        else:
-                            counterpart_username = author
-                            direction = "in"
+            # Move to next page
+            cursor = messages_page.next_cursor
+            if not messages_page.has_more or not cursor:
+                logger.info(
+                    f"{endpoint}: Completed after {pages_fetched} pages, "
+                    f"{endpoint_messages} messages total"
+                )
+                return True
 
-                        # Skip messages to/from ourselves (edge case)
-                        if counterpart_username.lower() == my_username:
-                            continue
+    async def _ingest_reddit_message(
+        self,
+        msg_data: dict,
+        identity: Identity,
+        my_username: str,
+        conversation_cache: dict[str, Conversation],
+        result: MessageSyncResult,
+    ) -> Optional[bool]:
+        """Store one raw Reddit message.
 
-                        # Create canonical conversation ID
-                        # For [deleted] users, use thread ID to keep conversations separate
-                        if counterpart_username.lower() == "[deleted]" and first_message_name:
-                            # Use thread ID for deleted users to keep them separate
-                            conv_id = f"reddit:thread:{first_message_name}"
-                        else:
-                            # Normal users: group by user pair
-                            user_pair = tuple(sorted([my_username, counterpart_username.lower()]))
-                            conv_id = f"reddit:pair:{user_pair[0]}:{user_pair[1]}"
+        Returns True if it was new, False if it was already stored, and None if
+        it is not part of a conversation (a message to or from ourselves).
+        """
+        author = msg_data["author"]
+        msg_id = msg_data["id"]
+        first_message_name = msg_data.get("first_message_name") or msg_data.get("name", "")
 
-                        # Get or create conversation (cached)
-                        if conv_id not in conversation_cache:
-                            counterpart_account = self._get_or_create_external_account(
-                                username=counterpart_username,
-                                user_id=None,
-                            )
-                            conversation, is_new_conv = self._get_or_create_conversation(
-                                identity=identity,
-                                external_conversation_id=conv_id,
-                                counterpart_account=counterpart_account,
-                            )
-                            conversation_cache[conv_id] = (conversation, counterpart_username)
-                            if is_new_conv:
-                                result.new_conversations += 1
-                            result.conversations_synced += 1
-                        else:
-                            conversation, _ = conversation_cache[conv_id]
+        # Determine counterpart (the other person)
+        if author.lower() == my_username:
+            counterpart_username = msg_data["dest"]
+            direction = "out"
+        else:
+            counterpart_username = author
+            direction = "in"
 
-                        # Create message
-                        sent_at = self._parse_reddit_timestamp(msg_data.get("created_utc"))
-                        body_text = msg_data.get("body", "")
-                        parent_id = msg_data.get("parent_id", "")
-                        message, is_new_msg = self._create_message_if_not_exists(
-                            conversation=conversation,
-                            identity=identity,
-                            external_message_id=msg_id,
-                            direction=direction,
-                            body_text=body_text,
-                            sent_at=sent_at,
-                            sender_username=author,
-                            thread_external_id=first_message_name or "",
-                            parent_external_message_id=parent_id,
+        # Skip messages to/from ourselves (edge case)
+        if counterpart_username.lower() == my_username:
+            return None
+
+        # Create canonical conversation ID
+        # For [deleted] users, use thread ID to keep conversations separate
+        if counterpart_username.lower() == "[deleted]" and first_message_name:
+            conv_id = f"reddit:thread:{first_message_name}"
+        else:
+            # Normal users: group by user pair
+            user_pair = tuple(sorted([my_username, counterpart_username.lower()]))
+            conv_id = f"reddit:pair:{user_pair[0]}:{user_pair[1]}"
+
+        body_text = msg_data.get("body", "")
+        sent_at = self._parse_reddit_timestamp(msg_data.get("created_utc"))
+
+        conversation: Optional[Conversation] = None
+        message: Optional[Message] = None
+        is_new_conv = False
+        is_new_msg = False
+        for attempt in (1, 2):
+            try:
+                with self.db.begin_nested():
+                    conversation = conversation_cache.get(conv_id)
+                    is_new_conv = False
+                    if conversation is None:
+                        counterpart_account = self._get_or_create_external_account(
+                            username=counterpart_username,
+                            user_id=None,
                         )
-
-                        if is_new_msg:
-                            consecutive_existing = 0  # Reset counter on new message
-                            result.new_messages += 1
-
-                            # Download images for new messages
-                            if message:
-                                try:
-                                    # Extract media attachments from Reddit message metadata
-                                    media_attachments = self._extract_media_attachments_from_reddit(msg_data)
-
-                                    # Extract image URLs from message body text
-                                    image_urls = self._extract_image_urls(body_text)
-
-                                    # Combine both sources
-                                    all_urls = media_attachments + image_urls
-                                    all_urls = list(dict.fromkeys(all_urls))  # Deduplicate while preserving order
-
-                                    if all_urls:
-                                        logger.debug(f"Found {len(all_urls)} media attachments in message {msg_id}: {len(media_attachments)} from metadata, {len(image_urls)} from body text")
-                                        images_saved = await self._download_and_store_images(
-                                            message_id=message.id,
-                                            image_urls=all_urls,
-                                            username=counterpart_username,
-                                        )
-                                        logger.info(f"Message {msg_id}: extracted {len(all_urls)} URLs, saved {images_saved} images")
-                                    else:
-                                        logger.debug(f"No images found in message {msg_id}")
-                                except Exception as img_err:
-                                    logger.error(f"Failed to download images for message {msg_id}: {img_err}", exc_info=True)
-                                    result.errors.append(f"Failed to download images for message {msg_id}: {img_err}")
-                        else:
-                            # Message already exists - increment consecutive counter
-                            consecutive_existing += 1
-
-                            # Early exit if we've seen enough consecutive existing messages
-                            # Reddit returns newest first, so if we hit many existing messages
-                            # in a row, all remaining messages are older and already synced
-                            if consecutive_existing >= EARLY_EXIT_THRESHOLD:
-                                logger.info(
-                                    f"{endpoint}: Early exit after {EARLY_EXIT_THRESHOLD} consecutive "
-                                    f"existing messages (page {pages_fetched}, {endpoint_messages} processed)"
-                                )
-                                early_exit = True
-                                break
-
-                        result.messages_synced += 1
-                        endpoint_messages += 1
-
-                    except Exception as e:
-                        result.errors.append(f"Failed to process message: {e}")
-
-                # Check if early exit was triggered
-                if early_exit:
-                    break
-
-                # Log progress every 10 pages
-                if pages_fetched % 10 == 0:
-                    logger.info(
-                        f"{endpoint}: Page {pages_fetched}, "
-                        f"{endpoint_messages} messages processed, "
-                        f"{result.new_messages} new"
+                        conversation, is_new_conv = self._get_or_create_conversation(
+                            identity=identity,
+                            external_conversation_id=conv_id,
+                            counterpart_account=counterpart_account,
+                        )
+                    message, is_new_msg = self._create_message_if_not_exists(
+                        conversation=conversation,
+                        identity=identity,
+                        external_message_id=msg_id,
+                        direction=direction,
+                        body_text=body_text,
+                        sent_at=sent_at,
+                        sender_username=author,
+                        thread_external_id=first_message_name or "",
+                        parent_external_message_id=msg_data.get("parent_id", ""),
                     )
+                break
+            except IntegrityError:
+                # Another writer (e.g. the send worker) inserted this account,
+                # conversation or message between our lookup and our insert. The
+                # savepoint discarded only this message's writes; retrying lets
+                # the lookups find the row that now exists.
+                conversation_cache.pop(conv_id, None)
+                if attempt == 2:
+                    raise
+                logger.info(f"Message {msg_id} was written concurrently; retrying its lookup")
 
-                # Move to next page
-                cursor = messages_page.next_cursor
-                if not messages_page.has_more or not cursor:
-                    logger.info(
-                        f"{endpoint}: Completed after {pages_fetched} pages, "
-                        f"{endpoint_messages} messages total"
-                    )
-                    break
+        if conversation is not None and conv_id not in conversation_cache:
+            conversation_cache[conv_id] = conversation
+            result.conversations_synced += 1
+            if is_new_conv:
+                result.new_conversations += 1
 
-        # Commit all changes
-        self.db.commit()
+        if is_new_msg:
+            result.new_messages += 1
+            if message is not None:
+                await self._store_message_images(
+                    message, msg_data, body_text, counterpart_username, result
+                )
 
-        return result
+        return is_new_msg
+
+    async def _store_message_images(
+        self,
+        message: Message,
+        msg_data: dict,
+        body_text: str,
+        username: str,
+        result: MessageSyncResult,
+    ) -> None:
+        """Download images referenced by a newly stored message (best effort)."""
+        msg_id = msg_data["id"]
+        try:
+            # Extract media attachments from Reddit message metadata
+            media_attachments = self._extract_media_attachments_from_reddit(msg_data)
+
+            # Extract image URLs from message body text
+            image_urls = self._extract_image_urls(body_text)
+
+            # Combine both sources, deduplicated while preserving order
+            all_urls = list(dict.fromkeys(media_attachments + image_urls))
+
+            if not all_urls:
+                logger.debug(f"No images found in message {msg_id}")
+                return
+
+            logger.debug(
+                f"Found {len(all_urls)} media attachments in message {msg_id}: "
+                f"{len(media_attachments)} from metadata, {len(image_urls)} from body text"
+            )
+            # Savepoint: a failed attachment insert must not break the rest of the page
+            with self.db.begin_nested():
+                images_saved = await self._download_and_store_images(
+                    message_id=message.id,
+                    image_urls=all_urls,
+                    username=username,
+                )
+            logger.info(f"Message {msg_id}: extracted {len(all_urls)} URLs, saved {images_saved} images")
+        except Exception as img_err:
+            logger.error(f"Failed to download images for message {msg_id}: {img_err}", exc_info=True)
+            result.errors.append(f"Failed to download images for message {msg_id}: {img_err}")
 
     async def sync_inbox_only(
         self,
         identity_id: Optional[int] = None,
+        max_pages: Optional[int] = None,
     ) -> MessageSyncResult:
         """Fast sync of inbox only - for catching new incoming messages quickly.
 
@@ -1038,11 +1232,36 @@ class MessageSyncService:
 
         Args:
             identity_id: Specific identity to sync, or None for default active identity.
+            max_pages: Stop after this many pages. None walks to the end.
 
         Returns:
             MessageSyncResult with counts of synced items.
         """
-        return await self.sync_reddit_messages(identity_id=identity_id, inbox_only=True)
+        return await self.sync_reddit_messages(
+            identity_id=identity_id, endpoints=["/message/inbox"], max_pages=max_pages
+        )
+
+    async def sync_sent_only(
+        self,
+        identity_id: Optional[int] = None,
+        max_pages: Optional[int] = None,
+    ) -> MessageSyncResult:
+        """Sync the sent folder only.
+
+        The sent folder changes only when a message is sent from another Reddit
+        client (sends from Rediska are stored locally first), so this can poll
+        far less often than the inbox.
+
+        Args:
+            identity_id: Specific identity to sync, or None for default active identity.
+            max_pages: Stop after this many pages. None walks to the end.
+
+        Returns:
+            MessageSyncResult with counts of synced items.
+        """
+        return await self.sync_reddit_messages(
+            identity_id=identity_id, endpoints=["/message/sent"], max_pages=max_pages
+        )
 
     def _parse_reddit_timestamp(self, ts: float | None) -> datetime:
         """Parse a Reddit UTC timestamp."""

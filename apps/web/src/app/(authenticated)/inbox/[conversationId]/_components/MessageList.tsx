@@ -254,7 +254,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
       : null;
 
   return (
-    <div ref={messagesContainerRef} className="flex-1 overflow-y-auto min-w-0 flex flex-col">
+    <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto min-w-0 flex flex-col">
       <div className="sticky top-0 z-10 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80 border-b border-border">
         <ImageGallery
           images={allImageAttachments}

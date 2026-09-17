@@ -126,7 +126,9 @@ class TestRedditAdapterListConversations:
         conv = result.items[0]
         assert isinstance(conv, ProviderConversation)
         assert conv.counterpart_username == "other_user"
-        assert conv.subject == "Hello there"
+        # A conversation groups every thread with that user, so there is no
+        # single subject to carry -- the adapter sets it to None deliberately.
+        assert conv.subject is None
         assert conv.is_unread is True
 
     @pytest.mark.asyncio
@@ -240,8 +242,12 @@ class TestRedditAdapterListMessages:
             mock_instance.get.return_value = mock_response
             mock_client.return_value.__aenter__.return_value = mock_instance
 
-            # Use full Reddit name format (t4_ prefix) matching what list_conversations returns
-            result = await reddit_adapter.list_messages("t4_conv_123")
+            # Conversations are keyed by user pair, not by thread: list_messages
+            # parses "reddit:pair:{user1}:{user2}" and keeps only messages
+            # between those two users.
+            result = await reddit_adapter.list_messages(
+                "reddit:pair:receiver_user:sender_user"
+            )
 
         assert len(result.items) == 1
         msg = result.items[0]
@@ -647,7 +653,36 @@ class TestRedditAdapterFetchProfileItems:
                 "testuser", item_type=ProfileItemType.POST
             )
 
-        assert len(result.items) >= 0  # API should be called with posts filter
+        # Filtering happens server-side via the endpoint choice, not by filtering the
+        # response, so the assertion has to be on the URL that was requested.
+        requested_url = mock_instance.get.call_args[0][0]
+        assert requested_url.endswith("/user/testuser/submitted")
+        assert "/overview" not in requested_url
+
+        assert len(result.items) == 1
+        assert result.items[0].item_type == ProfileItemType.POST
+
+    @pytest.mark.asyncio
+    async def test_fetch_profile_items_comment_filter_uses_comments_endpoint(
+        self, reddit_adapter
+    ):
+        """item_type=COMMENT should hit /comments; no filter should hit /overview."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": {"children": [], "after": None}}
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.get.return_value = mock_response
+            mock_client.return_value.__aenter__.return_value = mock_instance
+
+            await reddit_adapter.fetch_profile_items(
+                "testuser", item_type=ProfileItemType.COMMENT
+            )
+            assert mock_instance.get.call_args[0][0].endswith("/user/testuser/comments")
+
+            await reddit_adapter.fetch_profile_items("testuser")
+            assert mock_instance.get.call_args[0][0].endswith("/user/testuser/overview")
 
 
 class TestRedditAdapterTokenRefresh:

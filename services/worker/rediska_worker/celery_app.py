@@ -115,6 +115,19 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=0),
         "args": (3,),  # 3 days retention
     },
+    # Daily lead expiry at 2:30 AM UTC (scout leads untouched for LEAD_EXPIRY_DAYS).
+    # Refuses to run live until a manual dry run has been reviewed.
+    "daily-expire-stale-leads": {
+        "task": "maintenance.expire_stale_leads",
+        "schedule": crontab(hour=2, minute=30),
+        "kwargs": {"dry_run": False},
+    },
+    # Weekly calibration report on Monday at 6 AM UTC (after the Sunday restore test)
+    "weekly-calibration-report": {
+        "task": "maintenance.generate_calibration_report",
+        "schedule": crontab(hour=6, minute=0, day_of_week=1),
+        "args": (),
+    },
 }
 
 

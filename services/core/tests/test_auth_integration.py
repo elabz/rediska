@@ -194,8 +194,25 @@ class TestLogoutEndpoint:
         client.cookies.set("session", session_cookie)
         logout_response = await client.post("/auth/logout")
 
-        # Cookie should be cleared (empty or expired)
         assert logout_response.status_code == 200
+
+        # A 200 alone would pass even if the cookie survived. Inspect the
+        # actual Set-Cookie header: delete_cookie emits an empty value with an
+        # expiry in the past (Max-Age=0 / Expires=Thu, 01 Jan 1970).
+        set_cookie = logout_response.headers.get("set-cookie")
+        assert set_cookie is not None
+        assert "session=" in set_cookie
+        lowered = set_cookie.lower()
+        assert 'session=""' in lowered or "session=;" in lowered
+        assert "max-age=0" in lowered or "01 jan 1970" in lowered
+        # Security attributes must survive the clear.
+        assert "httponly" in lowered
+        assert "secure" in lowered
+
+        # NOTE: deliberately not asserting on client.cookies here. The test
+        # sets the cookie manually (no domain) and the client speaks plain
+        # http, so httpx's jar never applies the Secure clearing cookie. That
+        # is a harness artifact; the Set-Cookie header above is the contract.
 
     @pytest.mark.asyncio
     async def test_logout_writes_audit_log(self, client: AsyncClient, db_session):

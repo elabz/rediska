@@ -35,7 +35,7 @@ from rediska_core.domain.schemas.multi_agent_analysis import (
 from rediska_core.domain.services.analysis import AnalysisError, AnalysisService
 from rediska_core.domain.services.agent_prompt import AgentPromptService
 from rediska_core.domain.services.credentials import CredentialsService
-from rediska_core.domain.services.leads import LeadsService, VALID_STATUSES
+from rediska_core.domain.services.leads import LeadsService, VALID_SORTS, VALID_STATUSES
 from rediska_core.domain.services.multi_agent_analysis import (
     MultiAgentAnalysisService,
 )
@@ -170,54 +170,82 @@ def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
-def build_lead_response(lead, db: Session) -> LeadResponse:
-    """Build a LeadResponse with author info if available.
+def _author_infos(db: Session, account_ids: set[int]) -> dict[int, tuple[str, AuthorInfo]]:
+    """Author username + AuthorInfo for many accounts in a fixed number of queries.
 
-    Fetches the author's ExternalAccount and ProfileSnapshot to
-    provide detailed author information in the response.
+    One query each for accounts, their latest profile snapshots, and grouped
+    post/comment counts — independent of how many leads are on the page.
     """
-    from datetime import datetime
+    if not account_ids:
+        return {}
 
-    # Get author account if linked
-    author_info = None
-    author_username = None
+    from sqlalchemy import func
 
-    if lead.author_account_id:
-        account = db.query(ExternalAccount).filter(
-            ExternalAccount.id == lead.author_account_id
-        ).first()
+    accounts = (
+        db.query(ExternalAccount).filter(ExternalAccount.id.in_(account_ids)).all()
+    )
 
-        if account:
-            author_username = account.external_username
+    latest_fetch = (
+        db.query(
+            ProfileSnapshot.account_id.label("account_id"),
+            func.max(ProfileSnapshot.fetched_at).label("fetched_at"),
+        )
+        .filter(ProfileSnapshot.account_id.in_(account_ids))
+        .group_by(ProfileSnapshot.account_id)
+        .subquery()
+    )
+    snapshots: dict[int, ProfileSnapshot] = {}
+    for snap in (
+        db.query(ProfileSnapshot)
+        .join(
+            latest_fetch,
+            (ProfileSnapshot.account_id == latest_fetch.c.account_id)
+            & (ProfileSnapshot.fetched_at == latest_fetch.c.fetched_at),
+        )
+        .all()
+    ):
+        # Two snapshots can share a fetched_at; keep the newest row.
+        current = snapshots.get(snap.account_id)
+        if current is None or snap.id > current.id:
+            snapshots[snap.account_id] = snap
 
-            # Get latest profile snapshot for signals
-            snapshot = db.query(ProfileSnapshot).filter(
-                ProfileSnapshot.account_id == account.id
-            ).order_by(ProfileSnapshot.fetched_at.desc()).first()
+    counts: dict[tuple[int, str], int] = {
+        (account_id, item_type): count
+        for account_id, item_type, count in db.query(
+            ProfileItem.account_id, ProfileItem.item_type, func.count(ProfileItem.id)
+        )
+        .filter(
+            ProfileItem.account_id.in_(account_ids),
+            ProfileItem.item_type.in_(("post", "comment")),
+        )
+        .group_by(ProfileItem.account_id, ProfileItem.item_type)
+        .all()
+    }
 
-            # Count profile items
-            post_count = db.query(ProfileItem).filter(
-                ProfileItem.account_id == account.id,
-                ProfileItem.item_type == "post",
-            ).count()
-            comment_count = db.query(ProfileItem).filter(
-                ProfileItem.account_id == account.id,
-                ProfileItem.item_type == "comment",
-            ).count()
+    result: dict[int, tuple[str, AuthorInfo]] = {}
+    for account in accounts:
+        snapshot = snapshots.get(account.id)
+        signals = snapshot.signals_json if snapshot and snapshot.signals_json else {}
+        # signals_json is a list of signal objects when written by
+        # ProfileSummaryService; only the dict form carries account metadata.
+        if not isinstance(signals, dict):
+            signals = {}
 
-            # Parse signals from snapshot
-            signals: dict = snapshot.signals_json if snapshot and snapshot.signals_json else {}
-            account_created_at = None
-            created_at_str = signals.get("created_at")
-            if created_at_str:
-                try:
-                    account_created_at = datetime.fromisoformat(
-                        str(created_at_str).replace("Z", "+00:00")
-                    )
-                except (ValueError, AttributeError):
-                    pass
+        account_created_at = None
+        created_at_str = signals.get("created_at")
+        if created_at_str:
+            try:
+                account_created_at = datetime.fromisoformat(
+                    str(created_at_str).replace("Z", "+00:00")
+                )
+            except (ValueError, AttributeError):
+                pass
 
-            author_info = AuthorInfo(
+        post_count = counts.get((account.id, "post"), 0)
+        comment_count = counts.get((account.id, "comment"), 0)
+        result[account.id] = (
+            account.external_username,
+            AuthorInfo(
                 username=account.external_username,
                 account_created_at=account_created_at,
                 karma=signals.get("karma"),
@@ -227,12 +255,13 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
                 bio=signals.get("bio"),
                 is_verified=signals.get("is_verified"),
                 is_suspended=signals.get("is_suspended"),
-            )
+            ),
+        )
+    return result
 
-    # Get profile_item_id if it was just created (transient attr from save_lead)
-    profile_item_id = getattr(lead, "_profile_item_id", None)
-    attached = bool(getattr(lead, "_attached", False))
 
+def _lead_response(lead, author: Optional[tuple[str, AuthorInfo]]) -> LeadResponse:
+    # profile_item_id / _attached are transient attrs set by save_lead
     return LeadResponse(
         id=lead.id,
         provider_id=lead.provider_id,
@@ -242,20 +271,38 @@ def build_lead_response(lead, db: Session) -> LeadResponse:
         title=lead.title,
         body_text=lead.body_text,
         author_account_id=lead.author_account_id,
-        author_username=author_username,
-        author_info=author_info,
+        author_username=author[0] if author else None,
+        author_info=author[1] if author else None,
         status=lead.status,
         score=None,  # TODO: Add lead scoring
         lead_source=lead.lead_source,
-        profile_item_id=profile_item_id,
-        attached=attached,
+        profile_item_id=getattr(lead, "_profile_item_id", None),
+        attached=bool(getattr(lead, "_attached", False)),
         post_created_at=_ensure_utc(lead.post_created_at),
         created_at=_ensure_utc(lead.created_at),
         # Analysis fields
         latest_analysis_id=lead.latest_analysis_id,
         analysis_recommendation=lead.analysis_recommendation,
         analysis_confidence=lead.analysis_confidence,
+        priority=lead.priority,
+        compatibility_score=lead.compatibility_score,
     )
+
+
+def build_lead_responses(leads, db: Session) -> list[LeadResponse]:
+    """Build LeadResponses for a page of leads with batched author lookups."""
+    authors = _author_infos(
+        db, {lead.author_account_id for lead in leads if lead.author_account_id}
+    )
+    return [
+        _lead_response(lead, authors.get(lead.author_account_id))
+        for lead in leads
+    ]
+
+
+def build_lead_response(lead, db: Session) -> LeadResponse:
+    """Build a single LeadResponse with author info if available."""
+    return build_lead_responses([lead], db)[0]
 
 
 # =============================================================================
@@ -335,13 +382,29 @@ async def list_leads(
     db: Session = Depends(get_db),
     provider_id: str | None = Query(default=None, description="Filter by provider"),
     source_location: str | None = Query(default=None, description="Filter by source location"),
-    status: str | None = Query(default=None, description="Filter by status"),
+    status: str | None = Query(
+        default=None, description="Filter by status (expired leads are listed only when requested)"
+    ),
     lead_source: str | None = Query(default=None, description="Filter by lead source (manual, scout_watch)"),
     search: str | None = Query(default=None, description="Search in title, body, author, subreddit"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
     limit: int = Query(default=20, ge=1, le=100, description="Maximum results"),
+    sort: str = Query(
+        default="priority", description="Order: 'priority' (tier, then newest) or 'newest'"
+    ),
+    posted_within_days: int | None = Query(
+        default=None,
+        ge=1,
+        description="Only leads posted in the last N days (post date, else save date); omit for all",
+    ),
 ):
     """List leads with optional filters and search."""
+    if sort not in VALID_SORTS:
+        # `status` is shadowed by the query parameter in this function.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sort: {sort}. Must be one of {sorted(VALID_SORTS)}",
+        )
     leads = leads_service.list_leads(
         provider_id=provider_id,
         source_location=source_location,
@@ -350,6 +413,8 @@ async def list_leads(
         search=search,
         offset=offset,
         limit=limit,
+        sort=sort,
+        posted_within_days=posted_within_days,
     )
 
     total = leads_service.count_leads(
@@ -358,10 +423,11 @@ async def list_leads(
         status=status,
         lead_source=lead_source,
         search=search,
+        posted_within_days=posted_within_days,
     )
 
     return ListLeadsResponse(
-        leads=[build_lead_response(lead, db) for lead in leads],
+        leads=build_lead_responses(leads, db),
         total=total,
     )
 
