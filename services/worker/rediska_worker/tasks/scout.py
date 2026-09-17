@@ -39,6 +39,36 @@ def _should_promote(verdict: dict, min_confidence: float) -> bool:
 # =============================================================================
 
 
+def _select_summary_items(items: list[Any]) -> tuple[list[Any], list[Any]]:
+    """Pick the posts and comments to summarise from an author's stored items.
+
+    Newest first (unknown dates last), identical texts collapsed (personals
+    posters repost the same ad daily), capped at the profile fetch limits.
+    Returns (posts, comments).
+    """
+    def _key(item: Any) -> tuple[int, float, int]:
+        ts = getattr(item, "item_created_at", None)
+        return (0 if ts is not None else 1, -(ts.timestamp() if ts is not None else 0.0), -int(getattr(item, "id", 0) or 0))
+
+    posts: list[Any] = []
+    comments: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for item in sorted(items, key=_key):
+        text = (getattr(item, "text_content", None) or "").strip()
+        if not text:
+            continue
+        kind = getattr(item, "item_type", None)
+        sig = (kind, " ".join(text.split()).lower())
+        if sig in seen:
+            continue
+        seen.add(sig)
+        if kind == "post" and len(posts) < MAX_PROFILE_POSTS:
+            posts.append(item)
+        elif kind == "comment" and len(comments) < MAX_PROFILE_COMMENTS:
+            comments.append(item)
+    return posts, comments
+
+
 def _now_utc() -> datetime:
     """Get current UTC time."""
     return datetime.now(timezone.utc)
@@ -772,31 +802,45 @@ def analyze_and_decide(
                     db=db,
                 )
 
-                # Convert ProviderProfileItem to ProfileItem-like objects for summaries
-                # The summary services expect ProfileItem objects with item_type and text_content
-                class ProfileItemLike:
-                    def __init__(self, item_type: str, text_content: str, item_created_at=None):
-                        self.item_type = item_type
-                        self.text_content = text_content
-                        self.item_created_at = item_created_at
-
-                posts_for_summary = [
-                    ProfileItemLike("post", p.body_text or p.title or "", p.created_at)
-                    for p in user_posts
-                    if p.body_text or p.title
-                ]
-
-                comments_for_summary = [
-                    ProfileItemLike("comment", c.body_text or "", c.created_at)
-                    for c in user_comments
-                    if c.body_text
-                ]
+                # Summaries are built from everything stored for this author
+                # (step 2b): the discovery post with its resolved listing body,
+                # this run's fetch, and items kept from earlier sightings or
+                # analyze_reddit_user runs. The fresh Reddit listing alone is
+                # often empty for personals posters (removed posts drop out of
+                # the public history), which used to yield "No posts available"
+                # even though the post itself was right there.
+                stored_items = (
+                    db.query(ProfileItem)
+                    .filter(ProfileItem.account_id == account.id)
+                    .all()
+                )
+                posts_for_summary, comments_for_summary = _select_summary_items(stored_items)
+                logger.info(
+                    f"Summary inputs for u/{author_username}: "
+                    f"{len(posts_for_summary)} posts, {len(comments_for_summary)} comments "
+                    f"(fresh fetch: {len(user_posts)} posts, {len(user_comments)} comments)"
+                )
 
                 # Run summaries in parallel
                 interests_result, character_result = await asyncio.gather(
                     interests_service.summarize(posts_for_summary),
                     character_service.summarize(comments_for_summary),
                 )
+
+                # One automatic retry for a failed summary (malformed model
+                # output is nondeterministic), mirroring the dimension agents.
+                if not interests_result.success and posts_for_summary:
+                    logger.warning(
+                        f"Interests summary failed for u/{author_username} "
+                        f"({interests_result.error}); retrying once"
+                    )
+                    interests_result = await interests_service.summarize(posts_for_summary)
+                if not character_result.success and comments_for_summary:
+                    logger.warning(
+                        f"Character summary failed for u/{author_username} "
+                        f"({character_result.error}); retrying once"
+                    )
+                    character_result = await character_service.summarize(comments_for_summary)
 
                 return interests_result, character_result
 
@@ -816,6 +860,11 @@ def analyze_and_decide(
                 f"interests_success={interests_result.success}, "
                 f"character_success={character_result.success}"
             )
+            if not interests_result.success or not character_result.success:
+                logger.error(
+                    f"Summary failure for u/{author_username}: "
+                    f"interests={interests_result.error!r} character={character_result.error!r}"
+                )
 
         except Exception as e:
             logger.error(f"Failed to generate summaries for u/{author_username}: {e}")
