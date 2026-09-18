@@ -165,6 +165,36 @@ docker compose exec -T rediska-redis redis-cli del rediska:inference:inflight
 Avoid rebuilding while a re-analysis batch is running (see `reanalyze-scout-posts.md`):
 in-flight tasks die on the time limit and must be re-queued.
 
+**Only `del` the key right after the worker was recreated.** Deleting it while analyses are
+running lets one extra call overlap (self-heals via clamp + 429/503 retry, but avoid it).
+`INFERENCE_MAX_CONCURRENT` is 2 in the live `.env` (2026-09-18), so a counter of 2 is normal.
+
+## Waiting for the worker to go idle (don't kill analyses)
+
+Since the expanded scout queries (2026-09-18) the worker is almost always mid-analysis. Build
+first (harmless), recreate core/web immediately, then recreate worker + beat only when no
+LLM task is in flight. Run it with `run_in_background` — it took ~19 min once:
+
+```bash
+docker compose build rediska-core rediska-worker rediska-web && \
+docker compose up -d rediska-core rediska-web
+for i in $(seq 1 90); do
+  n=$(docker compose exec -T rediska-worker celery -A rediska_worker.celery_app inspect active 2>/dev/null \
+      | grep -c "'name': 'scout\.\|'name': 'multi_agent\|'name': 'discovery\.\|'name': 'evaluation\.")
+  [ "$n" = "0" ] && break; sleep 20
+done
+[ "$n" = "0" ] && docker compose up -d rediska-worker rediska-beat && \
+  docker compose exec -T rediska-redis redis-cli del rediska:inference:inflight
+```
+
+- **Never print raw `inspect active` output**: it dumps each task's full `post_data`
+  (post titles and bodies). Pipe it through `grep -c`/`grep -o "'name': '...'"`.
+- `docker compose up -d` is a **no-op when the rebuilt image is identical** (e.g. only docs
+  or `scripts/` changed — they are not in any image). "Up 2 hours" after a rebuild usually
+  means nothing needed recreating, not that the rebuild failed.
+- `rediska-core` has a source bind mount with reload, so core-only Python edits are live
+  before any rebuild; web and worker are not.
+
 ## Notes
 
 - Plain `docker compose build` is normally sufficient — source is `COPY`'d, so a
