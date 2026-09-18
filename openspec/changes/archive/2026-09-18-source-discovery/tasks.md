@@ -62,5 +62,5 @@
 - [x] 8.1 `DISCOVERY_MIN_QUALIFIED_AUTHORS`, `DISCOVERY_TRIAL_SAMPLE`, `DISCOVERY_WINDOW_DAYS` in `config.py`, `.env.example`, and the `docker-compose.yml` environment blocks for core and worker
 - [x] 8.2 Update CLAUDE.md (architecture section, tables, Celery tasks, env vars, pages) and README
 - [x] 8.3 Full core and worker suites green in Docker
-- [ ] 8.4 Deploy mining plus read-only list first; user reviews the first candidate list for sanity before trials are enabled
-- [ ] 8.5 Sync delta specs into `openspec/specs/`, diff the synced specs, archive
+- [x] 8.4 Deploy mining plus read-only list first; user reviews the first candidate list for sanity before trials are enabled
+- [x] 8.5 Sync delta specs into `openspec/specs/`, diff the synced specs, archive

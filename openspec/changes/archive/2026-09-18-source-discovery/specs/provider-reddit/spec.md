@@ -2,7 +2,7 @@
 
 ### Requirement: Provider adapter exposes location search and location info
 
-The `ProviderAdapter` contract SHALL include `search_locations(query, limit)` returning normalized location summaries (name, title, description, member count, NSFW flag, created date) and `get_location_info(name)` returning the same summary for one location or `None` when it does not exist, is private, or is banned. The Reddit adapter SHALL implement both against the subreddit search and subreddit about endpoints using the identity's existing OAuth token, SHALL pace them through the same rate limiter and `X-Ratelimit-*` handling as other Reddit calls, and SHALL NOT filter results by NSFW status. Provider-specific naming SHALL stay inside the Reddit module; the core refers to "locations".
+The `ProviderAdapter` contract SHALL include `search_locations(query, limit)` returning normalized location summaries (name, title, description, member count, NSFW flag, created date) and `get_location_info(name)` returning the same summary plus the community's rules for one location, or `None` when it does not exist, is private, or is banned. The Reddit adapter SHALL implement both against the subreddit search, subreddit about, and subreddit rules endpoints (a rules fetch failure yields an empty rule list, not a failed lookup) using the identity's existing OAuth token, SHALL pace them through the same rate limiter and `X-Ratelimit-*` handling as other Reddit calls, and SHALL NOT filter results by NSFW status. Provider-specific naming SHALL stay inside the Reddit module; the core refers to "locations".
 
 #### Scenario: Keyword search returns normalized locations
 
