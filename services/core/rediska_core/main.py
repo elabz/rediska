@@ -25,6 +25,7 @@ from rediska_core.api.routes import accounts as accounts_routes
 from rediska_core.api.routes import agent_prompts as agent_prompts_routes
 from rediska_core.api.routes import attachment as attachment_routes
 from rediska_core.api.routes import audit as audit_routes
+from rediska_core.api.routes import ban_list as ban_list_routes
 from rediska_core.api.routes import auth as auth_routes
 from rediska_core.api.routes import conversation as conversation_routes
 from rediska_core.api.routes import conversation_lists as conversation_lists_routes
@@ -79,6 +80,7 @@ app.include_router(accounts_routes.router)
 app.include_router(agent_prompts_routes.router)
 app.include_router(attachment_routes.router)
 app.include_router(audit_routes.router)
+app.include_router(ban_list_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(conversation_routes.router)
 app.include_router(conversation_lists_routes.router)

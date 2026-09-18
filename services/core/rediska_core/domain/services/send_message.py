@@ -37,6 +37,7 @@ from rediska_core.domain.models import (
     Message,
     ProviderCredential,
 )
+from rediska_core.domain.services.ban_list import ensure_not_banned
 from rediska_core.domain.services.jobs import JobService
 
 
@@ -182,6 +183,7 @@ class SendMessageService:
         Raises:
             ConversationNotFoundError: If conversation doesn't exist.
             CounterpartStatusError: If counterpart is deleted/suspended.
+            CounterpartBannedError: If counterpart has an active ban.
             EmptyMessageError: If message body is empty.
         """
         # Validate body is not empty
@@ -217,6 +219,9 @@ class SendMessageService:
             raise CounterpartStatusError(
                 f"Cannot send to counterpart with status '{counterpart.remote_status}'"
             )
+
+        # A ban most often lands mid-conversation, so it is checked on every send
+        ensure_not_banned(self.db, conversation.provider_id, counterpart.external_username)
 
         return SendValidationResult(
             conversation_id=conversation.id,
@@ -520,6 +525,9 @@ class SendMessageService:
 
         Returns:
             RetryResult with new job ID, or None if retry not allowed.
+
+        Raises:
+            CounterpartBannedError: If the counterpart has an active ban.
         """
         message = self.db.query(Message).filter(Message.id == message_id).first()
 
@@ -528,11 +536,6 @@ class SendMessageService:
 
         if message.remote_visibility not in ("unknown", "send_failed"):
             return None  # Already sent or known status
-
-        # Reset to unknown for retry
-        message.remote_visibility = "unknown"
-        message.send_error = None
-        self.db.flush()
 
         # Get conversation for identity info
         conversation = (
@@ -543,6 +546,15 @@ class SendMessageService:
 
         if not conversation:
             return None
+
+        counterpart = self.db.get(ExternalAccount, conversation.counterpart_account_id)
+        if counterpart is not None:
+            ensure_not_banned(self.db, conversation.provider_id, counterpart.external_username)
+
+        # Reset to unknown for retry
+        message.remote_visibility = "unknown"
+        message.send_error = None
+        self.db.flush()
 
         # Create new job for retry
         job = self.job_service.create_job(

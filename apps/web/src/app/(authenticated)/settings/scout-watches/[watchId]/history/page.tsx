@@ -28,6 +28,7 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { AnalyzeUserButton } from '@/components/AnalyzeUserButton';
 import { ContactButton } from '@/components/ContactButton';
+import { BanControl } from '@/components/ban/BanControl';
 import {
   Collapsible,
   CollapsibleContent,
@@ -609,6 +610,12 @@ export default function ScoutWatchHistoryPage() {
                                           <ContactButton
                                             username={post.post_author}
                                             variant="icon"
+                                          />
+                                          {/* No per-row status lookup; banning is idempotent. */}
+                                          <BanControl
+                                            username={post.post_author}
+                                            variant="compact"
+                                            assumeNotBanned
                                           />
                                         </>
                                       )}

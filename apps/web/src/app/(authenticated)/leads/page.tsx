@@ -48,6 +48,7 @@ import {
 import { EmptyState } from '@/components';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { NeedsReviewQueue } from './components/NeedsReviewQueue';
+import { errorMessage } from '@/lib/banList';
 
 interface AuthorInfo {
   username: string;
@@ -667,8 +668,8 @@ export default function LeadsPage() {
       });
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to initiate conversation');
+        const data = await response.json().catch(() => null);
+        throw new Error(errorMessage(data, 'Failed to initiate conversation'));
       }
 
       const conversation = await response.json();

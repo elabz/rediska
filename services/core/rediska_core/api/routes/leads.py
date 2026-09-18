@@ -397,6 +397,9 @@ async def list_leads(
         ge=1,
         description="Only leads posted in the last N days (post date, else save date); omit for all",
     ),
+    include_banned: bool = Query(
+        default=False, description="Also list leads of authors on the ban list"
+    ),
 ):
     """List leads with optional filters and search."""
     if sort not in VALID_SORTS:
@@ -415,6 +418,7 @@ async def list_leads(
         limit=limit,
         sort=sort,
         posted_within_days=posted_within_days,
+        include_banned=include_banned,
     )
 
     total = leads_service.count_leads(
@@ -424,6 +428,7 @@ async def list_leads(
         lead_source=lead_source,
         search=search,
         posted_within_days=posted_within_days,
+        include_banned=include_banned,
     )
 
     return ListLeadsResponse(

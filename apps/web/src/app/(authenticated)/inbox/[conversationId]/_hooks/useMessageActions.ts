@@ -3,6 +3,7 @@
 import { useCallback, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { Message } from '../_types';
+import { errorMessage } from '@/lib/banList';
 
 export interface UseMessageActionsResult {
   deletingMessages: Set<number>;
@@ -82,7 +83,7 @@ export function useMessageActions({
       );
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.detail || 'Failed to resend message');
+        throw new Error(errorMessage(data, 'Failed to resend message'));
       }
       setMessages(prev => prev.map(m =>
         m.id === messageId

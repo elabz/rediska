@@ -45,6 +45,7 @@ from rediska_core.api.schemas.message import (
     SyncJobStatusResponse,
 )
 from rediska_core.domain.models import Attachment, Conversation, ExternalAccount, Identity, Message
+from rediska_core.domain.services.ban_list import CounterpartBannedError, ensure_not_banned
 from rediska_core.domain.services.send_message import (
     ConversationNotFoundError,
     CounterpartStatusError,
@@ -57,6 +58,11 @@ from rediska_core.domain.services.send_message import (
 )
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+def _banned_http(exc: CounterpartBannedError) -> HTTPException:
+    """409 `counterpart_banned`; the UI renders it as a banner with a Lift link."""
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail())
 
 
 def get_send_message_service(db: DBSession) -> SendMessageService:
@@ -991,6 +997,10 @@ async def send_message(
             detail=str(e),
         )
 
+    except CounterpartBannedError as e:
+        db.rollback()
+        raise _banned_http(e)
+
     except CounterpartStatusError as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1065,7 +1075,11 @@ async def retry_message(
     from datetime import datetime, timezone
     from celery import Celery
 
-    result = send_service.retry_failed_send(message_id=message_id)
+    try:
+        result = send_service.retry_failed_send(message_id=message_id)
+    except CounterpartBannedError as e:
+        db.rollback()
+        raise _banned_http(e)
 
     if result is None:
         raise HTTPException(
@@ -2072,6 +2086,11 @@ async def initiate_conversation_from_lead(
 
     author_username = author_external_account.external_username
 
+    try:
+        ensure_not_banned(db, lead.provider_id, author_username)
+    except CounterpartBannedError as e:
+        raise _banned_http(e)
+
     # Get the default identity
     identity = (
         db.query(Identity)
@@ -2187,6 +2206,12 @@ async def initiate_conversation_by_username(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username must not be empty",
         )
+
+    # Before any row is created: a banned username gets no account or thread
+    try:
+        ensure_not_banned(db, provider_id, username)
+    except CounterpartBannedError as e:
+        raise _banned_http(e)
 
     # Look up or create the ExternalAccount
     external_account = (

@@ -94,7 +94,7 @@ rediska/
         infra/                 # db engines/sessions
         infrastructure/        # crypto (Fernet), elasticsearch, embeddings, rate_limiter
         observability/
-      alembic/versions/        # head: 020_add_source_discovery
+      alembic/versions/        # head: 021_extend_do_not_contact
 
     worker/                    # Celery worker (imports core)
       rediska_worker/
@@ -259,6 +259,16 @@ Proposes new lead sources from data already stored; a human decides everything (
 - **Preview search**: the Discover tab opens `/browse?location=&q=&sort=new&t=month` in a new tab with the watches' longest query (Browse reads these URL params on load), before any trial or watch
 - **Watch yield**: `GET /scout-watches` carries `yield_30d` per watch (posts, per-recommendation counts, leads created/contacted/engaged) from batched queries
 
+### Contact Ban List
+One ban list (`do_not_contact`) that every outreach path honours (`domain/services/ban_list.py`, `/ban-list` API, Banned tab on `/directories`):
+- **Single predicate**: `is_banned()` / `active_ban()` / `ensure_not_banned()` for one username, `banned_usernames()` for a batch, `banned_account_ids_select()` / `username_not_banned()` as list-exclusion subqueries. Usernames are stored lower-cased and matched case-insensitively (`u/` prefix stripped); only `status='active'` rows block
+- **Enforcement** (refuse with HTTP 409 `{"detail": {"code": "counterpart_banned", ...}}`): both initiation routes (before any account/conversation row is created), `SendMessageService.validate_send` (so sends in an existing conversation), `retry_failed_send`, and the ops job retry. `message.send_manual` re-checks immediately before the provider call and marks the message `send_failed` / `counterpart_banned` with no provider call (queued-then-banned race). Readers: `scout_watch.check_author_verdict` (skip `do_not_contact`) and `source_discovery.qualified_account_ids` (never qualifies)
+- **Lifecycle**: rows are never deleted. `source` manual / copy_ring / import, required `reason` (UI presets: scam, copy_ring, hostile, asked_not_to_contact, other), `notes`, optional `cluster_id`. Lift sets `lifted` + `lifted_at`; re-banning reactivates the same row and appends to notes. Create / bulk create / lift / suggestion dismiss write `audit_log` (`ban.create`, `ban.bulk_create` — one entry per batch, `ban.lift`, `ban.suggestion_dismiss`)
+- **Consequences**: an active ban moves the author's `new` / `saved` / `contact_queued` leads to `ignored`, remembering the prior status in `lead_posts.status_before_ban`; lift restores it unless the user changed the status since. `contacted` leads, analyses, evaluations, conversations and messages are never touched. `GET /leads` and the needs-review queue exclude banned authors unless `include_banned=true`. Incoming messages from a banned account still sync and display verbatim, under a banner
+- **API**: `GET /ban-list` (keyset cursor; `status`, `source`, `q`), `GET /ban-list/status?username=`, `POST /ban-list`, `POST /ban-list/{id}/lift`, `POST /ban-list/bulk {cluster_id | usernames, reason, exclude_usernames}`, `GET /ban-list/suggestions`, `POST /ban-list/suggestions/dismiss`. Static paths precede `/{id}`
+- **Suggestions, never auto-bans**: authors of copy clusters whose effective kind is `ring_suspect` / `confirmed_ring`, not banned and not dismissed, grouped per cluster with the earliest poster marked (the bulk dialog excludes them by default). A read-only query over the `post-fingerprint-dedupe` tables; returns `available: false` and no items while those tables do not exist
+- **UI**: `components/ban/` — `BanControl` (Ban / Lift; self-loading via `useBanStatus`, or `assumeNotBanned` in list rows to skip a status lookup per row), `BanDialog`, `BannedBanner`, `BannedView`, `BanSuggestions`. Mounted on the conversation header (banner + disabled compose with Lift link), profile page, lead detail, scout history posts and needs-review items
+
 ### External Listing Resolution
 Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `selftext` is empty and whose URL points to an external listing page. `domain/services/external_listing.py` fetches such pages and substitutes the listing's About text as the post body, so browse cards and the LLM analysis pipeline see real content:
 - Registry of supported hosts (initially `weheartbdsm.com/listings/<id>`) maps URL pattern → parser; unregistered hosts are never fetched (no generic scraping)
@@ -280,7 +290,7 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 | `/inbox`, `/inbox/[conversationId]` | Conversation list + thread (drafts, search, lists/labels, star, attachments, remote-delete/scrub, profile panel) |
 | `/browse` | Browse subreddit feeds (sort/time/query presets), save leads |
 | `/leads`, `/leads/[id]` | Lead list (priority-first, expired hidden, priority/compatibility badges) + **Needs review** tab (cross-watch triage queue: promote / dismiss / evaluate); detail with multi-dimension AI analysis panels |
-| `/directories` | Analyzed / Contacted / Engaged / Starred contact directories |
+| `/directories` | Analyzed / Contacted / Engaged / Starred contact directories + **Banned** tab (ban list: search, source/status filters, lift, links to profile and leads; ban by username; copy-ring ban suggestions) |
 | `/evaluations` | Human evaluation of agent decisions: review queue (contradictions first, stratified), dashboard (agreement per dimension / prompt version, confusion matrix, tags, trend, missing info), JSONL export |
 | `/search` | Global hybrid search across messages/leads/profiles/conversations |
 | `/profile/[accountId]` | Account profile: snapshot, signals, risk flags, posts/comments/images |
@@ -293,7 +303,7 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 
 ## Key Database Tables
 
-Head migration: `020_add_source_discovery`.
+Head migration: `021_extend_do_not_contact`.
 
 | Table | Purpose |
 |-------|---------|
@@ -306,7 +316,7 @@ Head migration: `020_add_source_discovery`.
 | `conversation_lists`, `conversation_list_members` | User-defined conversation lists (labels) |
 | `messages` | Messages (threading fields, `send_failed` visibility, `send_error`) |
 | `attachments` | Local file references (sha256, mime, dimensions) |
-| `lead_posts` | Saved posts; recommendation/confidence, summaries, `lead_source` (manual/scout_watch), `priority` (high/medium/low) + `compatibility_score`, status incl. `expired` |
+| `lead_posts` | Saved posts; recommendation/confidence, summaries, `lead_source` (manual/scout_watch), `priority` (high/medium/low) + `compatibility_score`, status incl. `expired`; `status_before_ban` remembers the status a ban moved to `ignored` |
 | `lead_analyses` | Multi-agent analysis results (per-dimension JSON + meta) |
 | `analysis_dimensions` | Per-dimension execution tracking (raw responses, model info) |
 | `agent_prompts` | Versioned LLM agent prompts |
@@ -320,7 +330,7 @@ Head migration: `020_add_source_discovery`.
 | `profile_snapshots` | LLM-generated profile summaries + signals/risk flags |
 | `profile_items` | Public content items (posts/comments/images) per account |
 | `provider_credentials` | Encrypted OAuth tokens (Fernet) |
-| `do_not_contact` | Safety blocklist |
+| `do_not_contact` | Contact ban list: lower-cased username, `reason`, `source` (manual/copy_ring/import), `status` (active/lifted), `notes`, `cluster_id`, `created_by`, `lifted_at`; never deleted; only active rows block outreach |
 | `audit_log` | Append-only action log (actor: user/system/agent, identity-aware) |
 | `jobs` | Celery task idempotency ledger (incl. `cancelled`) |
 
@@ -486,6 +496,7 @@ Do NOT test against the live app/data (see Agent Restrictions) — use unit/inte
 - Passwords hashed with Argon2; session cookies HttpOnly + Secure
 - Audit all mutating actions
 - No autosend — all sends require explicit user action
+- Ban list enforced at every outreach step (initiate, send, retry, worker pre-send) through one predicate; bans are only ever created by a user action
 
 ---
 

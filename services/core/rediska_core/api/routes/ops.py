@@ -324,6 +324,24 @@ async def retry_job(
                         detail="Cannot retry job: associated message was deleted by user",
                     )
 
+        # Sends to a banned counterpart are refused here too (the worker
+        # re-checks before the provider call either way).
+        if job.job_type in ("send_manual", "message.send_manual") and job.payload_json:
+            from rediska_core.domain.models import Conversation, ExternalAccount
+            from rediska_core.domain.services.ban_list import CounterpartBannedError, ensure_not_banned
+
+            conversation = db.get(Conversation, job.payload_json.get("conversation_id"))
+            counterpart = (
+                db.get(ExternalAccount, conversation.counterpart_account_id)
+                if conversation
+                else None
+            )
+            if counterpart is not None:
+                try:
+                    ensure_not_banned(db, conversation.provider_id, counterpart.external_username)
+                except CounterpartBannedError as e:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=e.detail())
+
         # Save payload before requeue (requeue may clear some fields)
         job_payload = job.payload_json
         job_type = job.job_type

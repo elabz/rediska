@@ -679,6 +679,15 @@ class LeadPost(Base):
         BigInteger, ForeignKey("scout_watches.id"), nullable=True
     )
 
+    # Status the lead had when its author was banned; restored on lift.
+    status_before_ban: Mapped[Optional[str]] = mapped_column(
+        Enum(
+            "new", "saved", "ignored", "contact_queued", "contacted", "expired",
+            name="lead_post_status_before_ban_enum"
+        ),
+        nullable=True,
+    )
+
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
@@ -829,14 +838,33 @@ class DoNotContact(Base):
     provider_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("providers.provider_id"), nullable=False
     )
+    # Always stored lower-cased; matched case-insensitively (ban_list.py).
     external_username: Mapped[str] = mapped_column(String(128), nullable=False)
     reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source: Mapped[str] = mapped_column(
+        Enum("manual", "copy_ring", "import", name="dnc_source_enum"),
+        nullable=False,
+        default="manual",
+    )
+    # Rows are never deleted: lifting keeps history, re-banning reactivates.
+    status: Mapped[str] = mapped_column(
+        Enum("active", "lifted", name="dnc_status_enum"),
+        nullable=False,
+        default="active",
+    )
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Copy cluster the ban came from (post-fingerprint-dedupe); no FK so the
+    # ban list stands alone when the copy tables are absent.
+    cluster_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
     )
+    lifted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("provider_id", "external_username", name="uq_dnc"),
+        Index("idx_dnc_status", "provider_id", "status"),
     )
 
     # Relationships

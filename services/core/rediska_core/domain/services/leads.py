@@ -339,6 +339,7 @@ class LeadsService:
         lead_source: Optional[str] = None,
         search: Optional[str] = None,
         posted_within_days: Optional[int] = None,
+        include_banned: bool = False,
     ):
         """Build a query for leads with filters.
 
@@ -350,6 +351,7 @@ class LeadsService:
             search: Search term for title, body, source_location (optional).
             posted_within_days: Only leads posted in the last N days; leads
                 without a post date fall back to when they were saved.
+            include_banned: Also list leads of authors on the ban list.
 
         Returns:
             SQLAlchemy query object.
@@ -374,6 +376,11 @@ class LeadsService:
 
         if lead_source:
             query = query.filter(LeadPost.lead_source == lead_source)
+
+        if not include_banned:
+            from rediska_core.domain.services.ban_list import exclude_banned_authors
+
+            query = exclude_banned_authors(query, LeadPost.author_account_id)
 
         if posted_within_days:
             since = datetime.utcnow() - timedelta(days=posted_within_days)
@@ -410,6 +417,7 @@ class LeadsService:
         limit: int = 20,
         sort: str = SORT_PRIORITY,
         posted_within_days: Optional[int] = None,
+        include_banned: bool = False,
     ) -> list[LeadPost]:
         """List leads with optional filters.
 
@@ -433,6 +441,7 @@ class LeadsService:
             lead_source=lead_source,
             search=search,
             posted_within_days=posted_within_days,
+            include_banned=include_banned,
         )
 
         if sort == SORT_NEWEST:
@@ -458,6 +467,7 @@ class LeadsService:
         lead_source: Optional[str] = None,
         search: Optional[str] = None,
         posted_within_days: Optional[int] = None,
+        include_banned: bool = False,
     ) -> int:
         """Count leads with optional filters.
 
@@ -478,6 +488,7 @@ class LeadsService:
             lead_source=lead_source,
             search=search,
             posted_within_days=posted_within_days,
+            include_banned=include_banned,
         )
 
         return query.count()

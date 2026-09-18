@@ -183,6 +183,24 @@ def send_manual(self, payload: dict[str, Any]) -> dict:
                 "message_id": message_id,
             }
 
+        # Re-check the ban list immediately before the provider call: the
+        # counterpart may have been banned after this message was queued.
+        from rediska_core.domain.services.ban_list import COUNTERPART_BANNED, active_ban
+
+        if active_ban(session, provider_id, counterpart.external_username) is not None:
+            send_service.handle_send_failure(
+                job_id=self.request.id if self.request else 0,
+                message_id=message_id,
+                error=COUNTERPART_BANNED,
+                is_ambiguous=False,
+            )
+            session.commit()
+            return {
+                "status": "refused",
+                "error": COUNTERPART_BANNED,
+                "message_id": message_id,
+            }
+
         # Send the message
         # Note: Reddit API requires non-empty subject; use single space as minimal subject
         result = asyncio.run(adapter.send_message(

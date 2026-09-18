@@ -547,7 +547,7 @@ class ScoutWatchService:
     # =========================================================================
 
     @staticmethod
-    def _needs_review_filter(watch_id: Optional[int] = None):
+    def _needs_review_filter(watch_id: Optional[int] = None, include_banned: bool = False):
         """Analysed needs_review posts nobody has triaged yet."""
         conditions = [
             ScoutWatchPost.analysis_status == "analyzed",
@@ -560,6 +560,10 @@ class ScoutWatchService:
         ]
         if watch_id is not None:
             conditions.append(ScoutWatchPost.watch_id == watch_id)
+        if not include_banned:
+            from rediska_core.domain.services.ban_list import username_not_banned
+
+            conditions.append(username_not_banned(ScoutWatchPost.post_author))
         return and_(*conditions)
 
     @staticmethod
@@ -577,6 +581,7 @@ class ScoutWatchService:
         cursor: Optional[str] = None,
         limit: int = 25,
         watch_id: Optional[int] = None,
+        include_banned: bool = False,
     ) -> tuple[list[ScoutWatchPost], Optional[str]]:
         """Cross-watch needs-review queue, newest first (keyset-paginated).
 
@@ -588,7 +593,9 @@ class ScoutWatchService:
         Returns:
             (posts, next_cursor) — next_cursor is None on the last page.
         """
-        query = self.db.query(ScoutWatchPost).filter(self._needs_review_filter(watch_id))
+        query = self.db.query(ScoutWatchPost).filter(
+            self._needs_review_filter(watch_id, include_banned)
+        )
         if cursor:
             seen, post_id = self.decode_queue_cursor(cursor)
             query = query.filter(
@@ -608,11 +615,13 @@ class ScoutWatchService:
             next_cursor = self.encode_queue_cursor(posts[-1])
         return posts, next_cursor
 
-    def count_needs_review(self, watch_id: Optional[int] = None) -> int:
+    def count_needs_review(
+        self, watch_id: Optional[int] = None, include_banned: bool = False
+    ) -> int:
         """Size of the needs-review queue."""
         return (
             self.db.query(ScoutWatchPost)
-            .filter(self._needs_review_filter(watch_id))
+            .filter(self._needs_review_filter(watch_id, include_banned))
             .count()
         )
 
@@ -916,18 +925,10 @@ class ScoutWatchService:
         Returns:
             A skip reason code (see SKIP_REASON_TEXT) or None to proceed.
         """
-        from rediska_core.domain.models import DoNotContact
+        from rediska_core.domain.services.ban_list import is_banned
         from rediska_core.domain.services.leads import INACTIVE_STATUSES, LeadsService
 
-        on_dnc = (
-            self.db.query(DoNotContact)
-            .filter(
-                DoNotContact.provider_id == provider_id,
-                DoNotContact.external_username == username,
-            )
-            .first()
-        )
-        if on_dnc:
+        if is_banned(self.db, provider_id, username):
             return SKIP_DO_NOT_CONTACT
 
         account = (

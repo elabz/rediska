@@ -188,13 +188,14 @@ async def list_needs_review(
     cursor: Optional[str] = Query(default=None, description="Cursor from a previous page"),
     limit: int = Query(default=25, ge=1, le=100),
     watch_id: Optional[int] = Query(default=None, description="Restrict to one watch"),
+    include_banned: bool = Query(default=False, description="Include banned authors"),
 ) -> NeedsReviewListResponse:
     """Scout posts analysed as needs_review that nobody has triaged, newest first."""
     service = ScoutWatchService(db)
 
     try:
         posts, next_cursor = service.list_needs_review(
-            cursor=cursor, limit=limit, watch_id=watch_id
+            cursor=cursor, limit=limit, watch_id=watch_id, include_banned=include_banned
         )
     except ValueError:
         raise HTTPException(
@@ -221,7 +222,7 @@ async def list_needs_review(
 
     return NeedsReviewListResponse(
         items=items,
-        total=service.count_needs_review(watch_id=watch_id),
+        total=service.count_needs_review(watch_id=watch_id, include_banned=include_banned),
         next_cursor=next_cursor,
     )
 

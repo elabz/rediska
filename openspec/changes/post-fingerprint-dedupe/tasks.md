@@ -3,6 +3,7 @@
 - [ ] 1.1 Alembic revision (next free number): `post_fingerprints`, `post_fingerprint_bands`, `copy_clusters`, `copy_cluster_members`, `copy_cluster_suppressions` with indexes on `band_hash`, `external_post_id`, `author_username`, `exact_hash`
 - [ ] 1.2 SQLAlchemy models
 - [ ] 1.3 Settings `COPY_MIN_CHARS`, `COPY_JACCARD_THRESHOLD`, `COPY_RING_WINDOW_DAYS`, `COPY_SKIP_RING_SUSPECTS` in `config.py`, `.env.example`, and the core/worker/beat compose environment blocks
+- [ ] 1.4 `copy_cluster_members.ban_suggestion_dismissed_at` (nullable DATETIME), and check `BanListService.suggestions()` / `cluster_usernames()` / `dismiss_suggestion()` (contact-ban-list) against the real column names — they assume `copy_clusters(kind, decision)`, `copy_cluster_members(cluster_id, fingerprint_id)`, `post_fingerprints(provider_id, author_username, posted_at, first_seen_at)`; add a test with the tables present
 
 ## 2. Fingerprint core
 
@@ -31,6 +32,7 @@
 - [ ] 5.2 Mount on lead cards, lead detail, scout history posts, needs-review items, profile page
 - [ ] 5.3 Copies tab on `/leads` with filters, decision buttons, empty and error states
 - [ ] 5.4 Vitest for badge, drawer, tab
+- [ ] 5.5 Mount `BanControl` (from `contact-ban-list`) per author in the cluster drawer, and a bulk "Ban cluster" action via `POST /ban-list/bulk {cluster_id}`
 
 ## 6. Backfill and rollout
 

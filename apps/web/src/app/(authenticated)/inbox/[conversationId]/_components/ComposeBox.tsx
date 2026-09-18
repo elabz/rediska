@@ -5,6 +5,7 @@ import { AlertCircle, Loader2, Paperclip, Send } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { bannedDetail, errorMessage, type BanEntry } from '@/lib/banList';
 import type { Counterpart, Message } from '../_types';
 import { clearDraft, readDraft, writeDraft, type DraftValue } from '../_utils/drafts';
 
@@ -13,9 +14,22 @@ interface ComposeBoxProps {
   counterpart: Counterpart;
   identityId: number | null;
   onSent: (optimisticMessage: Message) => void;
+  /** Active ban on the counterpart: sending is disabled. */
+  ban?: BanEntry | null;
+  /** The API refused with 409 counterpart_banned (ban landed elsewhere). */
+  onBanDetected?: () => void;
+  onLift?: () => void;
 }
 
-export function ComposeBox({ conversationId, counterpart, identityId, onSent }: ComposeBoxProps) {
+export function ComposeBox({
+  conversationId,
+  counterpart,
+  identityId,
+  onSent,
+  ban = null,
+  onBanDetected,
+  onLift,
+}: ComposeBoxProps) {
   const [messageText, setMessageText] = useState(() => readDraft(conversationId).text);
   const [attachmentIds, setAttachmentIds] = useState<number[]>(() => readDraft(conversationId).attachmentIds);
   const [sending, setSending] = useState(false);
@@ -38,7 +52,8 @@ export function ComposeBox({ conversationId, counterpart, identityId, onSent }: 
     };
   }, [conversationId, messageText, attachmentIds]);
 
-  const isRecipientUnsendable = counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended';
+  const isRecipientUnsendable =
+    counterpart.remote_status === 'deleted' || counterpart.remote_status === 'suspended' || !!ban;
 
   const sendMessage = useCallback(async () => {
     if (!messageText.trim() || sending) return;
@@ -61,8 +76,12 @@ export function ComposeBox({ conversationId, counterpart, identityId, onSent }: 
       );
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to send message');
+        const data = await response.json().catch(() => null);
+        if (bannedDetail(data)) {
+          // Keep the draft; the banner (with Lift) takes over from here.
+          onBanDetected?.();
+        }
+        throw new Error(errorMessage(data, 'Failed to send message'));
       }
 
       const result = await response.json();
@@ -87,7 +106,7 @@ export function ComposeBox({ conversationId, counterpart, identityId, onSent }: 
     } finally {
       setSending(false);
     }
-  }, [messageText, sending, conversationId, identityId, attachmentIds, onSent]);
+  }, [messageText, sending, conversationId, identityId, attachmentIds, onSent, onBanDetected]);
 
   const handleAttachmentSelect = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -151,7 +170,9 @@ export function ComposeBox({ conversationId, counterpart, identityId, onSent }: 
           onChange={(e) => setMessageText(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={
-            isRecipientUnsendable
+            ban
+              ? `u/${counterpart.external_username} is banned — sending is disabled`
+              : isRecipientUnsendable
               ? `Cannot send to ${counterpart.remote_status} user`
               : 'Type a message... (Cmd+Enter to send)'
           }
@@ -216,9 +237,20 @@ export function ComposeBox({ conversationId, counterpart, identityId, onSent }: 
         </div>
       )}
 
-      <p className="text-xs text-muted-foreground mt-2 text-center">
-        Messages are queued and sent in the background
-      </p>
+      {ban ? (
+        <p className="text-xs text-muted-foreground mt-2 text-center" data-testid="compose-banned">
+          Sending is disabled for a banned account.{' '}
+          {onLift && (
+            <button onClick={onLift} className="underline hover:text-foreground">
+              Lift ban
+            </button>
+          )}
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground mt-2 text-center">
+          Messages are queued and sent in the background
+        </p>
+      )}
     </div>
   );
 }

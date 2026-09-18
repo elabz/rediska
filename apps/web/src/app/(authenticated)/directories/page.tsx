@@ -14,6 +14,7 @@ import {
   Search,
   ArrowUpDown,
   Star,
+  Ban,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -28,6 +29,7 @@ import {
 } from '@/components/ui/select';
 import { ContactButton } from '@/components/ContactButton';
 import { EmptyState } from '@/components';
+import { BanSuggestions, BannedView } from '@/components/ban';
 import { cn } from '@/lib/utils';
 
 interface DirectoryEntry {
@@ -62,7 +64,9 @@ interface DirectoryCounts {
   starred: number;
 }
 
-type DirectoryTab = 'analyzed' | 'contacted' | 'engaged' | 'starred';
+type AccountDirectoryTab = 'analyzed' | 'contacted' | 'engaged' | 'starred';
+// `banned` lists the ban list (do_not_contact), not external accounts.
+type DirectoryTab = AccountDirectoryTab | 'banned';
 type SortOption = 'newest' | 'oldest' | 'alphabetical';
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
@@ -76,6 +80,7 @@ const TABS: { key: DirectoryTab; label: string; icon: React.ComponentType<{ clas
   { key: 'contacted', label: 'Contacted', icon: MessageSquare },
   { key: 'engaged', label: 'Engaged', icon: CheckCircle2 },
   { key: 'starred', label: 'Starred', icon: Star },
+  { key: 'banned', label: 'Banned', icon: Ban },
 ];
 
 function formatDate(dateString: string): string {
@@ -230,6 +235,13 @@ export default function DirectoriesPage() {
   }, []);
 
   const fetchDirectory = useCallback(async (tab: DirectoryTab, newOffset = 0, search?: string, sort?: SortOption) => {
+    if (tab === 'banned') {
+      // BannedView loads its own data.
+      setEntries([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     setLoading(true);
     setError(null);
 
@@ -357,7 +369,7 @@ export default function DirectoriesPage() {
     fetchDirectory(activeTab);
   };
 
-  if (loading && entries.length === 0) {
+  if (loading && entries.length === 0 && activeTab !== 'banned') {
     return (
       <div className="max-w-4xl mx-auto">
         <div className="flex items-center justify-center h-64">
@@ -367,7 +379,7 @@ export default function DirectoriesPage() {
     );
   }
 
-  if (error && entries.length === 0) {
+  if (error && entries.length === 0 && activeTab !== 'banned') {
     return (
       <div className="max-w-4xl mx-auto">
         <Card className="p-8">
@@ -493,21 +505,31 @@ export default function DirectoriesPage() {
           >
             <Icon className="h-4 w-4" />
             {label}
-            <Badge
-              variant="secondary"
-              className={cn(
-                "ml-1 h-5 px-1.5 text-xs",
-                activeTab === key ? "bg-muted" : ""
-              )}
-            >
-              {counts[key]}
-            </Badge>
+            {key !== 'banned' && (
+              <Badge
+                variant="secondary"
+                className={cn(
+                  "ml-1 h-5 px-1.5 text-xs",
+                  activeTab === key ? "bg-muted" : ""
+                )}
+              >
+                {counts[key]}
+              </Badge>
+            )}
           </button>
         ))}
       </div>
 
       {/* Content */}
-      {entries.length === 0 ? (
+      {activeTab === 'banned' ? (
+        <div className="space-y-6">
+          <BannedView />
+          <section className="space-y-3">
+            <h2 className="text-sm font-semibold text-muted-foreground">Suggestions from copy rings</h2>
+            <BanSuggestions />
+          </section>
+        </div>
+      ) : entries.length === 0 ? (
         <EmptyState
           icon={activeTab === 'analyzed' ? '🔬' : activeTab === 'contacted' ? '💬' : activeTab === 'starred' ? '⭐' : '🤝'}
           title={`No ${activeTab} contacts`}

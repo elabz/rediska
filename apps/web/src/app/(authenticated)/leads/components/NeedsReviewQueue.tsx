@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components';
 import { EvaluationControl } from '@/components/evaluations/EvaluationControl';
+import { BanControl } from '@/components/ban/BanControl';
 import { cn } from '@/lib/utils';
 import type { EffectiveEvaluation, EvaluationMap } from '@/lib/evaluations';
 
@@ -88,6 +89,7 @@ function QueueCard({
   onPromote,
   onDismiss,
   onEvaluated,
+  onBanned,
 }: {
   item: NeedsReviewItem;
   busy: 'promote' | 'dismiss' | null;
@@ -95,6 +97,7 @@ function QueueCard({
   onPromote: () => void;
   onDismiss: () => void;
   onEvaluated: (saved: EffectiveEvaluation) => void;
+  onBanned: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const gates = gateResults(item);
@@ -223,6 +226,13 @@ function QueueCard({
           />
         </div>
         <div className="flex items-center gap-2">
+          {/* The queue already excludes banned authors, so no status lookup. */}
+          <BanControl
+            username={item.post_author}
+            variant="compact"
+            assumeNotBanned
+            onChange={(ban) => ban && onBanned()}
+          />
           <Button variant="ghost" size="sm" onClick={onDismiss} disabled={busy !== null}>
             {busy === 'dismiss' ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -412,6 +422,7 @@ export function NeedsReviewQueue({ onCountChange }: { onCountChange?: (count: nu
               onPromote={() => act(item, 'promote')}
               onDismiss={() => act(item, 'dismiss')}
               onEvaluated={(saved) => markEvaluated(item.id, saved)}
+              onBanned={() => removeItem(item.id)}
             />
           ))}
           {error && <p className="text-sm text-destructive text-center">{error}</p>}

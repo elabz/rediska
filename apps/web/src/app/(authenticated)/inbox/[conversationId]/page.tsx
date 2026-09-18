@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { AlertCircle, ArrowLeft, X } from 'lucide-react';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
+import { BannedBanner, useBanStatus } from '@/components/ban';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -80,6 +81,13 @@ export default function ConversationDetailPage() {
     onRemoteDeleted: () => setRemoteDeleteTarget(null),
     onScrubbed: () => setShowBatchDeleteDialog(false),
   });
+
+  // Ban state of the counterpart: banner + disabled compose. Incoming
+  // messages are still shown verbatim; nothing is hidden.
+  const banState = useBanStatus(
+    conversation?.counterpart.external_username,
+    conversation?.provider_id ?? 'reddit',
+  );
 
   const loading = conversationLoading || messagesLoading;
   const error = conversationError ?? messagesError;
@@ -220,7 +228,19 @@ export default function ConversationDetailPage() {
         scrubEligibleCount={scrubEligibleCount}
         onToggleStar={handleToggleStar}
         onScrubRequest={() => setShowBatchDeleteDialog(true)}
+        banState={banState}
       />
+
+      {banState.ban && (
+        <div className="px-4 pt-3 shrink-0">
+          <BannedBanner
+            entry={banState.ban}
+            onLift={banState.lift}
+            lifting={banState.lifting}
+            message="Messages from this account still arrive and are shown; nothing can be sent."
+          />
+        </div>
+      )}
 
       <div className="px-4 pb-3 border-b border-border shrink-0">
         <UserProfilePanel
@@ -270,6 +290,9 @@ export default function ConversationDetailPage() {
         counterpart={conversation.counterpart}
         identityId={conversation.identity_id}
         onSent={handleMessageSent}
+        ban={banState.ban}
+        onBanDetected={banState.refresh}
+        onLift={banState.lift}
       />
 
       <DeleteMessageDialog

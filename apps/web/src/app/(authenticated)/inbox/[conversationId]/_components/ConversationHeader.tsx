@@ -6,6 +6,8 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { BanControl } from '@/components/ban/BanControl';
+import type { BanState } from '@/components/ban/useBanStatus';
 import type { ConversationDetail } from '../_types';
 import { getInitials } from '../_utils/timeFormat';
 import { ListsDropdown } from './ListsDropdown';
@@ -17,6 +19,7 @@ interface ConversationHeaderProps {
   scrubEligibleCount: number;
   onToggleStar: () => void;
   onScrubRequest: () => void;
+  banState: BanState;
 }
 
 export function ConversationHeader({
@@ -26,6 +29,7 @@ export function ConversationHeader({
   scrubEligibleCount,
   onToggleStar,
   onScrubRequest,
+  banState,
 }: ConversationHeaderProps) {
   const { counterpart } = conversation;
 
@@ -52,6 +56,9 @@ export function ConversationHeader({
           {counterpart.remote_status === 'suspended' && (
             <Badge variant="destructive" className="text-xs">Suspended</Badge>
           )}
+          {banState.ban && (
+            <Badge variant="destructive" className="text-xs">Banned</Badge>
+          )}
         </div>
         <p className="text-xs text-muted-foreground">
           {conversation.provider_id === 'reddit' ? 'Reddit' : conversation.provider_id}
@@ -72,6 +79,12 @@ export function ConversationHeader({
           <Star className={cn("h-5 w-5", counterpart.is_starred && "fill-current")} />
         </button>
         <ListsDropdown conversationId={conversationId} />
+        <BanControl
+          username={counterpart.external_username}
+          providerId={conversation.provider_id}
+          variant="compact"
+          state={banState}
+        />
         <a
           href={`/api/core/conversations/${conversationId}/export`}
           download

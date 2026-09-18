@@ -6,6 +6,7 @@ import { Loader2, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
+import { errorMessage } from '@/lib/banList';
 
 interface ContactButtonProps {
   username: string;
@@ -46,8 +47,8 @@ export function ContactButton({
       });
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to initiate conversation');
+        const data = await response.json().catch(() => null);
+        throw new Error(errorMessage(data, 'Failed to initiate conversation'));
       }
 
       const conversation = await response.json();

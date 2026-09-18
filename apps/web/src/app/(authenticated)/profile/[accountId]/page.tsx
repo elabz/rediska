@@ -23,6 +23,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ContactButton } from '@/components/ContactButton';
+import { BanControl } from '@/components/ban/BanControl';
+import { BannedBanner } from '@/components/ban/BannedBanner';
+import { useBanStatus } from '@/components/ban/useBanStatus';
 import { EmptyState } from '@/components';
 import { cn } from '@/lib/utils';
 
@@ -125,6 +128,7 @@ function ProfileHeader({
   analyzing: boolean;
 }) {
   const redditProfileUrl = `https://reddit.com/u/${account.external_username}`;
+  const banState = useBanStatus(account.external_username, account.provider_id);
 
   return (
     <div className="flex items-start gap-6">
@@ -141,6 +145,7 @@ function ProfileHeader({
           <Badge variant="outline" className={getRemoteStatusColor(account.remote_status)}>
             {account.remote_status}
           </Badge>
+          {banState.ban && <Badge variant="destructive">Banned</Badge>}
           <Badge variant="outline" className={getAnalysisStateColor(account.analysis_state)}>
             {account.analysis_state === 'analyzed' ? (
               <><Sparkles className="h-3 w-3 mr-1" />Analyzed</>
@@ -177,6 +182,15 @@ function ProfileHeader({
           )}
         </div>
 
+        {banState.ban && (
+          <BannedBanner
+            entry={banState.ban}
+            onLift={banState.lift}
+            lifting={banState.lifting}
+            className="mt-3"
+          />
+        )}
+
         {/* Actions */}
         <div className="flex items-center gap-3 mt-4">
           <Button
@@ -191,10 +205,17 @@ function ProfileHeader({
               <><Sparkles className="h-4 w-4 mr-2" />{account.analysis_state === 'analyzed' ? 'Re-analyze' : 'Analyze'}</>
             )}
           </Button>
-          <ContactButton
+          {!banState.ban && (
+            <ContactButton
+              username={account.external_username}
+              providerId={account.provider_id}
+              size="sm"
+            />
+          )}
+          <BanControl
             username={account.external_username}
             providerId={account.provider_id}
-            size="sm"
+            state={banState}
           />
           <a
             href={redditProfileUrl}

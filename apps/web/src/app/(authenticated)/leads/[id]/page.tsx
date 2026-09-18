@@ -21,6 +21,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
+import { BanControl } from '@/components/ban/BanControl';
+import { BannedBanner } from '@/components/ban/BannedBanner';
+import { useBanStatus } from '@/components/ban/useBanStatus';
+import { bannedDetail, errorMessage } from '@/lib/banList';
 
 import { LeadAnalysisPanel } from './components/LeadAnalysisPanel';
 
@@ -140,6 +144,18 @@ export default function LeadDetailPage() {
     fetchLead();
   }, [fetchLead]);
 
+  const banState = useBanStatus(lead?.author_username, lead?.provider_id ?? 'reddit');
+
+  // A ban/lift moves the lead's status (ignored <-> prior); reload it quietly.
+  const reloadLeadQuietly = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/core/leads/${leadId}`, { credentials: 'include' });
+      if (response.ok) setLead(await response.json());
+    } catch {
+      // The next full load picks the change up.
+    }
+  }, [leadId]);
+
   const handleContact = async () => {
     if (!lead) return;
 
@@ -151,8 +167,13 @@ export default function LeadDetailPage() {
       });
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Failed to initiate conversation');
+        const data = await response.json().catch(() => null);
+        if (bannedDetail(data)) {
+          // Banned elsewhere since this page loaded: show the banner, keep the page.
+          await banState.refresh();
+          return;
+        }
+        throw new Error(errorMessage(data, 'Failed to initiate conversation'));
       }
 
       const conversation = await response.json();
@@ -239,11 +260,17 @@ export default function LeadDetailPage() {
                   </a>
                 </Button>
               )}
+              <BanControl
+                username={lead.author_username}
+                providerId={lead.provider_id}
+                state={banState}
+                onChange={reloadLeadQuietly}
+              />
               <Button
                 variant="default"
                 size="sm"
                 onClick={handleContact}
-                disabled={isContacting || !lead.author_username}
+                disabled={isContacting || !lead.author_username || !!banState.ban}
               >
                 {isContacting ? (
                   <Loader2 className="h-4 w-4 animate-spin mr-1" />
@@ -257,6 +284,17 @@ export default function LeadDetailPage() {
         </CardHeader>
 
         <CardContent className="space-y-4">
+          {banState.ban && (
+            <BannedBanner
+              entry={banState.ban}
+              onLift={async () => {
+                await banState.lift();
+                reloadLeadQuietly();
+              }}
+              lifting={banState.lifting}
+            />
+          )}
+
           {/* Author Info with Profile Panel */}
           {lead.author_username && (
             <div className="p-3 rounded-lg bg-muted/50">

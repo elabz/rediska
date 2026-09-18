@@ -31,7 +31,6 @@ from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import (
     AnalysisEvaluation,
-    DoNotContact,
     ExternalAccount,
     Job,
     LeadAnalysis,
@@ -43,6 +42,7 @@ from rediska_core.domain.models import (
     SourceLinkSighting,
     SourceTrial,
 )
+from rediska_core.domain.services.ban_list import banned_account_ids_select
 from rediska_core.domain.services.external_listing import (
     canonicalize_url,
     is_registered_domain,
@@ -360,25 +360,16 @@ def qualified_account_ids(db: Session, provider_id: str = "reddit") -> set[int]:
     if not qualified:
         return qualified
 
-    dnc = {
+    blocked = {
         r[0]
         for r in db.execute(
-            select(DoNotContact.external_username).where(
-                DoNotContact.provider_id == provider_id
+            select(ExternalAccount.id).where(
+                ExternalAccount.id.in_(qualified),
+                ExternalAccount.id.in_(banned_account_ids_select(provider_id)),
             )
         ).all()
     }
-    if dnc:
-        blocked = {
-            r[0]
-            for r in db.execute(
-                select(ExternalAccount.id).where(
-                    ExternalAccount.id.in_(qualified),
-                    ExternalAccount.external_username.in_(dnc),
-                )
-            ).all()
-        }
-        qualified -= blocked
+    qualified -= blocked
     return qualified
 
 
