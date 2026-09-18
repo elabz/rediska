@@ -130,6 +130,26 @@ class Settings(BaseSettings):
         description="Days before an untouched scout lead expires (0 disables, the default)",
     )
 
+    # Source discovery: candidate mining and bounded trials
+    discovery_min_qualified_authors: int = Field(
+        default=3,
+        ge=1,
+        description="Distinct qualified authors (or distinct URLs, for external hosts) a "
+        "candidate needs before it is surfaced",
+    )
+    discovery_trial_sample: int = Field(
+        default=25,
+        ge=1,
+        le=50,
+        description="Recent posts fetched and analysed per candidate trial (hard cap 50)",
+    )
+    discovery_window_days: int = Field(
+        default=180,
+        ge=1,
+        description="Trailing window of stored author history and link sightings used "
+        "for mining",
+    )
+
     @field_validator("mysql_url")
     @classmethod
     def validate_mysql_url(cls, v: str) -> str:

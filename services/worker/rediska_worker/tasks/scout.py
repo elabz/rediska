@@ -24,10 +24,13 @@ MAX_PROFILE_POSTS = 20
 MAX_PROFILE_COMMENTS = 100
 
 
-def _should_promote(verdict: dict, min_confidence: float) -> bool:
+def _should_promote(verdict: dict, min_confidence: float, is_trial: bool = False) -> bool:
     """Auto-promotion rule: only a code-gated `suitable` verdict whose
     computed score meets the watch threshold creates a lead.
-    `needs_review` / `not_recommended` never auto-promote."""
+    `needs_review` / `not_recommended` never auto-promote, and neither does
+    any post of a source-discovery trial watch (the user promotes by hand)."""
+    if is_trial:
+        return False
     return (
         verdict.get("recommendation") == "suitable"
         and float(verdict.get("score") or 0.0) >= min_confidence
@@ -248,11 +251,15 @@ def run_single_watch(self, watch_id: int) -> dict:
     try:
         db = _get_db_session()
 
-        from rediska_core.domain.services.external_listing import maybe_resolve_post_body
+        from rediska_core.domain.services.external_listing import (
+            is_link_only_body,
+            maybe_resolve_post_body,
+        )
         from rediska_core.domain.services.scout_watch import (
             ScoutWatchService,
             ScoutWatchNotFoundError,
         )
+        from rediska_core.domain.services.source_discovery import record_link_sighting
 
         service = ScoutWatchService(db)
 
@@ -373,6 +380,17 @@ def run_single_watch(self, watch_id: int) -> dict:
             if not post.body_text or not post.body_text.strip():
                 posts_skipped_empty += 1
                 logger.debug(f"Skipping post {external_post_id} - empty body (content hidden)")
+                # A link-only post to an unregistered host: record the URL (never
+                # fetched) so source discovery can surface recurring hosts.
+                if is_link_only_body(post.body_text, post.url):
+                    try:
+                        if record_link_sighting(
+                            db, watch.provider_id, external_post_id, post.url, "scout"
+                        ):
+                            db.commit()
+                    except Exception as e:
+                        db.rollback()
+                        logger.warning(f"Failed to record link sighting for {external_post_id}: {e}")
                 continue
 
             posts_new += 1
@@ -1064,7 +1082,13 @@ def analyze_and_decide(
         analysis_id = None
         attached = False
 
-        if _should_promote(verdict_dict, watch.min_confidence):
+        if getattr(watch, "is_trial", False):
+            logger.info(
+                f"Post {external_post_id} belongs to trial watch {watch_id}: "
+                f"never auto-promoted (recommendation={recommendation})"
+            )
+
+        if _should_promote(verdict_dict, watch.min_confidence, bool(getattr(watch, "is_trial", False))):
             try:
                 from rediska_core.domain.models import LeadAnalysis, AnalysisDimension
                 from rediska_core.domain.services.agent_prompt import AgentPromptService

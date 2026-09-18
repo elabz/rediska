@@ -38,6 +38,7 @@ AI agents working on this project are **explicitly forbidden** from reading the 
 | `openspec/changes/` | OpenSpec change proposals (use the `opsx:*` skills to propose/apply/archive) |
 | `docs/deploy.md` | Operator deploy, migration, smoke test, troubleshooting |
 | `docs/inbox-backup.md` | Inbox export/import/clear — dump format, API, operational notes |
+| `docs/reddit-search.md` | Reddit search reliability audit, syntax limits, current scout-watch queries, cost of reading all posts; audit scripts in `scripts/search_audit/` |
 | `prd/Rediska_Spec_Pack_v0.5.md` + older plans | Historical — superseded by PRD v1.0 + OpenSpec |
 | `tasks/` | Historical task files + design docs (SCOUT_WATCH_DESIGN, MULTI_AGENT_ANALYSIS_IMPLEMENTATION) |
 
@@ -93,13 +94,13 @@ rediska/
         infra/                 # db engines/sessions
         infrastructure/        # crypto (Fernet), elasticsearch, embeddings, rate_limiter
         observability/
-      alembic/versions/        # head: 019_add_lead_triage_and_feedback
+      alembic/versions/        # head: 020_add_source_discovery
 
     worker/                    # Celery worker (imports core)
       rediska_worker/
         celery_app.py          # queues, beat schedule
         tasks/                 # ingest, index, embed, agent, message,
-                               # multi_agent_analysis, scout, maintenance, evaluation
+                               # multi_agent_analysis, scout, discovery, maintenance, evaluation
         util/                  # idempotency (jobs table), retry
 
   scripts/
@@ -245,6 +246,17 @@ Turns the lead list into a ranked work queue and closes the feedback loop (`doma
 - **Expiry** (off by default): `expired` is a timeout, not a verdict — it is not an active lead for author dedupe and not an ignore. Revive by setting `saved`
 - **Calibration report**: plain Python aggregation; lead verdict rates over a 28-day lead cohort, post/dimension metrics over the 7-day period; gate outcomes are best-effort for pre-gate posts
 
+### Source Discovery
+Proposes new lead sources from data already stored; a human decides everything (`domain/services/source_discovery.py`, `/source-candidates` API, Discover tab on `/settings/scout-watches`):
+- **Location candidates**: `discovery.mine_candidates` (daily) compares, per community in `profile_items.subreddit` (trailing `DISCOVERY_WINDOW_DAYS`), distinct *qualified* authors against all analysed authors → lift = qualified share / analysed share, with the community's qualified rate shrunk toward the base rate by `LIFT_PRIOR_AUTHORS` (10) pseudo-authors so small all-qualified communities (3 of 3) cannot outrank ones with real evidence. Needs `DISCOVERY_MIN_QUALIFIED_AUTHORS` qualified authors; communities of real (non-trial) watches are excluded. `qualified_account_ids()` is the single definition: non-deleted `suitable` lead (unless the human's effective final verdict disagrees), contacted/engaged account, or an effective human `agree` on a `suitable` verdict; do-not-contact never qualifies
+- **External-host candidates**: distinct outbound URLs per host from link-post leads, `source_link_sightings` (link-only posts skipped by scout runs, trials, and `/browse`), and URLs in qualified authors' items. Registered listing hosts (`ListingHost.domains`) and provider/media hosts are excluded. Reported as "worth a parser", **never fetched**
+- Mining makes no provider, LLM, or HTTP calls; it updates evidence in place, never resurrects `dismissed`, un-snoozes when `snoozed_until` passes, and drops mined `new` candidates that fall below the floor
+- **Lifecycle**: `new` / `trialled` / `accepted` / `dismissed` / `snoozed`; dismiss, restore, snooze, accept, manual add (from provider location search), trial start/cancel all write `audit_log`. Nothing is watched without an explicit accept
+- **Trials**: `POST /source-candidates/{id}/trial` creates a hidden `scout_watches.is_trial` watch (inactive, reused across trials) + `source_trials` row + `jobs` row; `discovery.run_trial` fetches up to `DISCOVERY_TRIAL_SAMPLE` (cap 50) recent posts and runs each through `scout.analyze_and_decide` in-process (serial, cancellable between posts, `max_retries=0`, one trial at a time). `_should_promote` never promotes a trial post; manual add-to-leads still works. Yield report: fetched, empty, link-only resolved, per-recommendation counts, top failing gate, median post age
+- **Trial isolation**: `not_trial_post()` keeps trial posts out of the needs-review queue, calibration report, and evaluation queue sampling; `list_watches` (and so `run_all_watches`) hides trial watches; the create-watch duplicate check ignores them. Runs of trial watches whose candidate is unresolved are exempt from history cleanup. Accepting a trialled candidate converts its trial watch in place, so seen posts are not re-analysed
+- **Location info**: `ProviderAdapter.search_locations` / `get_location_info` (`ProviderLocation` DTO; Reddit via subreddit search/about through the normal rate limiter, NSFW never filtered). Info is fetched lazily on first display (≤10 per list request) and cached on the candidate
+- **Watch yield**: `GET /scout-watches` carries `yield_30d` per watch (posts, per-recommendation counts, leads created/contacted/engaged) from batched queries
+
 ### External Listing Resolution
 Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `selftext` is empty and whose URL points to an external listing page. `domain/services/external_listing.py` fetches such pages and substitutes the listing's About text as the post body, so browse cards and the LLM analysis pipeline see real content:
 - Registry of supported hosts (initially `weheartbdsm.com/listings/<id>`) maps URL pattern → parser; unregistered hosts are never fetched (no generic scraping)
@@ -273,13 +285,13 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 | `/ops` | Job queue, sync, backfills, attachment re-download, calibration report panel |
 | `/ops/backup` | Inbox export / import / clear with progress tracking |
 | `/audit` | Audit log viewer |
-| `/settings/connection`, `/settings/personas`, `/settings/agents`, `/settings/scout-watches` (+ `/[watchId]/history`) | Reddit connection, voice personas, agent prompts (with per-version evaluation metrics and a Replay tab), scout watches (history posts carry evaluation controls) |
+| `/settings/connection`, `/settings/personas`, `/settings/agents`, `/settings/scout-watches` (+ `/[watchId]/history`) | Reddit connection, voice personas, agent prompts (with per-version evaluation metrics and a Replay tab), scout watches (30-day yield per watch; history posts carry evaluation controls) + **Discover** tab (source candidates with evidence, location info, trial progress/yield; trial, create watch, snooze, dismiss, restore; community search) |
 
 ---
 
 ## Key Database Tables
 
-Head migration: `019_add_lead_triage_and_feedback`.
+Head migration: `020_add_source_discovery`.
 
 | Table | Purpose |
 |-------|---------|
@@ -296,7 +308,10 @@ Head migration: `019_add_lead_triage_and_feedback`.
 | `lead_analyses` | Multi-agent analysis results (per-dimension JSON + meta) |
 | `analysis_dimensions` | Per-dimension execution tracking (raw responses, model info) |
 | `agent_prompts` | Versioned LLM agent prompts |
-| `scout_watches`, `scout_watch_runs`, `scout_watch_posts` | Scout watch config, run history, seen-post pipeline (`evaluated_at` exempts a post from cleanup; `dismissed_at`/`triaged_at` take it out of the needs-review queue) |
+| `scout_watches`, `scout_watch_runs`, `scout_watch_posts` | Scout watch config, run history, seen-post pipeline (`evaluated_at` exempts a post from cleanup; `dismissed_at`/`triaged_at` take it out of the needs-review queue); `is_trial` marks hidden source-discovery trial watches |
+| `source_candidates` | Proposed sources (kind `location` / `external_host`, origin mined/manual), evidence JSON, lift, lifecycle status, snooze date, cached location info, linked trial/accepted watch |
+| `source_trials` | Bounded candidate trials: status, sample size, progress, yield report, run + job links |
+| `source_link_sightings` | Outbound URLs seen on link-only posts (host tally input; metadata only, never fetched) |
 | `calibration_reports` | Weekly computed precision snapshots (JSON payload per period) |
 | `analysis_evaluations` | Append-only human verdicts on a lead analysis or scout post (final or per dimension), with agent snapshot + prompt versions |
 | `prompt_replays` | Candidate-prompt replays against labelled cases: status, progress, agreement, per-case results |
@@ -365,13 +380,18 @@ EVALUATION_REPLAY_MAX_CASES=50
 
 # Lead triage: days before an untouched scout lead auto-expires (0 = disabled, the default)
 LEAD_EXPIRY_DAYS=0
+
+# Source discovery: evidence floor (qualified authors / distinct URLs), trial size (cap 50), mining window
+DISCOVERY_MIN_QUALIFIED_AUTHORS=3
+DISCOVERY_TRIAL_SAMPLE=25
+DISCOVERY_WINDOW_DAYS=180
 ```
 
 ---
 
 ## Celery Tasks
 
-Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`, `scout`, `maintenance`, `transfer`.
+Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`, `scout` (also `discovery.*`), `maintenance`, `transfer`.
 
 `task_routes` patterns in `celery_app.py` match **registered task names** (`ingest.*`, `message.*`), never module paths — a `rediska_worker.tasks.<module>.*` glob matches nothing and silently drops the task on the default `celery` queue. `tests/test_task_routing_unit.py` resolves through the live router and fails on any dead pattern or unrouted task. Core API dispatches pass `queue=` explicitly and so do not depend on these routes; beat and worker-internal dispatches do.
 
@@ -395,6 +415,10 @@ Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`,
 
 ### Scout Watch
 - `scout.run_all_watches` (beat: every 300s), `scout.run_single_watch`, `scout.analyze_and_decide`, `scout.reanalyze_post`
+
+### Source Discovery (queue: `scout`)
+- `discovery.mine_candidates` (beat: daily 02:45 UTC) — recompute candidates from stored data; `jobs` ledger keyed per day
+- `discovery.run_trial` — one bounded candidate trial; `jobs` idempotency keyed on the trial id, `max_retries=0`, cancellable between posts, shares the inference gate
 
 ### Prompt Replay (queue: `multi_agent_analysis`)
 - `evaluation.replay_prompt` — replays a candidate prompt against labelled evaluation cases; `jobs` idempotency keyed on the replay id, `max_retries=0`, cancellable between cases, shares the inference gate with live analyses

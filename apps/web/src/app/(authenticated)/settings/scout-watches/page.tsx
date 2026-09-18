@@ -22,11 +22,24 @@ import {
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 import { ScoutWatchList } from './components/ScoutWatchList';
 import { ScoutWatchEditor } from './components/ScoutWatchEditor';
+import { DiscoverTab, type SourceCandidate } from './components/DiscoverTab';
 
 // Types
+export interface WatchYield {
+  window_days: number;
+  posts_seen: number;
+  suitable: number;
+  needs_review: number;
+  not_recommended: number;
+  leads_created: number;
+  leads_contacted: number;
+  leads_engaged: number;
+}
+
 export interface ScoutWatch {
   id: number;
   provider_id: string;
@@ -45,6 +58,7 @@ export interface ScoutWatch {
   last_match_at: string | null;
   created_at: string;
   updated_at: string;
+  yield_30d?: WatchYield | null;
 }
 
 export interface ScoutWatchesResponse {
@@ -58,6 +72,9 @@ export default function ScoutWatchesSettingsPage() {
   const [editingWatch, setEditingWatch] = useState<ScoutWatch | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [tab, setTab] = useState('watches');
+  const [acceptingCandidate, setAcceptingCandidate] = useState<SourceCandidate | null>(null);
+  const [discoverKey, setDiscoverKey] = useState(0);
 
   const fetchWatches = useCallback(async () => {
     setLoading(true);
@@ -94,7 +111,33 @@ export default function ScoutWatchesSettingsPage() {
 
   const handleCreateNew = () => {
     setEditingWatch(null);
+    setAcceptingCandidate(null);
     setIsCreating(true);
+    setTab('watches');
+  };
+
+  // Accepting a candidate creates the watch (or converts its trial watch).
+  const acceptCandidate = async (payload: Record<string, unknown>) => {
+    if (!acceptingCandidate) return;
+    const response = await fetch(
+      `/api/core/source-candidates/${acceptingCandidate.id}/accept`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          search_query: payload.search_query,
+          sort_by: payload.sort_by,
+          time_filter: payload.time_filter,
+          auto_analyze: payload.auto_analyze,
+          min_confidence: payload.min_confidence,
+        }),
+      },
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to create watch from candidate');
+    }
   };
 
   if (loading) {
@@ -293,7 +336,22 @@ export default function ScoutWatchesSettingsPage() {
       </Card>
 
       {/* Watch List or Editor */}
-      {editingWatch || isCreating ? (
+      {acceptingCandidate ? (
+        <ScoutWatchEditor
+          key={`accept-${acceptingCandidate.id}`}
+          watch={null}
+          initial={{ source_location: acceptingCandidate.name }}
+          title={`Create Watch for ${acceptingCandidate.name}`}
+          onSubmit={acceptCandidate}
+          onClose={() => setAcceptingCandidate(null)}
+          onSaved={() => {
+            setAcceptingCandidate(null);
+            setDiscoverKey((k) => k + 1);
+            fetchWatches();
+            setTab('watches');
+          }}
+        />
+      ) : editingWatch || isCreating ? (
         <ScoutWatchEditor
           watch={editingWatch}
           onClose={() => {
@@ -303,11 +361,22 @@ export default function ScoutWatchesSettingsPage() {
           onSaved={handleWatchUpdated}
         />
       ) : (
-        <ScoutWatchList
-          watches={watches}
-          onEditWatch={setEditingWatch}
-          onRefresh={fetchWatches}
-        />
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList>
+            <TabsTrigger value="watches">Watches</TabsTrigger>
+            <TabsTrigger value="discover">Discover</TabsTrigger>
+          </TabsList>
+          <TabsContent value="watches" className="mt-4">
+            <ScoutWatchList
+              watches={watches}
+              onEditWatch={setEditingWatch}
+              onRefresh={fetchWatches}
+            />
+          </TabsContent>
+          <TabsContent value="discover" className="mt-4">
+            <DiscoverTab key={discoverKey} onCreateWatch={setAcceptingCandidate} />
+          </TabsContent>
+        </Tabs>
       )}
     </div>
   );

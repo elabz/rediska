@@ -73,8 +73,8 @@ Browser (LAN/VPN) → dev-proxy (TLS, external stack) → Next.js Web (BFF) → 
 |---------|-------------|
 | rediska-web | Next.js 14 frontend + BFF proxy routes (internal :3000) |
 | rediska-core | FastAPI backend (internal :8000) |
-| rediska-worker | Celery task worker (ingest, index, embed, agents, scout, maintenance) |
-| rediska-beat | Celery scheduler (sync every 60/120s, scout watches every 5m, nightly backups) |
+| rediska-worker | Celery task worker (ingest, index, embed, agents, scout, source discovery, maintenance) |
+| rediska-beat | Celery scheduler (sync every 60/120s, scout watches every 5m, daily source-discovery mining, nightly backups) |
 | rediska-mysql | MySQL 8.4 (internal) |
 | rediska-redis | Redis 7 broker/cache (internal) |
 | rediska-elasticsearch | Elasticsearch 8.14 hybrid search + vectors (internal) |

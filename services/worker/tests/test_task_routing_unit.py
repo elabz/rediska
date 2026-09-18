@@ -39,6 +39,9 @@ EXPECTED_ROUTES = [
     ("evaluation.replay_prompt", "multi_agent_analysis"),
     ("scout.run_all_watches", "scout"),
     ("scout.analyze_and_decide", "scout"),
+    # Source discovery reuses the scout pipeline and its queue.
+    ("discovery.mine_candidates", "scout"),
+    ("discovery.run_trial", "scout"),
     ("inbox.export", "transfer"),
     ("inbox.import", "transfer"),
     ("inbox.clear", "transfer"),

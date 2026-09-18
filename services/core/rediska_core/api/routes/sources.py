@@ -5,6 +5,7 @@ Provides endpoints for:
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -23,6 +24,7 @@ from rediska_core.infrastructure.crypto import CryptoService
 from rediska_core.providers.reddit.adapter import RedditAdapter
 
 router = APIRouter(prefix="/sources", tags=["sources"])
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -135,6 +137,24 @@ async def browse_posts(
             time_filter=time_filter,
             query=query,
         )
+
+        # Link-only posts to unregistered hosts: record the URL for source
+        # discovery's host tally (metadata only, never fetched). Best effort.
+        try:
+            from rediska_core.domain.services.external_listing import is_link_only_body
+            from rediska_core.domain.services.source_discovery import record_link_sighting
+
+            recorded = False
+            for post in result.items:
+                if is_link_only_body(post.body_text, post.url):
+                    recorded |= record_link_sighting(
+                        db, provider_id, post.external_id, post.url, "browse"
+                    )
+            if recorded:
+                db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Failed to record browse link sightings: {exc}")
 
         # Convert to response schema
         posts = []

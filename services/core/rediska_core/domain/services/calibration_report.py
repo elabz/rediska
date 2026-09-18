@@ -31,6 +31,7 @@ from rediska_core.domain.models import (
     ScoutWatchPost,
 )
 from rediska_core.domain.services.lead_gates import GATES
+from rediska_core.domain.services.source_discovery import not_trial_post
 
 REPORT_PERIOD_DAYS = 7
 LEAD_COHORT_DAYS = 28
@@ -202,11 +203,14 @@ class CalibrationReportService:
             .filter(
                 ScoutWatchPost.first_seen_at >= period_start,
                 ScoutWatchPost.first_seen_at < period_end,
+                # Source-discovery trial posts are not watch output.
+                not_trial_post(),
             )
             .all()
         )
 
         watches = {w.id: w for w in self.db.query(ScoutWatch).all()}
+        trial_watch_ids = {wid for wid, w in watches.items() if w.is_trial}
 
         leads_by_watch: dict[Any, list[LeadPost]] = {}
         for lead in leads:
@@ -221,6 +225,8 @@ class CalibrationReportService:
         for watch_id in sorted(
             set(posts_by_watch) | {k for k in leads_by_watch if k != MANUAL_KEY}
         ):
+            if watch_id in trial_watch_ids:
+                continue
             watch = watches.get(watch_id)
             watch_rows.append(
                 {
@@ -260,6 +266,7 @@ class CalibrationReportService:
                 ScoutWatchPost.dismissed_at.is_(None),
                 ScoutWatchPost.triaged_at.is_(None),
                 ScoutWatchPost.lead_id.is_(None),
+                not_trial_post(),
             )
             .count()
         )

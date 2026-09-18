@@ -235,6 +235,9 @@ class ListingHost:
     name: str
     url_pattern: re.Pattern
     parser: Callable[[str], Optional[str]]
+    # Hostnames this entry covers; source discovery never proposes these as
+    # parser candidates.
+    domains: tuple[str, ...] = ()
 
 
 LISTING_HOSTS: list[ListingHost] = [
@@ -244,8 +247,21 @@ LISTING_HOSTS: list[ListingHost] = [
             r"^https?://(www\.)?weheartbdsm\.com/listings/\d+", re.IGNORECASE
         ),
         parser=parse_weheartbdsm,
+        domains=("weheartbdsm.com",),
     ),
 ]
+
+
+def is_registered_domain(host: Optional[str]) -> bool:
+    """True when ``host`` (or a subdomain of it) belongs to a registered listing host."""
+    if not host:
+        return False
+    host = host.lower().rstrip(".")
+    for entry in LISTING_HOSTS:
+        for domain in entry.domains:
+            if host == domain or host.endswith(f".{domain}"):
+                return True
+    return False
 
 
 def find_registered_host(url: Optional[str]) -> Optional[ListingHost]:

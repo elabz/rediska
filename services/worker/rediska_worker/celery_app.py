@@ -18,6 +18,7 @@ app = Celery(
         "rediska_worker.tasks.index",
         "rediska_worker.tasks.embed",
         "rediska_worker.tasks.agent",
+        "rediska_worker.tasks.discovery",
         "rediska_worker.tasks.evaluation",
         "rediska_worker.tasks.inbox_clear",
         "rediska_worker.tasks.inbox_export",
@@ -66,6 +67,9 @@ app.conf.update(
         # Prompt replay shares the analysis queue so it sits behind the inference gate
         "evaluation.*": {"queue": "multi_agent_analysis"},
         "scout.*": {"queue": "scout"},
+        # Source discovery mining and trials run beside the scout pipeline
+        # they reuse (trials share the inference gate with scout analysis).
+        "discovery.*": {"queue": "scout"},
         # Inbox export/import/clear share a dedicated queue so a long export
         # cannot sit behind the nightly maintenance backups.
         "inbox.*": {"queue": "transfer"},
@@ -128,6 +132,13 @@ app.conf.beat_schedule = {
         "task": "maintenance.expire_stale_leads",
         "schedule": crontab(hour=2, minute=30),
         "kwargs": {"dry_run": False},
+    },
+    # Daily source-discovery mining at 2:45 AM UTC (after history cleanup).
+    # Reads stored data only: no provider calls, no LLM, no HTTP.
+    "daily-source-discovery-mining": {
+        "task": "discovery.mine_candidates",
+        "schedule": crontab(hour=2, minute=45),
+        "args": (),
     },
     # Weekly calibration report on Monday at 6 AM UTC (after the Sunday restore test)
     "weekly-calibration-report": {

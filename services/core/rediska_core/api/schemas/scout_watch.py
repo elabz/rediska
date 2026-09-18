@@ -41,6 +41,23 @@ class ScoutWatchUpdate(BaseModel):
 # =============================================================================
 
 
+class WatchYield(BaseModel):
+    """Trailing-window yield of a watch, on the same terms as a trial yield.
+
+    ``posts_seen`` counts retained sightings (analysis-free sightings older
+    than the 3-day history retention are no longer stored).
+    """
+
+    window_days: int = 30
+    posts_seen: int = 0
+    suitable: int = 0
+    needs_review: int = 0
+    not_recommended: int = 0
+    leads_created: int = 0
+    leads_contacted: int = 0
+    leads_engaged: int = 0
+
+
 class ScoutWatchResponse(BaseModel):
     """Response schema for a scout watch."""
 
@@ -61,6 +78,8 @@ class ScoutWatchResponse(BaseModel):
     last_match_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
+    # Trailing 30-day yield; populated on the list endpoint.
+    yield_30d: Optional[WatchYield] = None
 
     class Config:
         from_attributes = True

@@ -87,6 +87,11 @@ services:
       # Lead triage: days before an untouched scout lead auto-expires (0 disables)
       - LEAD_EXPIRY_DAYS=${LEAD_EXPIRY_DAYS:-0}
 
+      # Source discovery: evidence floor, trial sample size (cap 50), mining window
+      - DISCOVERY_MIN_QUALIFIED_AUTHORS=${DISCOVERY_MIN_QUALIFIED_AUTHORS:-3}
+      - DISCOVERY_TRIAL_SAMPLE=${DISCOVERY_TRIAL_SAMPLE:-25}
+      - DISCOVERY_WINDOW_DAYS=${DISCOVERY_WINDOW_DAYS:-180}
+
       - CELERY_BROKER_URL=${CELERY_BROKER_URL}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
     volumes:
@@ -169,6 +174,11 @@ services:
 
       # Lead triage: days before an untouched scout lead auto-expires (0 disables)
       - LEAD_EXPIRY_DAYS=${LEAD_EXPIRY_DAYS:-0}
+
+      # Source discovery: evidence floor, trial sample size (cap 50), mining window
+      - DISCOVERY_MIN_QUALIFIED_AUTHORS=${DISCOVERY_MIN_QUALIFIED_AUTHORS:-3}
+      - DISCOVERY_TRIAL_SAMPLE=${DISCOVERY_TRIAL_SAMPLE:-25}
+      - DISCOVERY_WINDOW_DAYS=${DISCOVERY_WINDOW_DAYS:-180}
     volumes:
       - ${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}:${ATTACHMENTS_PATH:-/var/lib/rediska/attachments}
       - ${BACKUPS_PATH:-/var/lib/rediska/backups}:${BACKUPS_PATH:-/var/lib/rediska/backups}

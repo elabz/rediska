@@ -21,6 +21,11 @@ interface ScoutWatchEditorProps {
   watch: ScoutWatch | null; // null = create new
   onClose: () => void;
   onSaved: () => void;
+  /** Pre-filled values for a new watch (e.g. from a discovery candidate). */
+  initial?: Partial<ScoutWatch>;
+  /** Replaces the default create/update request (e.g. accepting a candidate). */
+  onSubmit?: (payload: Record<string, unknown>) => Promise<void>;
+  title?: string;
 }
 
 const SORT_OPTIONS = [
@@ -40,10 +45,21 @@ const TIME_FILTER_OPTIONS = [
   { value: 'all', label: 'All Time' },
 ];
 
-export function ScoutWatchEditor({ watch, onClose, onSaved }: ScoutWatchEditorProps) {
+export function ScoutWatchEditor({
+  watch,
+  onClose,
+  onSaved,
+  initial,
+  onSubmit,
+  title,
+}: ScoutWatchEditorProps) {
   const isNew = !watch;
+  // A pre-filled location (from a candidate) is fixed, like an existing watch's.
+  const locationLocked = !isNew || !!initial?.source_location;
 
-  const [sourceLocation, setSourceLocation] = useState(watch?.source_location || '');
+  const [sourceLocation, setSourceLocation] = useState(
+    watch?.source_location || initial?.source_location || '',
+  );
   const [searchQuery, setSearchQuery] = useState(watch?.search_query || '');
   const [sortBy, setSortBy] = useState(watch?.sort_by || 'new');
   const [timeFilter, setTimeFilter] = useState(watch?.time_filter || 'day');
@@ -73,6 +89,12 @@ export function ScoutWatchEditor({ watch, onClose, onSaved }: ScoutWatchEditorPr
         min_confidence: minConfidence,
         is_active: isActive,
       };
+
+      if (onSubmit) {
+        await onSubmit(payload);
+        onSaved();
+        return;
+      }
 
       const url = isNew
         ? '/api/core/scout-watches'
@@ -106,7 +128,7 @@ export function ScoutWatchEditor({ watch, onClose, onSaved }: ScoutWatchEditorPr
         <Button variant="ghost" size="icon" onClick={onClose}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
-        <CardTitle>{isNew ? 'Create Scout Watch' : 'Edit Scout Watch'}</CardTitle>
+        <CardTitle>{title || (isNew ? 'Create Scout Watch' : 'Edit Scout Watch')}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
         {error && (
@@ -123,7 +145,7 @@ export function ScoutWatchEditor({ watch, onClose, onSaved }: ScoutWatchEditorPr
             placeholder="r/r4r"
             value={sourceLocation}
             onChange={(e) => setSourceLocation(e.target.value)}
-            disabled={!isNew} // Can't change location after creation
+            disabled={locationLocked} // Can't change location after creation
           />
           <p className="text-xs text-muted-foreground">
             The subreddit to monitor (e.g., r/r4r, r/ForeverAloneDating)
@@ -210,7 +232,8 @@ export function ScoutWatchEditor({ watch, onClose, onSaved }: ScoutWatchEditorPr
           </div>
         )}
 
-        {/* Active Status */}
+        {/* Active Status (a watch created from a candidate always starts active) */}
+        {!onSubmit && (
         <div className="flex items-center justify-between">
           <div className="space-y-0.5">
             <Label>Active</Label>
@@ -220,6 +243,7 @@ export function ScoutWatchEditor({ watch, onClose, onSaved }: ScoutWatchEditorPr
           </div>
           <Switch checked={isActive} onCheckedChange={setIsActive} />
         </div>
+        )}
 
         {/* Actions */}
         <div className="flex justify-end gap-3 pt-4">

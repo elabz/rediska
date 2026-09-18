@@ -174,6 +174,26 @@ class ProviderProfileItem:
 
 
 @dataclass
+class ProviderLocation:
+    """Normalized summary of a provider location (e.g. a community).
+
+    Returned by location search and location info lookups; the core refers
+    to these as "locations" regardless of provider naming.
+    """
+
+    name: str  # canonical location identifier as used by browse_location
+
+    # Optional fields
+    title: Optional[str] = None
+    description: Optional[str] = None
+    member_count: Optional[int] = None
+    active_count: Optional[int] = None
+    is_nsfw: bool = False
+    created_at: Optional[datetime] = None
+    raw_data: Optional[dict] = None
+
+
+@dataclass
 class SendMessageResult:
     """Result of sending a message through a provider.
 
@@ -334,6 +354,40 @@ class ProviderAdapter(ABC):
             Paginated list of profile items.
         """
         ...
+
+    async def search_locations(
+        self,
+        query: str,
+        limit: int = 25,
+    ) -> list[ProviderLocation]:
+        """Search locations by keyword.
+
+        Optional capability: providers that do not support it raise
+        NotImplementedError. Results are never filtered by NSFW status.
+
+        Args:
+            query: Keyword query.
+            limit: Maximum number of locations to return.
+
+        Returns:
+            Normalized location summaries.
+        """
+        raise NotImplementedError(f"{self.provider_id} does not support location search")
+
+    async def get_location_info(self, name: str) -> Optional[ProviderLocation]:
+        """Fetch the summary of one location.
+
+        Optional capability: providers that do not support it raise
+        NotImplementedError.
+
+        Args:
+            name: Location identifier.
+
+        Returns:
+            The summary, or None when the location does not exist, is private,
+            or is banned.
+        """
+        raise NotImplementedError(f"{self.provider_id} does not support location info")
 
     @abstractmethod
     async def send_message(

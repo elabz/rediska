@@ -37,6 +37,7 @@ from rediska_core.api.schemas.scout_watch import (
     ScoutWatchRunResponse,
     ScoutWatchRunTriggerResponse,
     ScoutWatchUpdate,
+    WatchYield,
 )
 from rediska_core.domain.models import LeadAnalysis
 from rediska_core.domain.models import AuditLog
@@ -100,12 +101,20 @@ async def list_watches(
     Returns:
         List of scout watches.
     """
+    from rediska_core.domain.services.source_discovery import SourceDiscoveryService
+
     service = ScoutWatchService(db)
     watches = service.list_watches(is_active=is_active, provider_id=provider_id)
+    # Batched: a constant number of queries however many watches exist.
+    yields = SourceDiscoveryService(db).watch_yields(w.id for w in watches)
 
-    return ScoutWatchListResponse(
-        watches=[ScoutWatchResponse.model_validate(w) for w in watches]
-    )
+    responses = []
+    for w in watches:
+        response = ScoutWatchResponse.model_validate(w)
+        if w.id in yields:
+            response.yield_30d = WatchYield(**yields[w.id])
+        responses.append(response)
+    return ScoutWatchListResponse(watches=responses)
 
 
 # =============================================================================

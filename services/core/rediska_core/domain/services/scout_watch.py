@@ -36,6 +36,10 @@ from rediska_core.domain.models import (
 )
 from rediska_core.domain.services.external_listing import maybe_resolve_post_body
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
+from rediska_core.domain.services.source_discovery import (
+    not_trial_post,
+    unresolved_trial_watch_ids,
+)
 
 
 # =============================================================================
@@ -182,13 +186,14 @@ class ScoutWatchService:
             if not identity:
                 raise ScoutWatchError(f"Identity not found: {identity_id}")
 
-        # Check for duplicate watch
+        # Check for duplicate watch (hidden trial watches don't count)
         existing = (
             self.db.query(ScoutWatch)
             .filter(
                 ScoutWatch.provider_id == provider_id,
                 ScoutWatch.source_location == source_location,
                 ScoutWatch.search_query == search_query,
+                ScoutWatch.is_trial.is_(False),
             )
             .first()
         )
@@ -252,17 +257,22 @@ class ScoutWatchService:
         self,
         is_active: Optional[bool] = None,
         provider_id: Optional[str] = None,
+        include_trials: bool = False,
     ) -> list[ScoutWatch]:
         """List all watches.
 
         Args:
             is_active: Filter by active status (optional).
             provider_id: Filter by provider (optional).
+            include_trials: Include hidden source-discovery trial watches.
 
         Returns:
             List of ScoutWatch objects.
         """
         query = self.db.query(ScoutWatch)
+
+        if not include_trials:
+            query = query.filter(ScoutWatch.is_trial.is_(False))
 
         if is_active is not None:
             query = query.filter(ScoutWatch.is_active == is_active)
@@ -545,6 +555,8 @@ class ScoutWatchService:
             ScoutWatchPost.dismissed_at.is_(None),
             ScoutWatchPost.triaged_at.is_(None),
             ScoutWatchPost.lead_id.is_(None),
+            # Trial posts stay out of the cross-watch queue (source-discovery).
+            not_trial_post(),
         ]
         if watch_id is not None:
             conditions.append(ScoutWatchPost.watch_id == watch_id)
@@ -652,6 +664,11 @@ class ScoutWatchService:
         owns any post after the sweep is kept so watch history keeps showing
         the evaluated post in context (analysis-evaluation).
 
+        Runs of a trial watch whose candidate is still undecided (new,
+        trialled, snoozed) are exempt, so the evidence behind a yield report
+        survives until the user reads it (source-discovery). Once the
+        candidate is accepted or dismissed, normal retention applies.
+
         Args:
             retention_days: Number of days to retain.
 
@@ -660,12 +677,11 @@ class ScoutWatchService:
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
 
-        expiring_run_ids = [
-            row[0]
-            for row in self.db.query(ScoutWatchRun.id)
-            .filter(ScoutWatchRun.started_at < cutoff)
-            .all()
-        ]
+        runs_query = self.db.query(ScoutWatchRun.id).filter(ScoutWatchRun.started_at < cutoff)
+        exempt_watch_ids = unresolved_trial_watch_ids(self.db)
+        if exempt_watch_ids:
+            runs_query = runs_query.filter(ScoutWatchRun.watch_id.notin_(exempt_watch_ids))
+        expiring_run_ids = [row[0] for row in runs_query.all()]
 
         if not expiring_run_ids:
             return {"runs_deleted": 0, "posts_deleted": 0, "posts_retained": 0}

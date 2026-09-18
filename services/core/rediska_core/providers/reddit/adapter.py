@@ -34,6 +34,7 @@ from rediska_core.providers.base import (
     ProfileItemType,
     ProviderAdapter,
     ProviderConversation,
+    ProviderLocation,
     ProviderMessage,
     ProviderPost,
     ProviderProfile,
@@ -591,6 +592,69 @@ class RedditAdapter(ProviderAdapter):
         data = response.json().get("data", {})
         return self._map_profile(data)
 
+    async def search_locations(
+        self,
+        query: str,
+        limit: int = 25,
+    ) -> list[ProviderLocation]:
+        """Search subreddits by keyword, NSFW communities included.
+
+        Paced by the same X-Ratelimit handling as every other call.
+        """
+        params = {
+            "q": query,
+            "limit": max(1, min(limit, 100)),
+            "include_over_18": "on",
+            "raw_json": 1,
+        }
+        response = await self._api_request("GET", "/subreddits/search", params)
+        if response.status_code != 200:
+            raise RedditAPIError(
+                f"Subreddit search failed: status={response.status_code}",
+                response.status_code,
+            )
+
+        children = response.json().get("data", {}).get("children", [])
+        locations = [
+            self._map_location(child.get("data", {}))
+            for child in children
+            if child.get("kind") == "t5"
+        ]
+        return locations[:limit]
+
+    async def get_location_info(self, name: str) -> Optional[ProviderLocation]:
+        """Fetch one subreddit's about data; None if private, banned, or missing."""
+        bare = name.strip().strip("/")
+        if bare.lower().startswith("r/"):
+            bare = bare[2:]
+
+        response = await self._api_request(
+            "GET", f"/r/{bare}/about", {"raw_json": 1}
+        )
+        if response.status_code != 200:
+            reason = None
+            try:
+                reason = response.json().get("reason")
+            except Exception:
+                pass
+            logger.info(
+                f"Location r/{bare} unavailable: status={response.status_code} "
+                f"reason={reason or 'unknown'}"
+            )
+            return None
+
+        payload = response.json()
+        # A nonexistent subreddit can come back as a search listing instead of a 404.
+        if not isinstance(payload, dict) or payload.get("kind") != "t5":
+            logger.info(f"Location r/{bare} unavailable: not found")
+            return None
+
+        data = payload.get("data", {})
+        if data.get("subreddit_type") in ("private", "gold_restricted", "employees_only"):
+            logger.info(f"Location r/{bare} unavailable: {data.get('subreddit_type')}")
+            return None
+        return self._map_location(data)
+
     async def fetch_profile_items(
         self,
         user_id: str,
@@ -1015,6 +1079,23 @@ class RedditAdapter(ProviderAdapter):
             remote_visibility=visibility,
             is_nsfw=data.get("over_18", False),
             thumbnail_url=data.get("thumbnail") if (data.get("thumbnail") or "").startswith("http") else None,
+            raw_data=data,
+        )
+
+    def _map_location(self, data: dict) -> ProviderLocation:
+        """Map Reddit subreddit (t5) data to ProviderLocation."""
+        name = data.get("display_name_prefixed") or f"r/{data.get('display_name', '')}"
+        active = data.get("accounts_active")
+        if active is None:
+            active = data.get("active_user_count")
+        return ProviderLocation(
+            name=name,
+            title=data.get("title") or None,
+            description=data.get("public_description") or None,
+            member_count=data.get("subscribers"),
+            active_count=active,
+            is_nsfw=bool(data.get("over18", False)),
+            created_at=self._parse_timestamp(data.get("created_utc")),
             raw_data=data,
         )
 

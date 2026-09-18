@@ -48,6 +48,7 @@ from rediska_core.domain.models import (
 )
 from rediska_core.domain.schemas.evaluation import EffectiveEvaluation, ModelInput
 from rediska_core.domain.services.agent_prompt import AgentPromptService
+from rediska_core.domain.services.source_discovery import not_trial_post
 
 logger = logging.getLogger(__name__)
 
@@ -714,6 +715,8 @@ class AnalysisEvaluationService:
             ScoutWatchPost.analysis_recommendation.in_(RECOMMENDATIONS),
             ScoutWatchPost.dimension_results_json.isnot(None),
             ~self._final_evaluated_subquery("scout_post", ScoutWatchPost.id),
+            # Source-discovery trial posts are not sampled into the queue.
+            not_trial_post(),
         )
         if watch_id is not None:
             stmt = stmt.where(ScoutWatchPost.watch_id == watch_id)

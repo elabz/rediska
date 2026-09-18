@@ -1087,6 +1087,10 @@ class ScoutWatch(Base):
     # Status
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
+    # A trial watch backs a source-discovery trial: hidden from the watch list,
+    # never scheduled, and never auto-promotes (source-discovery).
+    is_trial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     # Analysis settings
     auto_analyze: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     min_confidence: Mapped[float] = mapped_column(nullable=False, default=0.7)
@@ -1396,6 +1400,170 @@ class CalibrationReport(Base):
     __table_args__ = (Index("idx_calibration_period_end", "period_end"),)
 
 
+# =============================================================================
+# Source Discovery Models
+# =============================================================================
+
+
+class SourceCandidateStatus(str):
+    """Source candidate lifecycle values."""
+
+    NEW = "new"
+    TRIALLED = "trialled"
+    ACCEPTED = "accepted"
+    DISMISSED = "dismissed"
+    SNOOZED = "snoozed"
+
+
+class SourceTrialStatus(str):
+    """Source trial status values."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class SourceCandidate(Base):
+    """A location or external host proposed as a new lead source."""
+
+    __tablename__ = "source_candidates"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    provider_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("providers.provider_id"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(
+        Enum("location", "external_host", name="source_candidate_kind_enum"),
+        nullable=False,
+    )
+    # Normalized location name (e.g. 'r/foo') or lower-cased host.
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    origin: Mapped[str] = mapped_column(
+        Enum("mined", "manual", name="source_candidate_origin_enum"),
+        nullable=False,
+        default="mined",
+    )
+
+    evidence_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    lift: Mapped[Optional[float]] = mapped_column(nullable=True)
+    # Qualified authors (locations) or distinct URLs (hosts); secondary sort key.
+    evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    status: Mapped[str] = mapped_column(
+        Enum(
+            "new", "trialled", "accepted", "dismissed", "snoozed",
+            name="source_candidate_status_enum",
+        ),
+        nullable=False,
+        default="new",
+    )
+    snoozed_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    location_info_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    location_info_fetched_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+
+    # The trial watch while trialling; the real watch once accepted.
+    watch_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("scout_watches.id", ondelete="SET NULL"), nullable=True
+    )
+
+    computed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider_id", "kind", "name", name="uq_source_candidate"),
+        Index("idx_source_candidate_status_lift", "status", "lift"),
+    )
+
+    watch: Mapped[Optional["ScoutWatch"]] = relationship()
+    trials: Mapped[list["SourceTrial"]] = relationship(
+        back_populates="candidate",
+        cascade="all, delete-orphan",
+        order_by="SourceTrial.id",
+    )
+
+
+class SourceTrial(Base):
+    """A bounded trial run of a location candidate through the scout pipeline."""
+
+    __tablename__ = "source_trials"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("source_candidates.id", ondelete="CASCADE"), nullable=False
+    )
+    watch_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("scout_watches.id", ondelete="SET NULL"), nullable=True
+    )
+    run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("scout_watch_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    job_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+
+    status: Mapped[str] = mapped_column(
+        Enum(
+            "queued", "running", "completed", "failed", "cancelled",
+            name="source_trial_status_enum",
+        ),
+        nullable=False,
+        default="queued",
+    )
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    posts_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    yield_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("idx_source_trial_candidate", "candidate_id", "created_at"),
+        Index("idx_source_trial_status", "status"),
+    )
+
+    candidate: Mapped["SourceCandidate"] = relationship(back_populates="trials")
+
+
+class SourceLinkSighting(Base):
+    """An outbound URL seen on a link-only post (host tally input).
+
+    Metadata only: the URL is recorded, never fetched, unless its host is a
+    registered external-listing host (which has its own resolver).
+    """
+
+    __tablename__ = "source_link_sightings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    provider_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_post_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider_id", "external_post_id", name="uq_source_link_sighting"),
+        Index("idx_source_link_sighting_host_seen", "host", "seen_at"),
+    )
+
+
 # Export all models
 __all__ = [
     "Base",
@@ -1423,7 +1591,12 @@ __all__ = [
     "AnalysisEvaluation",
     "PromptReplay",
     "CalibrationReport",
+    "SourceCandidate",
+    "SourceTrial",
+    "SourceLinkSighting",
     # Enums
+    "SourceCandidateStatus",
+    "SourceTrialStatus",
     "EvaluationSubjectType",
     "HumanVerdict",
     "ReplayStatus",

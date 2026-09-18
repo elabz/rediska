@@ -189,6 +189,22 @@ export function ScoutWatchList({ watches, onEditWatch, onRefresh }: ScoutWatchLi
                       Last run: {formatDate(watch.last_run_at)}
                     </span>
                   </div>
+
+                  {watch.yield_30d && (
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      data-testid={`watch-yield-${watch.id}`}
+                    >
+                      Last {watch.yield_30d.window_days}d: {watch.yield_30d.posts_seen} posts ·{' '}
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        {watch.yield_30d.suitable} suitable
+                      </span>{' '}
+                      · {watch.yield_30d.needs_review} needs review ·{' '}
+                      {watch.yield_30d.leads_created} leads ·{' '}
+                      {watch.yield_30d.leads_contacted} contacted ·{' '}
+                      {watch.yield_30d.leads_engaged} engaged
+                    </p>
+                  )}
                 </Link>
 
                 {/* Actions */}
