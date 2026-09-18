@@ -312,16 +312,14 @@ class TestJobCreation:
         message = db_session.query(Message).filter(Message.id == result.message_id).first()
         assert message.identity_id == setup_identity.id
 
-    def test_enqueue_uses_dedupe_key(
+    def test_dedupe_key_excludes_minted_identifiers(
         self, db_session, setup_conversation, setup_credentials
     ):
-        """Job's dedupe key must be the real hash of its payload, and a job
-        re-created from that identical payload must be deduped, not duplicated.
+        """The key must not contain the message_id minted by the same call.
 
-        NOTE: this exercises the dedupe guard directly rather than calling
-        enqueue_send twice. enqueue_send mints a fresh message_id per call and
-        embeds it in the payload, so two calls can never collide on the key.
-        See the report: send-level dedupe is inert.
+        This is precisely what made the old key unable to collide: it was
+        hashed from a payload carrying a freshly-generated message_id, so
+        `dedupe=True` looked active while never firing.
         """
         from rediska_core.domain.services.jobs import JobService
         from rediska_core.domain.services.send_message import (
@@ -331,33 +329,215 @@ class TestJobCreation:
         )
 
         service = SendMessageService(db=db_session)
-
         result = service.enqueue_send(
             conversation_id=setup_conversation.id,
             body_text="Hello world!",
         )
 
         job = db_session.query(Job).filter(Job.id == result.job_id).first()
+        assert job.dedupe_key is not None
 
-        # The key is genuinely derived from queue+type+payload, not a placeholder.
+        # The payload-derived key is what the old code used. The stored key
+        # must NOT be that, because the payload carries message_id.
         job_service = JobService(db=db_session)
-        expected_key = job_service.compute_dedupe_key(
+        payload_derived = job_service.compute_dedupe_key(
             SEND_JOB_QUEUE, SEND_JOB_TYPE, job.payload_json
         )
-        assert job.dedupe_key == expected_key
+        assert job.dedupe_key != payload_derived
 
-        # Re-creating a job from that same payload returns the SAME job row
-        # rather than enqueuing a second send.
-        duplicate = job_service.create_job(
-            queue_name=SEND_JOB_QUEUE,
-            job_type=SEND_JOB_TYPE,
-            payload=job.payload_json,
-            max_attempts=3,
-            dedupe=True,
+        # It is the hash of the caller-stable inputs only.
+        import hashlib
+
+        expected = job_service.compute_dedupe_key(
+            SEND_JOB_QUEUE,
+            SEND_JOB_TYPE,
+            {
+                "conversation_id": setup_conversation.id,
+                "identity_id": setup_conversation.identity_id,
+                "body_fingerprint": hashlib.sha256(
+                    "Hello world!".encode("utf-8")
+                ).hexdigest(),
+                "attachment_ids": [],
+            },
         )
-        assert duplicate.id == job.id
+        assert job.dedupe_key == expected
+
+    def test_double_submit_while_in_flight_is_deduplicated(
+        self, db_session, setup_conversation, setup_credentials
+    ):
+        """Two identical sends while the first is live produce one job/message."""
+        from rediska_core.domain.services.send_message import (
+            SEND_JOB_TYPE,
+            SendMessageService,
+        )
+
+        service = SendMessageService(db=db_session)
+
+        first = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="Are you around this weekend?",
+        )
+        second = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="Are you around this weekend?",
+        )
+
+        assert second.job_id == first.job_id
+        assert second.message_id == first.message_id
+        # The caller is told this was a collision, so it does not dispatch a
+        # second Celery task for a send already in flight.
+        assert first.deduplicated is False
+        assert second.deduplicated is True
+
         assert (
             db_session.query(Job).filter(Job.job_type == SEND_JOB_TYPE).count() == 1
+        )
+        assert (
+            db_session.query(Message)
+            .filter(Message.conversation_id == setup_conversation.id)
+            .count()
+            == 1
+        )
+
+    def test_same_text_after_completion_creates_a_new_send(
+        self, db_session, setup_conversation, setup_credentials
+    ):
+        """A legitimate repeat after the first finished is NOT deduplicated.
+
+        This is the test that would catch a naive always-dedupe: terminal jobs
+        release the dedupe_key, so the guard only ever matches a live job.
+        """
+        from rediska_core.domain.services.jobs import JobService
+        from rediska_core.domain.services.send_message import (
+            SEND_JOB_TYPE,
+            SendMessageService,
+        )
+
+        service = SendMessageService(db=db_session)
+
+        first = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="ok",
+        )
+
+        JobService(db=db_session).complete_job(first.job_id)
+        db_session.flush()
+
+        second = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="ok",
+        )
+
+        assert second.job_id != first.job_id
+        assert second.message_id != first.message_id
+        assert second.deduplicated is False
+        assert (
+            db_session.query(Job).filter(Job.job_type == SEND_JOB_TYPE).count() == 2
+        )
+
+    def test_different_text_is_never_deduplicated(
+        self, db_session, setup_conversation, setup_credentials
+    ):
+        """Distinct bodies must not collide, in flight or otherwise."""
+        from rediska_core.domain.services.send_message import SendMessageService
+
+        service = SendMessageService(db=db_session)
+
+        first = service.enqueue_send(
+            conversation_id=setup_conversation.id, body_text="one"
+        )
+        second = service.enqueue_send(
+            conversation_id=setup_conversation.id, body_text="two"
+        )
+
+        assert second.job_id != first.job_id
+        assert second.deduplicated is False
+
+    def test_failed_send_frees_the_key_for_immediate_resend(
+        self, db_session, setup_conversation, setup_credentials
+    ):
+        """handle_send_failure releases the key, so the text can be resent.
+
+        Asserted rather than inferred: the design depends on it.
+        """
+        from rediska_core.domain.services.send_message import SendMessageService
+
+        service = SendMessageService(db=db_session)
+
+        first = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="retry me",
+        )
+        service.handle_send_failure(
+            job_id=first.job_id,
+            message_id=first.message_id,
+            error="rate limited",
+            is_ambiguous=False,
+        )
+        db_session.flush()
+
+        job = db_session.query(Job).filter(Job.id == first.job_id).first()
+        assert job.dedupe_key is None
+
+        second = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="retry me",
+        )
+        assert second.job_id != first.job_id
+        assert second.deduplicated is False
+
+    def test_deleted_pending_message_frees_the_key(
+        self, db_session, setup_conversation, setup_credentials
+    ):
+        """delete_pending_message releases the key, so the text can be resent."""
+        from rediska_core.domain.services.send_message import SendMessageService
+
+        service = SendMessageService(db=db_session)
+
+        first = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="oops wrong chat",
+        )
+        service.delete_pending_message(first.message_id)
+        db_session.flush()
+
+        job = db_session.query(Job).filter(Job.id == first.job_id).first()
+        assert job.dedupe_key is None
+
+        second = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="oops wrong chat",
+        )
+        assert second.job_id != first.job_id
+        assert second.deduplicated is False
+
+    def test_manual_retry_still_creates_a_new_job(
+        self, db_session, setup_conversation, setup_credentials
+    ):
+        """Manual retry bypasses dedupe entirely and keeps max_attempts=1."""
+        from rediska_core.domain.services.send_message import (
+            SEND_JOB_TYPE,
+            SendMessageService,
+        )
+
+        service = SendMessageService(db=db_session)
+
+        first = service.enqueue_send(
+            conversation_id=setup_conversation.id,
+            body_text="did this go through?",
+        )
+
+        retry = service.retry_failed_send(first.message_id)
+
+        assert retry is not None
+        assert retry.job_id != first.job_id
+        assert retry.message_id == first.message_id
+
+        retry_job = db_session.query(Job).filter(Job.id == retry.job_id).first()
+        assert retry_job.max_attempts == 1
+        assert retry_job.dedupe_key is None  # dedupe=False on retry
+        assert (
+            db_session.query(Job).filter(Job.job_type == SEND_JOB_TYPE).count() == 2
         )
 
     def test_enqueue_validates_before_creating(

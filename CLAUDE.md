@@ -373,6 +373,8 @@ LEAD_EXPIRY_DAYS=0
 
 Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`, `scout`, `maintenance`, `transfer`.
 
+`task_routes` patterns in `celery_app.py` match **registered task names** (`ingest.*`, `message.*`), never module paths — a `rediska_worker.tasks.<module>.*` glob matches nothing and silently drops the task on the default `celery` queue. `tests/test_task_routing_unit.py` resolves through the live router and fails on any dead pattern or unrouted task. Core API dispatches pass `queue=` explicitly and so do not depend on these routes; beat and worker-internal dispatches do.
+
 ### Ingest
 - `ingest.backfill_conversations` / `ingest.backfill_messages` — history import
 - `ingest.sync_inbox_fast` — inbox-only sync (beat: every 60s, max 5 pages)

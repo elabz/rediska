@@ -18,6 +18,7 @@ from rediska_core.config import Settings, get_settings
 from rediska_core.domain.services.search import (
     SearchError,
     SearchService,
+    UnsupportedFilterError,
     MAX_LIMIT,
 )
 
@@ -112,6 +113,14 @@ async def search(
             max_score=result.get("max_score"),
         )
 
+    except UnsupportedFilterError as e:
+        # The caller supplied a filter the search layer cannot apply. Failing
+        # is the point: returning results here would silently be a wider set
+        # than the one that was asked for.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": str(e)},
+        )
     except SearchError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

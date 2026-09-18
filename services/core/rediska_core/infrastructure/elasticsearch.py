@@ -156,6 +156,21 @@ CONTENT_DOCS_INDEX = "rediska_content_docs_v1"
 
 
 # =============================================================================
+# EXCEPTIONS
+# =============================================================================
+
+
+class UnsupportedFilterError(ValueError):
+    """Raised when a supplied filter cannot be turned into a query clause.
+
+    A filter the client cannot express must fail the request rather than be
+    dropped: silently skipping it would return a wider result set than the
+    caller asked for, which is the failure mode this client is guarding
+    against.
+    """
+
+
+# =============================================================================
 # CLIENT
 # =============================================================================
 
@@ -456,14 +471,48 @@ class ElasticsearchClient:
     # SEARCH
     # =========================================================================
 
+    @staticmethod
+    def _build_clauses(fields: Optional[dict[str, Any]]) -> list[dict]:
+        """Turn a field->value mapping into `term`/`terms` clauses.
+
+        A `None` value means "no constraint on this field" and is dropped; an
+        empty list means the same. Any other value the client cannot express
+        raises rather than being skipped, so a filter is never silently lost.
+
+        Raises:
+            UnsupportedFilterError: If a value cannot become a clause.
+        """
+        clauses: list[dict] = []
+
+        for field, value in (fields or {}).items():
+            if value is None:
+                continue
+
+            if isinstance(value, (list, tuple, set)):
+                values = [v for v in value if v is not None]
+                if not values:
+                    continue
+                clauses.append({"terms": {field: list(values)}})
+            elif isinstance(value, (str, bool, int, float)):
+                clauses.append({"term": {field: value}})
+            else:
+                raise UnsupportedFilterError(
+                    f"Cannot build a query clause for filter {field!r} "
+                    f"of type {type(value).__name__}"
+                )
+
+        return clauses
+
     def search(
         self,
         index: str,
         query: dict[str, Any],
         filters: Optional[dict[str, Any]] = None,
+        must_not: Optional[dict[str, Any]] = None,
         from_: int = 0,
         size: int = 10,
         sort: Optional[list[dict]] = None,
+        highlight: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Search for documents.
 
@@ -471,38 +520,46 @@ class ElasticsearchClient:
             index: Index name.
             query: Elasticsearch query DSL.
             filters: Optional field filters (provider_id, identity_id, etc.).
+            must_not: Optional field exclusions, same shape as `filters`.
+                Emitted as a `must_not` clause list beside `must`/`filter`, so
+                a document missing the field is NOT excluded.
             from_: Starting offset.
             size: Number of results.
             sort: Optional sort specification.
+            highlight: Optional highlight specification.
 
         Returns:
             Dict with "total", "hits", and "max_score".
-        """
-        # Build the query with filters
-        must = [query]
-        filter_clauses = []
 
-        if filters:
-            for field, value in filters.items():
-                if value is not None:
-                    if isinstance(value, list):
-                        filter_clauses.append({"terms": {field: value}})
-                    else:
-                        filter_clauses.append({"term": {field: value}})
+        Raises:
+            UnsupportedFilterError: If a filter or exclusion cannot be applied.
+        """
+        # Build the query with filters. Clause building happens before the
+        # request so an inapplicable filter raises instead of being swallowed
+        # by the error handling below.
+        must = [query]
+        filter_clauses = self._build_clauses(filters)
+        must_not_clauses = self._build_clauses(must_not)
+
+        bool_query: dict[str, Any] = {
+            "must": must,
+            "filter": filter_clauses,
+        }
+        # Omit the key entirely when nothing is excluded.
+        if must_not_clauses:
+            bool_query["must_not"] = must_not_clauses
 
         body = {
-            "query": {
-                "bool": {
-                    "must": must,
-                    "filter": filter_clauses,
-                }
-            },
+            "query": {"bool": bool_query},
             "from": from_,
             "size": size,
         }
 
         if sort:
             body["sort"] = sort
+
+        if highlight:
+            body["highlight"] = highlight
 
         try:
             result = self._client.search(
@@ -512,17 +569,23 @@ class ElasticsearchClient:
 
             hits = result.get("hits", {})
 
+            formatted = []
+            for hit in hits.get("hits", []):
+                entry = {
+                    "id": hit.get("_id"),
+                    "score": hit.get("_score"),
+                    "source": hit.get("_source"),
+                }
+                # Only present when highlighting was requested; carrying it
+                # through is the whole point of having asked for it.
+                if "highlight" in hit:
+                    entry["highlight"] = hit["highlight"]
+                formatted.append(entry)
+
             return {
                 "total": hits.get("total", {}).get("value", 0),
                 "max_score": hits.get("max_score"),
-                "hits": [
-                    {
-                        "id": hit.get("_id"),
-                        "score": hit.get("_score"),
-                        "source": hit.get("_source"),
-                    }
-                    for hit in hits.get("hits", [])
-                ],
+                "hits": formatted,
             }
 
         except Exception as e:
@@ -540,6 +603,7 @@ class ElasticsearchClient:
         k: int = 10,
         num_candidates: int = 100,
         filters: Optional[dict[str, Any]] = None,
+        must_not: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Perform k-nearest neighbors search.
 
@@ -549,19 +613,16 @@ class ElasticsearchClient:
             k: Number of nearest neighbors.
             num_candidates: Number of candidates to consider.
             filters: Optional field filters.
+            must_not: Optional field exclusions, same shape as `filters`.
 
         Returns:
             Dict with "total", "hits", and "max_score".
-        """
-        filter_clauses = []
 
-        if filters:
-            for field, value in filters.items():
-                if value is not None:
-                    if isinstance(value, list):
-                        filter_clauses.append({"terms": {field: value}})
-                    else:
-                        filter_clauses.append({"term": {field: value}})
+        Raises:
+            UnsupportedFilterError: If a filter or exclusion cannot be applied.
+        """
+        filter_clauses = self._build_clauses(filters)
+        must_not_clauses = self._build_clauses(must_not)
 
         body = {
             "knn": {
@@ -573,8 +634,13 @@ class ElasticsearchClient:
             "size": k,
         }
 
-        if filter_clauses:
-            body["knn"]["filter"] = {"bool": {"filter": filter_clauses}}
+        if filter_clauses or must_not_clauses:
+            knn_bool: dict[str, Any] = {}
+            if filter_clauses:
+                knn_bool["filter"] = filter_clauses
+            if must_not_clauses:
+                knn_bool["must_not"] = must_not_clauses
+            body["knn"]["filter"] = {"bool": knn_bool}
 
         try:
             result = self._client.search(index=index, body=body)
@@ -613,4 +679,5 @@ __all__ = [
     "CONTENT_DOCS_MAPPING",
     "CONTENT_DOCS_INDEX",
     "NotFoundError",
+    "UnsupportedFilterError",
 ]

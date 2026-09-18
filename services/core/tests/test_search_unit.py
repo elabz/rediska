@@ -346,16 +346,13 @@ class TestSearchFilters:
             filters = call_args[1].get("filters", {})
             assert filters.get("local_deleted") is False
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG: SearchService._build_filters accepts exclude_visibility "
-            "and silently drops it, so removed/deleted content is never excluded "
-            "even though the API plumbs the parameter all the way down."
-        ),
-    )
     def test_exclude_removed_visibility(self, test_settings):
-        """Search should exclude the requested remote_visibility values."""
+        """Search should exclude the requested remote_visibility values.
+
+        This used to be an xfail pinning a live bug: _build_filters accepted
+        exclude_visibility and silently dropped it, so removed/deleted content
+        came back to callers who explicitly asked to exclude it.
+        """
         from rediska_core.domain.services.search import SearchService
 
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
@@ -369,10 +366,131 @@ class TestSearchFilters:
                 exclude_visibility=["removed", "deleted_by_author"],
             )
 
-            filters = mock_client.search.call_args[1].get("filters", {})
-            # The excluded values must show up somewhere in the filter payload.
-            assert "removed" in repr(filters)
-            assert "deleted_by_author" in repr(filters)
+            # Exclusions are negative constraints, so they travel as must_not
+            # rather than as positive filters.
+            must_not = mock_client.search.call_args[1]["must_not"]
+            assert set(must_not["remote_visibility"]) == {
+                "removed",
+                "deleted_by_author",
+            }
+
+    def test_exclude_visibility_is_a_negative_clause_not_a_filter(self, test_settings):
+        """The exclusion must not leak into the positive filter dict."""
+        from rediska_core.domain.services.search import SearchService
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            mock_client = MagicMock()
+            mock_client.search.return_value = {"total": 0, "hits": []}
+            mock_es.return_value = mock_client
+
+            service = SearchService(es_url="http://localhost:9200")
+            service.text_search(query="test", exclude_visibility=["removed"])
+
+            filters = mock_client.search.call_args[1]["filters"]
+            assert "remote_visibility" not in filters
+
+    def test_remote_deleted_excluded_by_default(self, test_settings):
+        """Without include_deleted, remote-deleted content is excluded."""
+        from rediska_core.domain.services.search import SearchService
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            mock_client = MagicMock()
+            mock_client.search.return_value = {"total": 0, "hits": []}
+            mock_es.return_value = mock_client
+
+            service = SearchService(es_url="http://localhost:9200")
+            service.text_search(query="test")
+
+            kwargs = mock_client.search.call_args[1]
+            assert set(kwargs["must_not"]["remote_visibility"]) == {
+                "removed",
+                "deleted_by_author",
+            }
+            # Locally deleted content is excluded by the positive filter.
+            assert kwargs["filters"]["local_deleted"] is False
+
+    def test_include_deleted_drops_the_default_exclusion(self, test_settings):
+        """include_deleted opts the caller in to hidden content."""
+        from rediska_core.domain.services.search import SearchService
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            mock_client = MagicMock()
+            mock_client.search.return_value = {"total": 0, "hits": []}
+            mock_es.return_value = mock_client
+
+            service = SearchService(es_url="http://localhost:9200")
+            service.text_search(query="test", include_deleted=True)
+
+            kwargs = mock_client.search.call_args[1]
+            assert kwargs["must_not"] == {}
+            assert "local_deleted" not in kwargs["filters"]
+
+    def test_caller_exclusions_merge_with_the_default(self, test_settings):
+        """A caller-supplied value adds to the default exclusion set."""
+        from rediska_core.domain.services.search import SearchService
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            mock_client = MagicMock()
+            mock_client.search.return_value = {"total": 0, "hits": []}
+            mock_es.return_value = mock_client
+
+            service = SearchService(es_url="http://localhost:9200")
+            service.text_search(query="test", exclude_visibility=["send_failed"])
+
+            must_not = mock_client.search.call_args[1]["must_not"]
+            assert set(must_not["remote_visibility"]) == {
+                "removed",
+                "deleted_by_author",
+                "send_failed",
+            }
+
+    def test_vector_search_applies_exclusions(self, test_settings):
+        """Exclusions reach kNN search too, not just BM25."""
+        from rediska_core.domain.services.search import SearchService
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            with patch(
+                "rediska_core.domain.services.search.EmbeddingsClient"
+            ) as mock_emb:
+                mock_client = MagicMock()
+                mock_client.knn_search.return_value = {"total": 0, "hits": []}
+                mock_es.return_value = mock_client
+                mock_emb.return_value.embed.return_value = [0.1] * 8
+
+                service = SearchService(
+                    es_url="http://localhost:9200",
+                    embeddings_url="http://localhost:8080",
+                    embeddings_model="nomic-embed-text",
+                )
+                service.vector_search(query="test", exclude_visibility=["removed"])
+
+                must_not = mock_client.knn_search.call_args[1]["must_not"]
+                assert "removed" in must_not["remote_visibility"]
+
+    def test_unapplicable_filter_fails_the_request(self, test_settings):
+        """A filter the search layer cannot apply raises instead of widening.
+
+        Returning results when a supplied filter was dropped is the same
+        failure mode as the bug above, one layer up.
+        """
+        from rediska_core.domain.services.search import (
+            SearchService,
+            UnsupportedFilterError,
+        )
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            mock_client = MagicMock()
+            mock_client.search.side_effect = UnsupportedFilterError(
+                "Cannot build a query clause for filter 'doc_type'"
+            )
+            mock_es.return_value = mock_client
+
+            service = SearchService(es_url="http://localhost:9200")
+
+            # Must surface as UnsupportedFilterError, not be wrapped into a
+            # generic SearchError or swallowed into an empty result set.
+            with pytest.raises(UnsupportedFilterError):
+                service.text_search(query="test")
 
 
 # =============================================================================
@@ -518,15 +636,12 @@ class TestSearchResultFormatting:
                 "content": ["This is a <em>test</em> message"]
             }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN BUG: include_highlights is accepted by text_search but never "
-            "added to the ES request, so ES never returns highlights at all."
-        ),
-    )
     def test_include_highlights_requests_highlighting_from_es(self, test_settings):
-        """include_highlights=True should ask ES for a highlight section."""
+        """include_highlights=True should ask ES for a highlight section.
+
+        Formerly an xfail: the parameter was accepted and never added to the
+        request, so ES was never asked to highlight anything.
+        """
         from rediska_core.domain.services.search import SearchService
 
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
@@ -537,7 +652,22 @@ class TestSearchResultFormatting:
             service = SearchService(es_url="http://localhost:9200")
             service.text_search(query="test", include_highlights=True)
 
-            assert "highlight" in mock_client.search.call_args[1]
+            highlight = mock_client.search.call_args[1]["highlight"]
+            assert "content" in highlight["fields"]
+
+    def test_highlights_omitted_when_not_requested(self, test_settings):
+        """Without include_highlights, no highlight section is requested."""
+        from rediska_core.domain.services.search import SearchService
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            mock_client = MagicMock()
+            mock_client.search.return_value = {"total": 0, "hits": []}
+            mock_es.return_value = mock_client
+
+            service = SearchService(es_url="http://localhost:9200")
+            service.text_search(query="test")
+
+            assert mock_client.search.call_args[1]["highlight"] is None
 
     def test_text_search_builds_multi_match_request(self, test_settings):
         """text_search should build a boosted, fuzzy multi_match over the index.

@@ -914,7 +914,10 @@ async def send_message(
         from rediska_core.config import get_settings
 
         job = db.query(Job).filter(Job.id == result.job_id).first()
-        job_payload = job.payload_json if job else None
+        # A deduplicated resubmit returns the ORIGINAL job, whose task is
+        # already in flight. Dispatching again would send the same message
+        # twice, which is exactly what at-most-once forbids.
+        job_payload = job.payload_json if job and not result.deduplicated else None
 
         # IMPORTANT: Commit the message and job BEFORE sending to Celery
         # This ensures the worker can find the message when it processes the task

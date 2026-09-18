@@ -416,12 +416,21 @@ class TestRestoreTestLocal:
 class TestMaintenanceTaskRouting:
     """Tests for maintenance task routing configuration."""
 
-    def test_maintenance_tasks_routed_to_maintenance_queue(self, mock_celery_app):
-        """Maintenance tasks should be routed to maintenance queue."""
-        routes = mock_celery_app.conf.task_routes
+    def test_maintenance_tasks_routed_to_maintenance_queue(
+        self, mock_celery_app, resolve_queue
+    ):
+        """Maintenance tasks should be routed to the maintenance queue.
 
-        assert "rediska_worker.tasks.maintenance.*" in routes
-        assert routes["rediska_worker.tasks.maintenance.*"]["queue"] == "maintenance"
+        Asserts the LIVE router, not the declared dict.
+        """
+        assert (
+            resolve_queue(mock_celery_app, "maintenance.mysql_dump_local")
+            == "maintenance"
+        )
+        assert (
+            resolve_queue(mock_celery_app, "maintenance.cleanup_scout_watch_history")
+            == "maintenance"
+        )
 
 
 # TestMaintenanceTaskNames removed: test_all_maintenance_tasks_have_correct_prefix

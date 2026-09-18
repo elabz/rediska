@@ -29,6 +29,7 @@ from typing import Any, Optional
 from rediska_core.infrastructure.elasticsearch import (
     CONTENT_DOCS_INDEX,
     ElasticsearchClient,
+    UnsupportedFilterError,
 )
 from rediska_core.infrastructure.embeddings import (
     EmbeddingsClient,
@@ -60,6 +61,10 @@ DEFAULT_KNN_CANDIDATES = 100
 # Score blending weights (BM25 weight, kNN weight)
 DEFAULT_BM25_WEIGHT = 0.3
 DEFAULT_KNN_WEIGHT = 0.7
+
+# remote_visibility values that mean the content is gone upstream. Excluded
+# unless the caller opts in with include_deleted.
+REMOTE_DELETED_VISIBILITY = ("removed", "deleted_by_author")
 
 
 # =============================================================================
@@ -128,16 +133,19 @@ class SearchService:
         provider_id: Optional[str] = None,
         identity_id: Optional[int] = None,
         doc_types: Optional[list[str]] = None,
-        exclude_visibility: Optional[list[str]] = None,
         include_deleted: bool = False,
     ) -> dict[str, Any]:
-        """Build filter dict for ES queries.
+        """Build the positive filter dict for ES queries.
+
+        Visibility exclusions are negative constraints and live in
+        `_build_exclusions`; keeping them out of here is what stops them being
+        quietly dropped, as they were when this method accepted
+        `exclude_visibility` and never read it.
 
         Args:
             provider_id: Filter by provider.
             identity_id: Filter by identity.
             doc_types: Filter by document types.
-            exclude_visibility: Visibility values to exclude.
             include_deleted: Whether to include locally deleted items.
 
         Returns:
@@ -159,6 +167,38 @@ class SearchService:
             filters["local_deleted"] = False
 
         return filters
+
+    def _build_exclusions(
+        self,
+        exclude_visibility: Optional[list[str]] = None,
+        include_deleted: bool = False,
+    ) -> dict[str, Any]:
+        """Build the negative (`must_not`) clause dict for ES queries.
+
+        Expressed as an exclusion rather than as a whitelist of the surviving
+        values on purpose: a document with no `remote_visibility` field is not
+        in a matching visibility state, so it must survive the exclusion, and
+        a visibility value added later must not start being filtered out by
+        accident.
+
+        Args:
+            exclude_visibility: Visibility values the caller asked to exclude.
+            include_deleted: When True, the caller opted in to hidden content
+                and the default remote-deleted exclusion is not applied.
+
+        Returns:
+            Dict of exclusions for ES, empty when nothing is excluded.
+        """
+        visibility: list[str] = []
+
+        if not include_deleted:
+            visibility.extend(REMOTE_DELETED_VISIBILITY)
+
+        for value in exclude_visibility or []:
+            if value not in visibility:
+                visibility.append(value)
+
+        return {"remote_visibility": visibility} if visibility else {}
 
     # =========================================================================
     # TEXT SEARCH (BM25)
@@ -212,6 +252,9 @@ class SearchService:
             provider_id=provider_id,
             identity_id=identity_id,
             doc_types=doc_types,
+            include_deleted=include_deleted,
+        )
+        exclusions = self._build_exclusions(
             exclude_visibility=exclude_visibility,
             include_deleted=include_deleted,
         )
@@ -227,17 +270,27 @@ class SearchService:
         if not phrase and fuzziness is not None:
             es_query["multi_match"]["fuzziness"] = fuzziness
 
+        highlight = (
+            {"fields": {"content": {}, "title": {}}} if include_highlights else None
+        )
+
         try:
             result = self.es_client.search(
                 index=CONTENT_DOCS_INDEX,
                 query=es_query,
                 filters=filters,
+                must_not=exclusions,
                 from_=offset,
                 size=limit,
+                highlight=highlight,
             )
 
             return result
 
+        except UnsupportedFilterError:
+            # A filter the search layer cannot apply fails the request rather
+            # than widening the result set past what the caller asked for.
+            raise
         except Exception as e:
             raise SearchError(f"Text search failed: {e}")
 
@@ -291,6 +344,9 @@ class SearchService:
                 provider_id=provider_id,
                 identity_id=identity_id,
                 doc_types=doc_types,
+                include_deleted=include_deleted,
+            )
+            exclusions = self._build_exclusions(
                 exclude_visibility=exclude_visibility,
                 include_deleted=include_deleted,
             )
@@ -301,10 +357,14 @@ class SearchService:
                 k=k,
                 num_candidates=num_candidates,
                 filters=filters,
+                must_not=exclusions,
             )
 
             return result
 
+        except UnsupportedFilterError:
+            # See text_search: an inapplicable filter fails the request.
+            raise
         except EmbeddingsError:
             # Fall back to empty results on embeddings error
             return {"total": 0, "hits": [], "max_score": None}
@@ -375,7 +435,10 @@ class SearchService:
                     k=limit * 2,
                 )
             except (SearchError, EmbeddingsError):
-                pass  # Fall back to BM25 only
+                # Fall back to BM25 only. UnsupportedFilterError is deliberately
+                # not caught here: a filter that could not be applied must fail
+                # the request, not degrade into a differently-filtered mode.
+                pass
 
         # If no kNN results, return BM25 results directly with original scores
         if not knn_results.get("hits"):
@@ -464,6 +527,8 @@ class SearchService:
 __all__ = [
     "SearchService",
     "SearchError",
+    "UnsupportedFilterError",
     "DEFAULT_LIMIT",
     "MAX_LIMIT",
+    "REMOTE_DELETED_VISIBILITY",
 ]

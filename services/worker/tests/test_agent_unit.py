@@ -14,22 +14,17 @@ Most of what used to live here has been removed:
 Add real coverage here when these tasks are implemented.
 """
 
-import pytest
-
 
 class TestAgentTaskRouting:
     """Tests for agent task routing configuration."""
 
-    def test_agent_tasks_routed_to_agent_queue(self, mock_celery_app):
-        """Agent tasks should be routed to agent queue.
+    def test_agent_tasks_routed_to_agent_queue(self, mock_celery_app, resolve_queue):
+        """Agent tasks should be routed to the agent queue.
 
-        NOTE: this asserts the declared task_routes config. It does NOT prove
-        the route is effective -- the registered task names are `agent.*`, not
-        `rediska_worker.tasks.agent.*`, so this pattern never actually matches
-        at dispatch time and these tasks fall through to the default queue.
-        See the routing note in the review report.
+        Asserts the LIVE router, not the declared dict -- the old version
+        checked that a `rediska_worker.tasks.agent.*` key existed, which it did
+        while matching no registered task at dispatch time.
         """
-        routes = mock_celery_app.conf.task_routes
-
-        assert "rediska_worker.tasks.agent.*" in routes
-        assert routes["rediska_worker.tasks.agent.*"]["queue"] == "agent"
+        assert resolve_queue(mock_celery_app, "agent.profile_summary") == "agent"
+        assert resolve_queue(mock_celery_app, "agent.lead_scoring") == "agent"
+        assert resolve_queue(mock_celery_app, "agent.draft_intro") == "agent"

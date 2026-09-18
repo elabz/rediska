@@ -15,22 +15,20 @@ sync_delta) perform real DB/provider work and are covered by the core
 integration tests. Add real coverage here as the stubs get implemented.
 """
 
-import pytest
-
 
 class TestTaskRouting:
     """Tests for task routing configuration."""
 
-    def test_ingest_tasks_routed_to_ingest_queue(self, mock_celery_app):
-        """Ingest tasks should be routed to ingest queue.
+    def test_ingest_tasks_routed_to_ingest_queue(self, mock_celery_app, resolve_queue):
+        """Ingest tasks should be routed to the ingest queue.
 
-        NOTE: this asserts the declared task_routes config. It does NOT prove
-        the route is effective -- the registered task names are `ingest.*`, not
-        `rediska_worker.tasks.ingest.*`, so this pattern never actually matches
-        at dispatch time and these tasks fall through to the default queue.
-        See the routing note in the review report.
+        Asserts the LIVE router, not the declared dict. The old version of this
+        test checked that `rediska_worker.tasks.ingest.*` was a key in
+        task_routes -- which it was, and which proved nothing, because tasks
+        register under short names so that pattern matched nothing at dispatch
+        time and every ingest task fell through to the default queue.
         """
-        routes = mock_celery_app.conf.task_routes
-
-        assert "rediska_worker.tasks.ingest.*" in routes
-        assert routes["rediska_worker.tasks.ingest.*"]["queue"] == "ingest"
+        assert resolve_queue(mock_celery_app, "ingest.sync_delta") == "ingest"
+        assert (
+            resolve_queue(mock_celery_app, "ingest.backfill_messages") == "ingest"
+        )

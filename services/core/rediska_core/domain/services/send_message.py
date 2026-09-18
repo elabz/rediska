@@ -23,6 +23,7 @@ Usage:
     service.handle_send_failure(job_id, message_id, error, is_ambiguous=True)
 """
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -106,6 +107,11 @@ class EnqueueResult:
     job_id: int
     message_id: int
     status: str = "queued"
+    # True when this call collided with a still-live send and returned the
+    # ORIGINAL job/message instead of creating new ones. The caller must not
+    # dispatch a second Celery task in that case -- doing so would send the
+    # same message twice and break at-most-once.
+    deduplicated: bool = False
 
 
 @dataclass
@@ -263,6 +269,46 @@ class SendMessageService:
                 f"No credentials found for identity {validation.identity_id}"
             )
 
+        # Compute the dedupe key BEFORE the Message row exists, from inputs the
+        # caller supplied. The key used to be hashed from a payload containing
+        # the freshly-minted message_id, so two identical calls always produced
+        # different keys and dedupe=True could never fire.
+        #
+        # No time window is needed: complete_job, fail_job (on exhaustion),
+        # handle_send_failure and delete_pending_message all null the
+        # dedupe_key, so get_job_by_dedupe_key only ever matches a still-live
+        # job. A resubmit during an in-flight send collides (the double-click);
+        # sending the same text again after the first finished does not.
+        #
+        # Attachments are part of the key because the same text with a
+        # different attachment is different work, not a double-submit.
+        dedupe_key = self.job_service.compute_dedupe_key(
+            SEND_JOB_QUEUE,
+            SEND_JOB_TYPE,
+            {
+                "conversation_id": conversation_id,
+                "identity_id": validation.identity_id,
+                "body_fingerprint": hashlib.sha256(
+                    body_text.strip().encode("utf-8")
+                ).hexdigest(),
+                "attachment_ids": sorted(attachment_ids or []),
+            },
+        )
+
+        # A live job for this exact send already exists: return it rather than
+        # creating a second Message row. The caller gets back the ORIGINAL job
+        # and message ids, not new ones.
+        existing_job = self.job_service.get_job_by_dedupe_key(dedupe_key)
+        if existing_job is not None:
+            existing_message_id = (existing_job.payload_json or {}).get("message_id")
+            if existing_message_id is not None:
+                return EnqueueResult(
+                    job_id=existing_job.id,
+                    message_id=int(existing_message_id),
+                    status="queued",
+                    deduplicated=True,
+                )
+
         # Create pending message
         message = Message(
             provider_id=validation.provider_id,
@@ -293,6 +339,8 @@ class SendMessageService:
             },
             max_attempts=3,  # Allow retries for clear failures; ambiguous failures bypass this
             dedupe=True,
+            # Explicit, because hashing this payload would fold in message.id.
+            dedupe_key=dedupe_key,
         )
 
         return EnqueueResult(

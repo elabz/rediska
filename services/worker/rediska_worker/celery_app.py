@@ -46,18 +46,25 @@ app.conf.update(
     # Retry settings
     task_default_retry_delay=60,  # 1 minute
     task_max_retries=10,
-    # Queue routing
+    # Queue routing.
+    #
+    # Patterns match REGISTERED TASK NAMES, not module paths. Tasks register
+    # under short names (`ingest.sync_delta`, `message.send_manual`), so the
+    # `rediska_worker.tasks.<module>.*` globs that used to live here matched
+    # nothing and every task fell through to the default `celery` queue. Task
+    # names are a public contract -- they appear in `send_task` calls from the
+    # core API, in the beat schedule, and in the `jobs` ledger -- so the
+    # patterns were rewritten rather than the tasks renamed.
     task_routes={
-        "rediska_worker.tasks.ingest.*": {"queue": "ingest"},
-        "rediska_worker.tasks.index.*": {"queue": "index"},
-        "rediska_worker.tasks.embed.*": {"queue": "embed"},
-        "rediska_worker.tasks.agent.*": {"queue": "agent"},
-        "rediska_worker.tasks.maintenance.*": {"queue": "maintenance"},
-        "rediska_worker.tasks.message.*": {"queue": "messages"},
-        "rediska_worker.tasks.multi_agent_analysis.*": {"queue": "multi_agent_analysis"},
+        "ingest.*": {"queue": "ingest"},
+        "index.*": {"queue": "index"},
+        "embed.*": {"queue": "embed"},
+        "agent.*": {"queue": "agent"},
+        "maintenance.*": {"queue": "maintenance"},
+        "message.*": {"queue": "messages"},
+        "multi_agent_analysis.*": {"queue": "multi_agent_analysis"},
         # Prompt replay shares the analysis queue so it sits behind the inference gate
         "evaluation.*": {"queue": "multi_agent_analysis"},
-        "rediska_worker.tasks.scout.*": {"queue": "scout"},
         "scout.*": {"queue": "scout"},
         # Inbox export/import/clear share a dedicated queue so a long export
         # cannot sit behind the nightly maintenance backups.

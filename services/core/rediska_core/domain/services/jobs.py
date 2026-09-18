@@ -81,6 +81,7 @@ class JobService:
         max_attempts: int = 10,
         run_at: Optional[datetime] = None,
         dedupe: bool = True,
+        dedupe_key: Optional[str] = None,
     ) -> Job:
         """Create a new job or return existing one if dedupe key matches.
 
@@ -91,6 +92,9 @@ class JobService:
             max_attempts: Maximum retry attempts (default 10).
             run_at: Optional scheduled execution time.
             dedupe: Whether to use deduplication (default True).
+            dedupe_key: Optional explicit key. Callers whose payload carries an
+                identifier minted during the same enqueue must supply one, or
+                the derived key can never collide.
 
         Returns:
             The created or existing Job.
@@ -102,6 +106,7 @@ class JobService:
             max_attempts=max_attempts,
             run_at=run_at,
             dedupe=dedupe,
+            dedupe_key=dedupe_key,
         )
         return job
 
@@ -113,6 +118,7 @@ class JobService:
         max_attempts: int = 10,
         run_at: Optional[datetime] = None,
         dedupe: bool = True,
+        dedupe_key: Optional[str] = None,
     ) -> tuple[Job, bool]:
         """Create a new job or return existing one, with creation flag.
 
@@ -123,18 +129,25 @@ class JobService:
             max_attempts: Maximum retry attempts (default 10).
             run_at: Optional scheduled execution time.
             dedupe: Whether to use deduplication (default True).
+            dedupe_key: Optional explicit key, used instead of hashing the
+                payload. A payload containing an id minted during this same
+                enqueue produces a key that can never collide, which leaves
+                the guard inert while looking active -- such callers pass a key
+                derived from their stable inputs instead.
 
         Returns:
             Tuple of (Job, created) where created is True if new job was created.
         """
-        dedupe_key = None
         if dedupe:
-            dedupe_key = self.compute_dedupe_key(queue_name, job_type, payload)
+            if dedupe_key is None:
+                dedupe_key = self.compute_dedupe_key(queue_name, job_type, payload)
 
             # Check for existing job with same dedupe key
             existing = self.get_job_by_dedupe_key(dedupe_key)
             if existing is not None:
                 return existing, False
+        else:
+            dedupe_key = None
 
         # Create new job
         job = Job(

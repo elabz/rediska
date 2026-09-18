@@ -485,6 +485,138 @@ class TestSearch:
                 {"terms": {"doc_type": ["message", "lead_post"]}}
             ]
 
+    def test_search_multi_value_exclusion_becomes_must_not_terms(self, test_settings):
+        """A multi-value exclusion becomes a `terms` clause under `must_not`."""
+        from rediska_core.infrastructure.elasticsearch import ElasticsearchClient
+
+        with patch(ES_PATCH_PATH) as mock_es:
+            mock_instance = MagicMock()
+            mock_instance.search.return_value = {
+                "hits": {"total": {"value": 0}, "hits": []}
+            }
+            mock_es.return_value = mock_instance
+
+            client = ElasticsearchClient(url=test_settings.elastic_url)
+            client.search(
+                index="rediska_content_docs_v1",
+                query={"match": {"content": "hello"}},
+                must_not={"remote_visibility": ["removed", "deleted_by_author"]},
+            )
+
+            bool_query = mock_instance.search.call_args[1]["body"]["query"]["bool"]
+            assert bool_query["must_not"] == [
+                {"terms": {"remote_visibility": ["removed", "deleted_by_author"]}}
+            ]
+            # must_not sits beside must/filter, so a document missing the
+            # remote_visibility field does not match the clause and survives.
+            # That is why exclusion is expressed negatively rather than as a
+            # whitelist of the surviving values.
+            assert "must" in bool_query and "filter" in bool_query
+
+    def test_search_omits_must_not_when_nothing_is_excluded(self, test_settings):
+        """No exclusions means no `must_not` key at all, not an empty list."""
+        from rediska_core.infrastructure.elasticsearch import ElasticsearchClient
+
+        with patch(ES_PATCH_PATH) as mock_es:
+            mock_instance = MagicMock()
+            mock_instance.search.return_value = {
+                "hits": {"total": {"value": 0}, "hits": []}
+            }
+            mock_es.return_value = mock_instance
+
+            client = ElasticsearchClient(url=test_settings.elastic_url)
+            client.search(
+                index="rediska_content_docs_v1",
+                query={"match": {"content": "hello"}},
+                must_not={"remote_visibility": []},
+            )
+
+            bool_query = mock_instance.search.call_args[1]["body"]["query"]["bool"]
+            assert "must_not" not in bool_query
+
+    def test_knn_search_applies_must_not(self, test_settings):
+        """kNN exclusions land in the knn filter's bool must_not."""
+        from rediska_core.infrastructure.elasticsearch import ElasticsearchClient
+
+        with patch(ES_PATCH_PATH) as mock_es:
+            mock_instance = MagicMock()
+            mock_instance.search.return_value = {"hits": {"hits": []}}
+            mock_es.return_value = mock_instance
+
+            client = ElasticsearchClient(url=test_settings.elastic_url)
+            client.knn_search(
+                index="rediska_content_docs_v1",
+                vector=[0.1, 0.2],
+                filters={"provider_id": "reddit"},
+                must_not={"remote_visibility": ["removed"]},
+            )
+
+            knn = mock_instance.search.call_args[1]["body"]["knn"]
+            assert knn["filter"]["bool"]["must_not"] == [
+                {"terms": {"remote_visibility": ["removed"]}}
+            ]
+            assert knn["filter"]["bool"]["filter"] == [
+                {"term": {"provider_id": "reddit"}}
+            ]
+
+    def test_search_raises_on_an_inapplicable_filter(self, test_settings):
+        """A filter the client cannot express fails rather than being dropped."""
+        from rediska_core.infrastructure.elasticsearch import (
+            ElasticsearchClient,
+            UnsupportedFilterError,
+        )
+
+        with patch(ES_PATCH_PATH) as mock_es:
+            mock_instance = MagicMock()
+            mock_es.return_value = mock_instance
+
+            client = ElasticsearchClient(url=test_settings.elastic_url)
+
+            with pytest.raises(UnsupportedFilterError):
+                client.search(
+                    index="rediska_content_docs_v1",
+                    query={"match_all": {}},
+                    filters={"doc_type": {"nested": "object"}},
+                )
+
+            # And the request never went out with a widened filter set.
+            mock_instance.search.assert_not_called()
+
+    def test_search_carries_highlights_through(self, test_settings):
+        """A highlight payload from ES survives to the caller."""
+        from rediska_core.infrastructure.elasticsearch import ElasticsearchClient
+
+        with patch(ES_PATCH_PATH) as mock_es:
+            mock_instance = MagicMock()
+            mock_instance.search.return_value = {
+                "hits": {
+                    "total": {"value": 1},
+                    "hits": [
+                        {
+                            "_id": "message:1",
+                            "_score": 1.0,
+                            "_source": {"content": "a test message"},
+                            "highlight": {"content": ["a <em>test</em> message"]},
+                        }
+                    ],
+                }
+            }
+            mock_es.return_value = mock_instance
+
+            client = ElasticsearchClient(url=test_settings.elastic_url)
+            result = client.search(
+                index="rediska_content_docs_v1",
+                query={"match": {"content": "test"}},
+                highlight={"fields": {"content": {}}},
+            )
+
+            assert mock_instance.search.call_args[1]["body"]["highlight"] == {
+                "fields": {"content": {}}
+            }
+            assert result["hits"][0]["highlight"] == {
+                "content": ["a <em>test</em> message"]
+            }
+
     def test_search_with_pagination(self, test_settings):
         """Search should support pagination."""
         from rediska_core.infrastructure.elasticsearch import ElasticsearchClient

@@ -26,6 +26,25 @@ os.environ.setdefault("BACKUPS_PATH", "/tmp/rediska_test_backups")
 os.environ.setdefault("ATTACHMENTS_PATH", "/tmp/rediska_test_attachments")
 
 
+@pytest.fixture
+def resolve_queue():
+    """Resolve a task name through the LIVE Celery router.
+
+    Routing tests must go through this rather than reading
+    `app.conf.task_routes`. Asserting the declared dict is what let every
+    `rediska_worker.tasks.<module>.*` pattern sit in the config while matching
+    no registered task, so tasks silently piled onto the default queue.
+    """
+
+    def _resolve(app, task_name: str) -> str:
+        route = app.amqp.router.route({}, task_name)
+        queue = route.get("queue")
+        # Celery hands back a kombu Queue once the destination is expanded.
+        return getattr(queue, "name", queue)
+
+    return _resolve
+
+
 @pytest.fixture(scope="session")
 def celery_config() -> dict[str, Any]:
     """Celery configuration for testing."""
