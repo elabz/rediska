@@ -118,7 +118,7 @@ The idea: poll `/r/{sub}/new` every 5 minutes, drop obviously unsuitable posts w
 | New posts, all 6 subreddits | — | ~2,300/day (r/dirtyr4r ~2,030) |
 | Kept by the tag filter | — | ~220/day, plus ~5/day with no tag |
 | Posts analysed | ~20/day | **~225/day (~11×)** |
-| LLM time (serial, one inference slot) | ~20 min/day | **~2.5–4 h/day** |
+| LLM time (sum of call time; the gate runs `INFERENCE_MAX_CONCURRENT`=2 at once here, so wall-clock is roughly half) | ~20 min/day | **~2.5–4 h/day** |
 | Reddit API calls | ~1,700/day | ~3,100/day (~2% of the 144k/day budget) |
 | needs_review to triage (41% of analysed) | ~8/day | **~90/day** |
 | suitable (7% of analysed) | ~1–2/day | ~15/day |
