@@ -103,6 +103,13 @@ export default function ScoutWatchesSettingsPage() {
     fetchWatches();
   }, [fetchWatches]);
 
+  // The watches' longest match string, used to preview a candidate on Browse
+  // and to pre-fill a watch created from one.
+  const previewQuery = watches
+    .filter((w) => w.is_active && w.search_query)
+    .map((w) => w.search_query as string)
+    .reduce((longest, q) => (q.length > longest.length ? q : longest), '');
+
   const handleWatchUpdated = () => {
     fetchWatches();
     setEditingWatch(null);
@@ -340,7 +347,7 @@ export default function ScoutWatchesSettingsPage() {
         <ScoutWatchEditor
           key={`accept-${acceptingCandidate.id}`}
           watch={null}
-          initial={{ source_location: acceptingCandidate.name }}
+          initial={{ source_location: acceptingCandidate.name, search_query: previewQuery }}
           title={`Create Watch for ${acceptingCandidate.name}`}
           onSubmit={acceptCandidate}
           onClose={() => setAcceptingCandidate(null)}
@@ -374,7 +381,11 @@ export default function ScoutWatchesSettingsPage() {
             />
           </TabsContent>
           <TabsContent value="discover" className="mt-4">
-            <DiscoverTab key={discoverKey} onCreateWatch={setAcceptingCandidate} />
+            <DiscoverTab
+              key={discoverKey}
+              onCreateWatch={setAcceptingCandidate}
+              previewQuery={previewQuery}
+            />
           </TabsContent>
         </Tabs>
       )}

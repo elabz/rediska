@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { DiscoverTab, type SourceCandidate, type SourceTrial } from './DiscoverTab';
+import {
+  DiscoverTab,
+  previewSearchUrl,
+  type SourceCandidate,
+  type SourceTrial,
+} from './DiscoverTab';
 
 // All candidates, locations and URLs below are synthetic.
 
@@ -275,5 +280,70 @@ describe('DiscoverTab', () => {
 
     await waitFor(() => expect(bodies[0]).toMatchObject({ name: 'r/test_fresh' }));
     expect(await screen.findByText('Candidate (new)')).toBeInTheDocument();
+  });
+
+  it('builds a Browse deep link with the match string', () => {
+    const url = previewSearchUrl('r/test_ropes', '(F4M OR F4A) AND (PA OR NJ)');
+    const params = new URLSearchParams(url.split('?')[1]);
+
+    expect(url.startsWith('/browse?')).toBe(true);
+    expect(params.get('location')).toBe('r/test_ropes');
+    expect(params.get('q')).toBe('(F4M OR F4A) AND (PA OR NJ)');
+    expect(params.get('sort')).toBe('new');
+  });
+
+  it('opens Preview search in a new tab', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    mockFetch(() => jsonResponse(listResponse([candidate()])));
+
+    render(<DiscoverTab onCreateWatch={vi.fn()} previewQuery="(F4M OR F4A)" />);
+    const row = await screen.findByTestId('candidate-1');
+    await userEvent.click(within(row).getByRole('button', { name: /preview search/i }));
+
+    expect(open).toHaveBeenCalledWith(
+      previewSearchUrl('r/test_ropes', '(F4M OR F4A)'),
+      '_blank',
+      'noopener',
+    );
+    open.mockRestore();
+  });
+
+  it('flags rule-restricted subreddits and hides them by default', async () => {
+    const urls: string[] = [];
+    mockFetch((url) => {
+      urls.push(url);
+      return jsonResponse(
+        listResponse([
+          candidate({
+            contact_restricted: true,
+            contact_rule: 'No personals: seeking meetups gets you banned',
+          }),
+        ]),
+      );
+    });
+
+    render(<DiscoverTab onCreateWatch={vi.fn()} />);
+    const row = await screen.findByTestId('candidate-1');
+
+    expect(within(row).getByText('Rules forbid contact')).toBeInTheDocument();
+    expect(within(row).getByTestId('contact-rule')).toHaveTextContent('No personals');
+    expect(urls[0]).toContain('hide_restricted=true');
+
+    await userEvent.click(screen.getByLabelText(/hide subreddits whose rules forbid/i));
+    await waitFor(() => expect(urls.some((u) => !u.includes('hide_restricted'))).toBe(true));
+  });
+
+  it('filters candidates by name on the server', async () => {
+    const urls: string[] = [];
+    mockFetch((url) => {
+      urls.push(url);
+      return jsonResponse(listResponse([candidate()]));
+    });
+
+    render(<DiscoverTab onCreateWatch={vi.fn()} />);
+    await screen.findByTestId('candidate-1');
+    await userEvent.type(screen.getByLabelText('Filter candidates by name'), 'r4r{enter}');
+
+    await waitFor(() => expect(urls.some((u) => u.includes('q=r4r'))).toBe(true));
   });
 });

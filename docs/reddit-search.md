@@ -133,6 +133,38 @@ Caveats:
 - `/new` holds only the last ~1000 posts, ~12 h for r/dirtyr4r. A worker outage longer than that can only be back-filled with search.
 - Reposts barely inflate volume: distinct target authors per day ≈ target posts per day.
 
+## Regional personals subreddits (PA/NJ/DE/MD/NY)
+
+Found 2026-09-18 by combining two sources. First, Reddit subreddit search for ~30 regional personals queries ("philadelphia r4r", "nj hookup", "baltimore r4r", "nyc personals"…). Second, community names in our authors' stored history that contain a regional term.
+
+A name regex alone is too loose ("pa" matches *pasta*, *pawg*), so the list was curated by hand. It excludes:
+- places beyond the ~200-mile radius (Pittsburgh, Buffalo, Albany, upstate NY);
+- photo-only "gonewild" subreddits;
+- paid-content and findom subreddits;
+- orientation-specific subreddits.
+
+48 were added as `manual` source candidates, visible in the Discover tab; filter by name with "r4r", "nj", "philly" and so on:
+
+- **PA:** pennsylvaniadirtyr4r, pahookups, paswingers, pennsylvaniar4r, philadelphiar4r, philadelphiabetterr4r, newphillyhookups, philly4anonfun, pa4r, pennsylvaniansa, lancasterswingers, scranton_hookups, harrisburgdungeon
+- **NJ:** nj4nj, njr4r, r4r_nj, njstraightr4r, njr4rstraight, nj_swingers, nj_lifestyle, njhotwife, jerseyshoredlfwb, newjerseyfwb_fun, nj4smash
+- **DE:** delawarer4r
+- **MD/DC:** baltimoreanddcr4r, marylandr4r, marylandswingersr4r, dmvcasualencounters, dmvbaddiesndaddies
+- **NYC/LI:** nyr4r, nycr4r, r4rnyc, nychookups_, nychookups, hookupsnewyork, newyorkhookingup, newyorkhookups, r4rnychookups, nyfwb, nyc_fuckbuddy, newyorkswingers, newyorkswingersr4r, newyorkswingersclub, nyhotwifes, newyorkr4r, longislandsingles_, longislandswing (plus longislandhookups, already a candidate)
+
+**Workflow:** Preview search → Run trial → Create watch. Location-specific subreddits may not need the location clause, so edit the pre-filled query when creating the watch.
+
+## Community rules that forbid contact
+
+Some communities forbid approaching posters, for example "No personals", "This is not a dating sub", "No asking for DMs". The Discover tab flags them with the quoted rule and hides them by default.
+
+The check is a conservative pattern match (`contact_restriction()` in `source_discovery.py`), tuned against real rules. Personals subreddits commonly carry rules that must *not* flag:
+- "No personal info"
+- "No solicitation" (in hookup subreddits this means sex work)
+- "No unsolicited nudes/DMs"
+- "No seeking relationships for others"
+
+First run, 2026-09-18: 35 of ~260 communities flagged, and a manual review found them correct. The one partial case is r/polyamoryr4r ("strictly not a hookup reddit" — relationship posts are fine there).
+
 ## Re-running the audit
 
 The scripts only read (Reddit listings and search, plus the `scout_watches` table). They print counts and title tags only, never post text. Each run costs ~60–120 Reddit requests.

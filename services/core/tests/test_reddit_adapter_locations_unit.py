@@ -121,14 +121,33 @@ class TestSearchLocations:
 
 
 class TestGetLocationInfo:
-    async def test_returns_summary(self, http):
-        http.get.return_value = response(body={"kind": "t5", "data": subreddit("test_sub")})
+    async def test_returns_summary_with_rules(self, http):
+        http.get.side_effect = [
+            response(body={"kind": "t5", "data": subreddit("test_sub")}),
+            response(body={"rules": [
+                {"short_name": "No personals", "description": "Seeking meetups is banned."},
+                {"short_name": "Be civil", "description": ""},
+            ]}),
+        ]
 
         info = await make_adapter().get_location_info("r/test_sub")
 
         assert info is not None
         assert info.name == "r/test_sub"
-        assert http.get.await_args.args[0].endswith("/r/test_sub/about")
+        assert info.rules == ["No personals: Seeking meetups is banned.", "Be civil"]
+        urls = [c.args[0] for c in http.get.await_args_list]
+        assert urls[0].endswith("/r/test_sub/about")
+        assert urls[1].endswith("/r/test_sub/about/rules")
+
+    async def test_missing_rules_do_not_fail_the_lookup(self, http):
+        http.get.side_effect = [
+            response(body={"kind": "t5", "data": subreddit("test_sub")}),
+            response(status=403),
+        ]
+
+        info = await make_adapter().get_location_info("test_sub")
+
+        assert info is not None and info.rules == []
 
     @pytest.mark.parametrize(
         "status,body",
@@ -165,8 +184,8 @@ class TestRateLimitPacing:
         )
         adapter = make_adapter()
 
-        await adapter.get_location_info("test_sub")  # records the low quota
-        await adapter.search_locations("x")  # must be paced, not sent at once
+        await adapter.search_locations("x")  # records the low quota
+        await adapter.search_locations("y")  # must be paced, not sent at once
 
         assert sleep.await_count == 1
         assert sleep.await_args.args[0] > 0

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Loader2, Search, BookmarkPlus, BookmarkCheck, ExternalLink, MessageSquare, ArrowUp, Clock, ChevronDown, Star, StarOff, X, Filter, User, Flame, TrendingUp, Trophy, AlertTriangle, Venus, Eye, Plus } from 'lucide-react';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { Card } from '@/components/ui/card';
@@ -231,6 +231,9 @@ export default function BrowsePage() {
   const [creatingWatch, setCreatingWatch] = useState(false);
   const [watchCreated, setWatchCreated] = useState(false);
   const [knownAuthors, setKnownAuthors] = useState<Set<string>>(new Set());
+  const fetchPostsRef = useRef<
+    ((loc: string, nextCursor?: string, sort?: SortOption, time?: TimeFilter, query?: string) => Promise<void>) | null
+  >(null);
 
   // Load recent locations and bookmarks from localStorage
   useEffect(() => {
@@ -271,6 +274,26 @@ export default function BrowsePage() {
       localStorage.setItem('rediska_bookmarked_locations', JSON.stringify(updated));
       return updated;
     });
+  }, []);
+
+  // Deep link: /browse?location=r/foo&q=...&sort=new&t=month runs that search
+  // on load (used by "Preview search" on the Discover tab). Read from
+  // window.location so the page needs no Suspense boundary.
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    deepLinkHandled.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const loc = params.get('location');
+    if (!loc) return;
+    const sort = (params.get('sort') as SortOption) || 'new';
+    const time = (params.get('t') as TimeFilter) || 'week';
+    const q = params.get('q') || '';
+    setLocation(loc);
+    setSortBy(sort);
+    setTimeFilter(time);
+    setSearchQuery(q);
+    fetchPostsRef.current?.(loc, undefined, sort, time, q);
   }, []);
 
   const isBookmarked = useCallback((loc: string) => {
@@ -387,6 +410,7 @@ export default function BrowsePage() {
       setLoadingMore(false);
     }
   }, [addToRecent, sortBy, timeFilter, searchQuery]);
+  fetchPostsRef.current = fetchPosts;
 
   // Save post as lead (includes author and full article text)
   // Automatically triggers analysis in the background after saving

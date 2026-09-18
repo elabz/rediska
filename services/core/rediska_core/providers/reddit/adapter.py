@@ -653,7 +653,24 @@ class RedditAdapter(ProviderAdapter):
         if data.get("subreddit_type") in ("private", "gold_restricted", "employees_only"):
             logger.info(f"Location r/{bare} unavailable: {data.get('subreddit_type')}")
             return None
-        return self._map_location(data)
+        location = self._map_location(data)
+        location.rules = await self._fetch_location_rules(bare)
+        return location
+
+    async def _fetch_location_rules(self, bare: str) -> list[str]:
+        """Community rules as "title: description" strings; [] if unavailable."""
+        response = await self._api_request("GET", f"/r/{bare}/about/rules", {"raw_json": 1})
+        if response.status_code != 200:
+            logger.info(f"Rules for r/{bare} unavailable: status={response.status_code}")
+            return []
+        rules = []
+        for rule in (response.json() or {}).get("rules", []) or []:
+            title = (rule.get("short_name") or "").strip()
+            description = (rule.get("description") or "").strip()
+            text = f"{title}: {description}" if title and description else title or description
+            if text:
+                rules.append(text)
+        return rules
 
     async def fetch_profile_items(
         self,

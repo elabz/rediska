@@ -481,3 +481,100 @@ class TestTrialWatchFilter:
 
         assert [p.watch_id for p in posts] == [real.id]
         assert ScoutWatchService(db_session).count_needs_review() == 1
+
+
+# =============================================================================
+# CONTACT RESTRICTIONS AND AVAILABILITY
+# =============================================================================
+
+
+from rediska_core.domain.services.source_discovery import contact_restriction  # noqa: E402
+
+
+class TestContactRestriction:
+    @pytest.mark.parametrize("rule", [
+        "No Jo Buds/Soliciting Messages: No requests for JoBuds or soliciting messages or "
+        "chats with other users. No asking for private messages.",
+        "No personals.: There are subreddits for that. Trying to seek ANRs or meet people "
+        "irl will get you instantly banned.",
+        "No romantic or sexual content! : /r/r4r might be more suited for that.",
+        "This is not a dating sub.",
+        "Do not ask for DMs in your post.",
+        'No personals: Absolutely no personals. * No "looking for" * No "seeking" * No "r4r"',
+        "This is not a dating subreddit!: Dating posts will be removed.",
+        "No looking for posts or comments: no sexting requests.",
+        "No Personal Ad's Or Asking For DM's: We do not allow personal ads in this subreddit.",
+    ])
+    def test_forbidding_rules_are_flagged(self, rule):
+        assert contact_restriction(None, ["Be civil: be nice", rule]) == rule
+
+    @pytest.mark.parametrize("rule", [
+        "Respect & Consent: Explicit consent is required. No pressure, no unsolicited nudes/DMs.",
+        "Don't Share Personal Information: Save them for PMs, not public posts or comments.",
+        "No Telegram or External Messengers: Any mention of Telegram is prohibited.",
+        "Soliciting business is strictly prohibited.",
+        "No Upvote Begging, No Soliciting of donations.",
+        "Questions? Message us via modmail.",
+        "No selling, buying, sugar, or trading.",
+        # Real false positives from r/philadelphiar4r, r/philly, r/newphillyhookups:
+        "No usernames or personal info: No personal information, including phone number.",
+        "No personal attacks.: Insults directed at other users will be removed.",
+        "No sex workers. No solicitation. No sales. No links to content like onlyfans.",
+        # Real false positives from r/polyamoryr4r and r/cglpersonals:
+        "No seeking relationships for others: Posts seeking relationships for someone else.",
+        "No toxic ads.: No personal ads that imply they are open to having an affair.",
+    ])
+    def test_personals_style_rules_are_not_flagged(self, rule):
+        assert contact_restriction("A place to meet people", [rule]) is None
+
+    def test_description_is_checked_too(self):
+        assert contact_restriction("Discussion only. No hookups.", []) is not None
+
+
+def location_candidate(db, name, info=None, fetched=True, lift=2.0):
+    c = SourceCandidate(
+        provider_id="reddit", kind="location", name=name, origin="mined", status="new",
+        evidence_json={}, evidence_count=3, lift=lift, created_at=NOW, updated_at=NOW,
+        location_info_json=info, location_info_fetched_at=NOW if fetched else None,
+    )
+    db.add(c)
+    db.flush()
+    return c
+
+
+class TestLocationInfoAndFilters:
+    def test_store_records_contact_rule_only_when_present(self, db_session, provider):
+        svc = service(db_session)
+        restricted = location_candidate(db_session, "r/test_no_contact", fetched=False)
+        open_ = location_candidate(db_session, "r/test_open", fetched=False)
+
+        svc.store_location_info(restricted, {"name": "r/test_no_contact", "rules": ["No personals."]})
+        svc.store_location_info(open_, {"name": "r/test_open", "rules": ["Be civil"]})
+
+        assert restricted.location_info_json["contact_rule"] == "No personals."
+        assert "contact_rule" not in open_.location_info_json
+        assert open_.location_info_json["rules_checked"] is True
+
+    def test_search_info_without_rules_is_refreshed(self, db_session, provider):
+        svc = service(db_session)
+        manual = svc.add_manual("r/test_manual", {"name": "r/test_manual", "is_nsfw": False})
+
+        assert svc.needs_location_info(manual) is True
+        svc.store_location_info(manual, {"name": "r/test_manual", "rules": []})
+        assert svc.needs_location_info(manual) is False
+
+    def test_default_list_hides_unavailable_and_optionally_restricted(self, db_session, provider):
+        location_candidate(db_session, "r/test_gone", {"unavailable": True}, lift=9.0)
+        location_candidate(db_session, "r/test_restricted",
+                           {"rules_checked": True, "contact_rule": "No personals."}, lift=8.0)
+        location_candidate(db_session, "r/test_fine", {"rules_checked": True}, lift=7.0)
+        location_candidate(db_session, "r/test_unknown", None, fetched=False, lift=6.0)
+        svc = service(db_session)
+
+        default = [c.name for c in svc.list_candidates()[0]]
+        hidden = [c.name for c in svc.list_candidates(hide_restricted=True)[0]]
+        everything = [c.name for c in svc.list_candidates(status="all")[0]]
+
+        assert default == ["r/test_restricted", "r/test_fine", "r/test_unknown"]
+        assert hidden == ["r/test_fine", "r/test_unknown"]
+        assert "r/test_gone" in everything

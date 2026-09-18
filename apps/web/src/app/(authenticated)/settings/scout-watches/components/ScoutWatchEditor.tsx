@@ -60,7 +60,9 @@ export function ScoutWatchEditor({
   const [sourceLocation, setSourceLocation] = useState(
     watch?.source_location || initial?.source_location || '',
   );
-  const [searchQuery, setSearchQuery] = useState(watch?.search_query || '');
+  const [searchQuery, setSearchQuery] = useState(
+    watch?.search_query || initial?.search_query || '',
+  );
   const [sortBy, setSortBy] = useState(watch?.sort_by || 'new');
   const [timeFilter, setTimeFilter] = useState(watch?.time_filter || 'day');
   const [autoAnalyze, setAutoAnalyze] = useState(watch?.auto_analyze ?? true);

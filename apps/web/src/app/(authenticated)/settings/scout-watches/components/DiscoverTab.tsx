@@ -8,6 +8,8 @@ import {
   ExternalLink,
   FlaskConical,
   Loader2,
+  ScanSearch,
+  ShieldAlert,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -71,6 +73,8 @@ export interface SourceCandidate {
   snoozed_until: string | null;
   location_info: LocationInfo | null;
   location_unavailable: boolean;
+  contact_restricted?: boolean;
+  contact_rule?: string | null;
   watch_id: number | null;
   latest_trial: SourceTrial | null;
 }
@@ -122,6 +126,13 @@ function formatCount(n: number | null | undefined): string {
 
 function isActiveTrial(trial: SourceTrial | null): boolean {
   return !!trial && (trial.status === 'queued' || trial.status === 'running');
+}
+
+/** Browse URL that runs `query` against `location`, newest first. */
+export function previewSearchUrl(location: string, query: string): string {
+  const params = new URLSearchParams({ location, sort: 'new', t: 'month' });
+  if (query) params.set('q', query);
+  return `/browse?${params.toString()}`;
 }
 
 // =============================================================================
@@ -244,10 +255,15 @@ function TrialSummary({
 
 interface DiscoverTabProps {
   onCreateWatch: (candidate: SourceCandidate) => void;
+  /** The match string used for "Preview search" (the watches' long query). */
+  previewQuery?: string;
 }
 
-export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
+export function DiscoverTab({ onCreateWatch, previewQuery = '' }: DiscoverTabProps) {
   const [view, setView] = useState<View>('open');
+  const [hideRestricted, setHideRestricted] = useState(true);
+  const [nameFilter, setNameFilter] = useState('');
+  const [appliedNameFilter, setAppliedNameFilter] = useState('');
   const [items, setItems] = useState<SourceCandidate[]>([]);
   const [total, setTotal] = useState(0);
   const [runningTrial, setRunningTrial] = useState<SourceTrial | null>(null);
@@ -270,6 +286,8 @@ export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
       try {
         const params = new URLSearchParams({ limit: '100' });
         if (view !== 'open') params.set('status', view);
+        if (hideRestricted) params.set('hide_restricted', 'true');
+        if (appliedNameFilter.trim()) params.set('q', appliedNameFilter.trim());
         const response = await fetch(`/api/core/source-candidates?${params}`, {
           credentials: 'include',
         });
@@ -287,8 +305,12 @@ export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
         if (!quiet) setLoading(false);
       }
     },
-    [view],
+    [view, hideRestricted, appliedNameFilter],
   );
+
+  const openPreview = (location: string) => {
+    window.open(previewSearchUrl(location, previewQuery), '_blank', 'noopener');
+  };
 
   useEffect(() => {
     fetchCandidates();
@@ -427,6 +449,15 @@ export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
                       <p className="text-xs text-muted-foreground line-clamp-2">{r.description}</p>
                     )}
                   </div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => openPreview(r.name)}
+                    title="Open Browse in a new tab with the match string"
+                  >
+                    <ScanSearch className="h-3.5 w-3.5 mr-1" />
+                    Preview
+                  </Button>
                   {r.watched ? (
                     <Badge variant="secondary">Watched</Badge>
                   ) : r.candidate_id ? (
@@ -458,10 +489,35 @@ export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
             </Button>
           ))}
         </div>
-        <Button variant="outline" size="sm" onClick={() => fetchCandidates()}>
-          <RefreshCw className="h-4 w-4 mr-1" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-3">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              setAppliedNameFilter(nameFilter);
+            }}
+          >
+            <Input
+              aria-label="Filter candidates by name"
+              placeholder="Filter by name, e.g. r4r"
+              className="h-8 w-44"
+              value={nameFilter}
+              onChange={(e) => setNameFilter(e.target.value)}
+              onBlur={() => setAppliedNameFilter(nameFilter)}
+            />
+          </form>
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={hideRestricted}
+              onChange={(e) => setHideRestricted(e.target.checked)}
+            />
+            Hide subreddits whose rules forbid contacting posters
+          </label>
+          <Button variant="outline" size="sm" onClick={() => fetchCandidates()}>
+            <RefreshCw className="h-4 w-4 mr-1" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {actionError && (
@@ -520,6 +576,12 @@ export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
                         {c.origin === 'manual' && <Badge variant="outline">Manual</Badge>}
                         {c.status !== 'new' && <Badge variant="secondary">{c.status}</Badge>}
                         {c.location_info?.is_nsfw && <Badge variant="outline">NSFW</Badge>}
+                        {c.contact_restricted && (
+                          <Badge variant="destructive" className="gap-1">
+                            <ShieldAlert className="h-3 w-3" />
+                            Rules forbid contact
+                          </Badge>
+                        )}
                         {c.lift !== null && (
                           <span className="text-sm font-semibold tabular-nums">
                             lift {c.lift.toFixed(2)}×
@@ -528,6 +590,11 @@ export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
                       </div>
                       <Evidence candidate={c} />
                       <LocationDetails candidate={c} />
+                      {c.contact_rule && (
+                        <p className="text-xs text-destructive" data-testid="contact-rule">
+                          Rule: “{c.contact_rule}”
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap justify-end gap-1.5 shrink-0">
@@ -540,6 +607,15 @@ export function DiscoverTab({ onCreateWatch }: DiscoverTabProps) {
                         <>
                           {c.kind === 'location' && (
                             <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => openPreview(c.name)}
+                                title="Open Browse in a new tab with the match string"
+                              >
+                                <ScanSearch className="h-3.5 w-3.5 mr-1" />
+                                Preview search
+                              </Button>
                               <Button
                                 size="sm"
                                 variant="outline"

@@ -99,6 +99,7 @@ def _location_dict(location: Any) -> dict[str, Any]:
         "active_count": location.active_count,
         "is_nsfw": bool(location.is_nsfw),
         "created_at": location.created_at.isoformat() if location.created_at else None,
+        "rules": list(getattr(location, "rules", None) or []),
     }
 
 
@@ -127,6 +128,7 @@ def _candidate_response(
 ) -> SourceCandidateResponse:
     info = candidate.location_info_json if isinstance(candidate.location_info_json, dict) else None
     unavailable = bool(info and info.get("unavailable"))
+    contact_rule = info.get("contact_rule") if info else None
     return SourceCandidateResponse(
         id=candidate.id,
         provider_id=candidate.provider_id,
@@ -140,6 +142,8 @@ def _candidate_response(
         snoozed_until=candidate.snoozed_until,
         location_info=LocationInfo(**info) if info and not unavailable else None,
         location_unavailable=unavailable,
+        contact_restricted=bool(contact_rule),
+        contact_rule=contact_rule,
         watch_id=candidate.watch_id,
         latest_trial=_trial_response(latest_trial),
         computed_at=candidate.computed_at,
@@ -232,6 +236,10 @@ async def list_candidates(
     ),
     cursor: Optional[str] = Query(None, description="Cursor from a previous page"),
     limit: int = Query(25, ge=1, le=100),
+    hide_restricted: bool = Query(
+        False, description="Hide locations whose rules forbid contacting posters"
+    ),
+    q: Optional[str] = Query(None, max_length=100, description="Name contains (e.g. 'r4r')"),
 ) -> SourceCandidateListResponse:
     """Candidates sorted by lift descending (external hosts after locations)."""
     if kind is not None and kind not in (KIND_LOCATION, KIND_EXTERNAL_HOST):
@@ -244,9 +252,24 @@ async def list_candidates(
 
     service = SourceDiscoveryService(db)
     candidates, total = service.list_candidates(
-        kind=kind, status=candidate_status, offset=offset, limit=limit
+        kind=kind,
+        status=candidate_status,
+        offset=offset,
+        limit=limit,
+        hide_restricted=hide_restricted,
+        name_contains=q,
     )
     await _fill_location_info(db, service, candidates)
+    # Lookups made just now can reveal a location as gone or rule-restricted;
+    # drop those from this page too so the filters hold on first display.
+    if candidate_status != "all":
+        shown = [
+            c for c in candidates
+            if not (c.location_info_json or {}).get("unavailable")
+            and not (hide_restricted and (c.location_info_json or {}).get("contact_rule"))
+        ]
+        total -= len(candidates) - len(shown)
+        candidates = shown
 
     trials = service.latest_trials(c.id for c in candidates)
     next_offset = offset + len(candidates)

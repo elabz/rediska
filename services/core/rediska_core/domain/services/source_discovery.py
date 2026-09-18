@@ -172,6 +172,48 @@ def is_outbound_candidate_url(url: Optional[str]) -> bool:
     return bool(host) and not is_ignored_host(host) and not is_registered_domain(host)
 
 
+# =============================================================================
+# COMMUNITY RULES: DOES THIS PLACE FORBID CONTACTING POSTERS?
+# =============================================================================
+
+# Rules that forbid what the user does there: approaching posters for dating,
+# hookups, or private chat. Deliberately NOT matched, because personals
+# communities carry them too (checked against real rules, 2026-09-18):
+# "no personal info / personal attacks" (singular "personal"), "no
+# solicitation" (in hookup subs it means sex work), "no unsolicited
+# nudes/DMs", "save contact info for PMs", "no Telegram / external
+# messengers", "soliciting business is prohibited", "message the mods".
+_CONTACT_RULE_PATTERNS = [
+    re.compile(p, re.I)
+    for p in (
+        # "No personal ads that imply an affair" (r/cglpersonals) restricts
+        # which ads, not ads as such.
+        r"\bno\s+(personals|personal\s+ads?|r4r|hook-?ups?|dating|romantic|jo\s*buds?|meet-?ups?)\b"
+        r"(?!\s+(that|which|who|for\s+others|involving|implying))",
+        # Only the quoted form or "... posts": "No seeking relationships for
+        # others" (r/polyamoryr4r) is not a ban on seeking.
+        r"\bno\s+[\"'“”](looking\s+for|seeking)\b",
+        r"\bno\s+(looking\s+for|seeking)\s+(posts|comments)\b",
+        r"\b(is\s+not|isn['’]?t|not)\s+(a|an)\s+(dating|hook-?up|personals|r4r|meet-?up)\b",
+        r"\b(no|don['’]?t|do\s+not|never)\s+(ask(ing)?\s+for|request(ing)?|solicit(ing)?)\s+"
+        r"(private\s+messages?|pms?|dms?|messages?|chats?)\b",
+        r"\bsoliciting\s+(messages?|chats?|dms?|pms?)\b",
+        r"\bmeet(ing)?\s+(people\s+)?(irl|in\s+real\s+life|in\s+person)\b.{0,60}"
+        r"\b(banned|prohibited|not\s+allowed|removed)\b",
+    )
+]
+
+
+def contact_restriction(description: Optional[str], rules: Iterable[str]) -> Optional[str]:
+    """The first community rule (or the description) that forbids contacting
+    posters, or None. Matching is intentionally conservative; the matched text
+    is shown to the user, who decides."""
+    for text in [*rules, description or ""]:
+        if text and any(p.search(text) for p in _CONTACT_RULE_PATTERNS):
+            return text.strip()[:300]
+    return None
+
+
 def compute_lift(q: int, q_total: int, a: int, a_total: int) -> float:
     """How much likelier an author here is to be qualified than the base rate.
 
@@ -782,14 +824,26 @@ class SourceDiscoveryService:
         offset: int = 0,
         limit: int = 25,
         now: Optional[datetime] = None,
+        hide_restricted: bool = False,
+        name_contains: Optional[str] = None,
     ) -> tuple[list[SourceCandidate], int]:
         """Candidates sorted by lift (nulls last), then evidence count.
 
         Default (``status=None``): new and trialled candidates plus snoozed
-        ones whose snooze has passed. ``status='all'`` lists everything.
+        ones whose snooze has passed, excluding locations known to be private,
+        banned, or gone. ``status='all'`` lists everything.
+        ``hide_restricted`` also drops locations whose rules forbid contacting
+        posters.
         """
         now = now or _utcnow()
+        info = SourceCandidate.location_info_json
         stmt = select(SourceCandidate).where(SourceCandidate.provider_id == self.provider_id)
+        if status != "all":
+            stmt = stmt.where(func.json_extract(info, "$.unavailable").is_(None))
+        if hide_restricted:
+            stmt = stmt.where(func.json_extract(info, "$.contact_rule").is_(None))
+        if name_contains:
+            stmt = stmt.where(SourceCandidate.name.contains(name_contains.strip().lower()))
         if kind:
             stmt = stmt.where(SourceCandidate.kind == kind)
         if status is None:
@@ -837,15 +891,39 @@ class SourceDiscoveryService:
     def needs_location_info(self, candidate: SourceCandidate, now: Optional[datetime] = None) -> bool:
         if candidate.kind != KIND_LOCATION:
             return False
-        if candidate.location_info_fetched_at is None:
+        info = candidate.location_info_json
+        if candidate.location_info_fetched_at is None or not isinstance(info, dict):
+            return True
+        # Info cached from search results (or before rules were checked) lacks
+        # the community rules the contact check needs.
+        if not info.get("unavailable") and not info.get("rules_checked"):
             return True
         now = now or _utcnow()
         return candidate.location_info_fetched_at < now - timedelta(days=LOCATION_INFO_TTL_DAYS)
 
     @staticmethod
-    def store_location_info(candidate: SourceCandidate, info: Optional[dict[str, Any]]) -> None:
-        """Cache location info; ``None`` records that the location is unavailable."""
-        candidate.location_info_json = info if info is not None else {"unavailable": True}
+    def store_location_info(
+        candidate: SourceCandidate,
+        info: Optional[dict[str, Any]],
+        rules_checked: bool = True,
+    ) -> None:
+        """Cache location info; ``None`` records that the location is unavailable.
+
+        With ``rules_checked`` (info from a full lookup, which includes the
+        community rules), a rule forbidding contact with posters is recorded
+        as ``contact_rule``. Keys are only set when true, so SQL can filter on
+        their absence.
+        """
+        if info is None:
+            candidate.location_info_json = {"unavailable": True}
+        else:
+            stored = {k: v for k, v in info.items() if k not in ("unavailable", "contact_rule")}
+            if rules_checked:
+                stored["rules_checked"] = True
+                rule = contact_restriction(info.get("description"), info.get("rules") or [])
+                if rule:
+                    stored["contact_rule"] = rule
+            candidate.location_info_json = stored
         candidate.location_info_fetched_at = _utcnow()
 
     # =========================================================================
@@ -995,7 +1073,7 @@ class SourceDiscoveryService:
             updated_at=now,
         )
         if location_info is not None:
-            self.store_location_info(candidate, location_info)
+            self.store_location_info(candidate, location_info, rules_checked=False)
         self.db.add(candidate)
         self.db.flush()
         return candidate

@@ -117,3 +117,32 @@ The scout-watch read model SHALL include, per watch over a trailing window (defa
 
 - **WHEN** a trial is running
 - **THEN** the candidate row shows posts analysed out of the sample size and a cancel action
+
+### Requirement: Locations that forbid contact or no longer exist are not proposed as usable
+
+When location info is fetched, the provider SHALL also return the community's rules. The system SHALL flag a location whose rules or description forbid approaching posters for dating, hookups, or private messages. The flag SHALL store the matching rule verbatim, and the Discover tab SHALL show it. The match SHALL be conservative: rules that only restrict how contact happens SHALL NOT flag, e.g. no personal info, no unsolicited messages, no paid solicitation. The candidate list SHALL hide locations that are private, banned, or missing from every view except `status=all`. It SHALL hide flagged locations when `hide_restricted` is requested; the UI requests this by default.
+
+#### Scenario: Community forbids personals
+
+- **WHEN** a candidate community has the rule "No personals: seeking meetups will get you banned"
+- **THEN** the candidate is flagged with that rule quoted and is hidden while "hide restricted" is on
+
+#### Scenario: Personals community with a privacy rule is not flagged
+
+- **WHEN** a personals community has the rule "No personal info: no phone numbers or usernames"
+- **THEN** the candidate is not flagged
+
+#### Scenario: Banned community disappears
+
+- **WHEN** the location lookup finds a candidate community banned or missing
+- **THEN** the candidate no longer appears in the default candidate list
+
+### Requirement: A candidate can be previewed with the watches' search before any trial
+
+The Discover tab SHALL offer a "Preview search" action on location candidates and search results. It SHALL open the Browse page in a new tab, on that location, with the watches' longest search query, sorted by new. The Browse page SHALL run a search given by `location`, `q`, `sort`, and `t` URL parameters on load. A watch created from a candidate SHALL be pre-filled with the same query.
+
+#### Scenario: Preview opens Browse with the match string
+
+- **WHEN** the user clicks "Preview search" on r/example
+- **THEN** a new tab opens `/browse?location=r/example&q=<longest watch query>&sort=new&t=month` and the search runs without further input
+

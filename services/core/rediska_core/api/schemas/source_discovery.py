@@ -21,6 +21,7 @@ class LocationInfo(BaseModel):
     active_count: Optional[int] = None
     is_nsfw: bool = False
     created_at: Optional[datetime] = None
+    rules: list[str] = Field(default_factory=list)
 
 
 class TrialYield(BaseModel):
@@ -70,6 +71,9 @@ class SourceCandidateResponse(BaseModel):
     snoozed_until: Optional[datetime] = None
     location_info: Optional[LocationInfo] = None
     location_unavailable: bool = False
+    # A community rule that forbids contacting posters, quoted verbatim.
+    contact_restricted: bool = False
+    contact_rule: Optional[str] = None
     watch_id: Optional[int] = None
     latest_trial: Optional[SourceTrialResponse] = None
     computed_at: Optional[datetime] = None

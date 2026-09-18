@@ -104,6 +104,14 @@ class TestList:
         assert (await auth_client.get("/source-candidates?status=bogus")).status_code == 400
         assert (await auth_client.get("/source-candidates?cursor=x")).status_code == 400
 
+    async def test_name_filter(self, auth_client, db_session, provider):
+        add_candidate(db_session, "r/test_njr4r")
+        add_candidate(db_session, "r/test_other")
+
+        body = (await auth_client.get("/source-candidates?q=R4R")).json()
+
+        assert [c["name"] for c in body["items"]] == ["r/test_njr4r"]
+
     async def test_empty_list(self, auth_client, db_session, provider):
         body = (await auth_client.get("/source-candidates")).json()
         assert body["items"] == [] and body["total"] == 0
@@ -129,9 +137,14 @@ class TestList:
 
         by_name = {c["name"]: c for c in first["items"]}
         assert by_name["r/test_fresh"]["location_info"]["member_count"] == 50
-        assert by_name["r/test_private"]["location_unavailable"] is True
+        # Private/banned/missing locations are useless: dropped from the list
+        # as soon as the lookup reveals it, and on every later load.
+        assert "r/test_private" not in by_name and first["total"] == 1
+        assert [c["name"] for c in second["items"]] == ["r/test_fresh"]
         assert adapter.get_location_info.await_count == 2  # cached for the second call
-        assert second["items"]
+        all_rows = (await auth_client.get("/source-candidates?status=all")).json()["items"]
+        private = next(c for c in all_rows if c["name"] == "r/test_private")
+        assert private["location_unavailable"] is True
 
 
 class TestLifecycle:

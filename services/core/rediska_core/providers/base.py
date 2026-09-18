@@ -190,6 +190,9 @@ class ProviderLocation:
     active_count: Optional[int] = None
     is_nsfw: bool = False
     created_at: Optional[datetime] = None
+    # Community rules as "title: description" strings; filled by
+    # get_location_info only (search results leave it empty).
+    rules: list[str] = field(default_factory=list)
     raw_data: Optional[dict] = None
 
 

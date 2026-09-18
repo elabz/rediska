@@ -49,6 +49,14 @@
 - [x] 7.4 Trial progress polling; empty, loading, and error states; yield column on the watch list
 - [x] 7.5 Vitest coverage for the tab states and actions; `npm run lint` clean
 
+## 9. Follow-ups from the first real candidate list
+
+- [x] 9.1 Evidence-weighted lift (shrink toward the base rate by 10 pseudo-authors) so 3-of-3 communities stop topping the list
+- [x] 9.2 Provider returns community rules with location info; `contact_restriction()` flags communities that forbid approaching posters, tuned on real rules; `hide_restricted` filter (UI default on)
+- [x] 9.3 Hide private/banned/missing locations from all views except `status=all`; refetch info that predates the rules check
+- [x] 9.4 "Preview search" opens Browse in a new tab with the watches' longest query; Browse reads `location`/`q`/`sort`/`t` URL params; create-watch form pre-filled with the query
+- [x] 9.5 Name filter (`q`) on the candidate list; curated regional (PA/NJ/DE/MD/NYC) personals subreddits added as manual candidates
+
 ## 8. Config, docs, rollout
 
 - [x] 8.1 `DISCOVERY_MIN_QUALIFIED_AUTHORS`, `DISCOVERY_TRIAL_SAMPLE`, `DISCOVERY_WINDOW_DAYS` in `config.py`, `.env.example`, and the `docker-compose.yml` environment blocks for core and worker
