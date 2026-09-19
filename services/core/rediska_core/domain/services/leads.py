@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ExternalAccount, LeadPost
 from rediska_core.domain.services.external_listing import maybe_resolve_post_body
+from rediska_core.domain.services.post_copy import safe_fingerprint_post
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
 
@@ -208,6 +209,18 @@ class LeadsService:
             # Attach as transient attribute for the response
             lead._profile_item_id = profile_item_id  # type: ignore[attr-defined]
 
+        safe_fingerprint_post(
+            self.db,
+            provider_id=provider_id,
+            external_post_id=external_post_id,
+            author_username=author_username,
+            body_text=body_text,
+            source="lead",
+            posted_at=post_created_at,
+            location=source_location,
+            account_id=author_account_id,
+        )
+
         # Transient marker: the caller saved a post that joined an existing
         # lead rather than creating one (used by the API response + audit).
         lead._attached = attached  # type: ignore[attr-defined]
@@ -340,6 +353,7 @@ class LeadsService:
         search: Optional[str] = None,
         posted_within_days: Optional[int] = None,
         include_banned: bool = False,
+        include_copies: bool = False,
     ):
         """Build a query for leads with filters.
 
@@ -352,6 +366,7 @@ class LeadsService:
             posted_within_days: Only leads posted in the last N days; leads
                 without a post date fall back to when they were saved.
             include_banned: Also list leads of authors on the ban list.
+            include_copies: Also list leads whose post is in a handled spam ring.
 
         Returns:
             SQLAlchemy query object.
@@ -381,6 +396,11 @@ class LeadsService:
             from rediska_core.domain.services.ban_list import exclude_banned_authors
 
             query = exclude_banned_authors(query, LeadPost.author_account_id)
+
+        if not include_copies:
+            from rediska_core.domain.services.post_copy import not_in_handled_ring
+
+            query = query.filter(not_in_handled_ring(LeadPost.external_post_id))
 
         if posted_within_days:
             since = datetime.utcnow() - timedelta(days=posted_within_days)
@@ -418,6 +438,7 @@ class LeadsService:
         sort: str = SORT_PRIORITY,
         posted_within_days: Optional[int] = None,
         include_banned: bool = False,
+        include_copies: bool = False,
     ) -> list[LeadPost]:
         """List leads with optional filters.
 
@@ -442,6 +463,7 @@ class LeadsService:
             search=search,
             posted_within_days=posted_within_days,
             include_banned=include_banned,
+            include_copies=include_copies,
         )
 
         if sort == SORT_NEWEST:
@@ -468,6 +490,7 @@ class LeadsService:
         search: Optional[str] = None,
         posted_within_days: Optional[int] = None,
         include_banned: bool = False,
+        include_copies: bool = False,
     ) -> int:
         """Count leads with optional filters.
 
@@ -489,6 +512,7 @@ class LeadsService:
             search=search,
             posted_within_days=posted_within_days,
             include_banned=include_banned,
+            include_copies=include_copies,
         )
 
         return query.count()

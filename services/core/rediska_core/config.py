@@ -150,6 +150,40 @@ class Settings(BaseSettings):
         "for mining",
     )
 
+    # Post copy detection (post_copy.py): cross-author copies of the same text
+    copy_min_chars: int = Field(
+        default=200,
+        ge=1,
+        description="Bodies shorter than this get an exact hash only (no sketch, no clustering)",
+    )
+    copy_jaccard_threshold: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description="Estimated 5-word-shingle Jaccard at or above which two posts are copies",
+    )
+    copy_ring_window_days: int = Field(
+        default=7,
+        ge=1,
+        description="Two live accounts posting a copy within this many days is a ring suspect",
+    )
+    copy_skip_ring_suspects: bool = Field(
+        default=True,
+        description="Skip scout analysis of posts whose copy cluster is handled as a spam ring",
+    )
+    copy_ring_min_authors: int = Field(
+        default=3,
+        ge=2,
+        description="A ring suspect is handled automatically (skipped + hidden) from this many "
+        "distinct authors",
+    )
+    copy_ring_min_chars: int = Field(
+        default=400,
+        ge=0,
+        description="...and only when its posts average at least this many characters "
+        "(short templates are left for the human)",
+    )
+
     @field_validator("mysql_url")
     @classmethod
     def validate_mysql_url(cls, v: str) -> str:

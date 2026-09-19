@@ -32,6 +32,8 @@ EXPECTED_ROUTES = [
     ("maintenance.cleanup_scout_watch_history", "maintenance"),
     ("maintenance.expire_stale_leads", "maintenance"),
     ("maintenance.generate_calibration_report", "maintenance"),
+    # Post copy detection backfill runs beside the maintenance batches.
+    ("copy.backfill_fingerprints", "maintenance"),
     ("message.send_manual", "messages"),
     ("multi_agent_analysis.analyze_lead", "multi_agent_analysis"),
     ("multi_agent_analysis.batch_analyze", "multi_agent_analysis"),

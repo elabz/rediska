@@ -437,9 +437,32 @@ class TestBanApi:
         assert sorted(b["entry"]["username"] for b in resp.json()["banned"]) == ["test_b", "test_c"]
 
     @pytest.mark.asyncio
-    async def test_suggestions_unavailable_without_copy_detection(self, api, world):
+    async def test_suggestions_and_cluster_bulk_ban(self, api, db_session, world):
+        from rediska_core.domain.services.post_copy import fingerprint_post
+
         body = (await api.get("/ban-list/suggestions")).json()
-        assert body == {"available": False, "items": []}
+        assert body == {"available": True, "items": []}
+
+        text = " ".join(f"w{i}" for i in range(300))
+        cluster_id = None
+        for i, name in enumerate(("test_ring_a", "test_ring_b")):
+            out = fingerprint_post(
+                db_session, provider_id="reddit", external_post_id=f"ring{i}",
+                author_username=name, body_text=text, source="scout",
+            )
+            cluster_id = out.cluster_id or cluster_id
+        db_session.commit()
+
+        items = (await api.get("/ban-list/suggestions")).json()["items"]
+        assert [i["cluster_id"] for i in items] == [cluster_id]
+        resp = await api.post(
+            "/ban-list/bulk", json={"cluster_id": cluster_id, "reason": "copy_ring"}
+        )
+        assert resp.status_code == 200
+        assert sorted(b["entry"]["username"] for b in resp.json()["banned"]) == [
+            "test_ring_a", "test_ring_b",
+        ]
+        assert (await api.get("/ban-list/suggestions")).json()["items"] == []
 
     @pytest.mark.asyncio
     async def test_leads_list_hides_banned_unless_asked(self, api, db_session, world):

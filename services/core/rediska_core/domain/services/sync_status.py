@@ -19,10 +19,11 @@ Usage:
     updater.update_message_visibility(message, provider_message)
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from rediska_core.domain.models import (
     ExternalAccount,
@@ -42,6 +43,8 @@ from rediska_core.providers.base import (
     ProviderProfileItem,
     RemoteVisibility as ProviderVisibility,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SyncStatusUpdater:
@@ -112,6 +115,21 @@ class SyncStatusUpdater:
         # Update status field (NEVER delete the row)
         account.remote_status = result.status.value
         account.remote_status_last_seen_at = result.detected_at
+
+        # Copy-cluster kinds depend on whether an author's account is live.
+        session = object_session(account)
+        if session is not None:
+            from rediska_core.domain.services.post_copy import recompute_clusters_for_author
+
+            try:
+                with session.begin_nested():
+                    recompute_clusters_for_author(
+                        session, account.provider_id, account.external_username
+                    )
+            except Exception as e:  # noqa: BLE001 - never fail a status update
+                logger.warning(
+                    "Copy cluster recompute failed for %s: %s", account.external_username, e
+                )
 
         return True
 

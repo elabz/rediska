@@ -598,12 +598,14 @@ class BanListService:
         result = self.db.execute(
             text(
                 """
-                UPDATE copy_cluster_members m
-                JOIN post_fingerprints f ON f.id = m.fingerprint_id
-                SET m.ban_suggestion_dismissed_at = :now
-                WHERE m.cluster_id = :cluster_id
-                  AND LOWER(f.author_username) = :name
-                  AND m.ban_suggestion_dismissed_at IS NULL
+                UPDATE copy_cluster_members
+                SET ban_suggestion_dismissed_at = :now
+                WHERE cluster_id = :cluster_id
+                  AND ban_suggestion_dismissed_at IS NULL
+                  AND fingerprint_id IN (
+                      SELECT f.id FROM post_fingerprints f
+                      WHERE LOWER(f.author_username) = :name
+                  )
                 """
             ),
             {"now": _now(), "cluster_id": cluster_id, "name": name},
@@ -649,7 +651,9 @@ class BanListService:
 
 def copy_tables_present(db: Session) -> bool:
     """Whether post-fingerprint-dedupe's tables exist in this database."""
-    tables = set(inspect(db.get_bind()).get_table_names())
+    # Inspect through the session's own connection: a separate pooled
+    # connection's reset-on-return can roll back this session's work.
+    tables = set(inspect(db.connection()).get_table_names())
     return {"copy_clusters", "copy_cluster_members", "post_fingerprints"} <= tables
 
 

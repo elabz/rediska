@@ -94,7 +94,7 @@ rediska/
         infra/                 # db engines/sessions
         infrastructure/        # crypto (Fernet), elasticsearch, embeddings, rate_limiter
         observability/
-      alembic/versions/        # head: 021_extend_do_not_contact
+      alembic/versions/        # head: 023_add_copy_cluster_handling
 
     worker/                    # Celery worker (imports core)
       rediska_worker/
@@ -266,8 +266,19 @@ One ban list (`do_not_contact`) that every outreach path honours (`domain/servic
 - **Lifecycle**: rows are never deleted. `source` manual / copy_ring / import, required `reason` (UI presets: scam, copy_ring, hostile, asked_not_to_contact, other), `notes`, optional `cluster_id`. Lift sets `lifted` + `lifted_at`; re-banning reactivates the same row and appends to notes. Create / bulk create / lift / suggestion dismiss write `audit_log` (`ban.create`, `ban.bulk_create` — one entry per batch, `ban.lift`, `ban.suggestion_dismiss`)
 - **Consequences**: an active ban moves the author's `new` / `saved` / `contact_queued` leads to `ignored`, remembering the prior status in `lead_posts.status_before_ban`; lift restores it unless the user changed the status since. `contacted` leads, analyses, evaluations, conversations and messages are never touched. `GET /leads` and the needs-review queue exclude banned authors unless `include_banned=true`. Incoming messages from a banned account still sync and display verbatim, under a banner
 - **API**: `GET /ban-list` (keyset cursor; `status`, `source`, `q`), `GET /ban-list/status?username=`, `POST /ban-list`, `POST /ban-list/{id}/lift`, `POST /ban-list/bulk {cluster_id | usernames, reason, exclude_usernames}`, `GET /ban-list/suggestions`, `POST /ban-list/suggestions/dismiss`. Static paths precede `/{id}`
-- **Suggestions, never auto-bans**: authors of copy clusters whose effective kind is `ring_suspect` / `confirmed_ring`, not banned and not dismissed, grouped per cluster with the earliest poster marked (the bulk dialog excludes them by default). A read-only query over the `post-fingerprint-dedupe` tables; returns `available: false` and no items while those tables do not exist
+- **Suggestions, never auto-bans**: authors of copy clusters whose effective kind is `ring_suspect` / `confirmed_ring`, not banned and not dismissed, grouped per cluster with the earliest poster marked (the bulk dialog excludes them by default). A read-only query over the copy-detection tables (`copy_cluster_members.ban_suggestion_dismissed_at` records a dismissal); `available: false` only if those tables are missing
 - **UI**: `components/ban/` — `BanControl` (Ban / Lift; self-loading via `useBanStatus`, or `assumeNotBanned` in list rows to skip a status lookup per row), `BanDialog`, `BannedBanner`, `BannedView`, `BanSuggestions`. Mounted on the conversation header (banner + disabled compose with Lift link), profile page, lead detail, scout history posts and needs-review items
+
+### Post Copy Detection
+The same text posted by different accounts (`domain/services/post_copy.py`, `/copy-clusters` API, **Copies** tab on `/leads`):
+- **Fingerprint every post seen**: `safe_fingerprint_post()` (best-effort, savepoint, never fails ingestion) runs in `ScoutWatchService.record_post` (source `scout`, or `trial` for trial watches), `LeadsService.save_lead`, `profile-items/ingest-browse-posts` (every browsed post, known author or not), `AnalysisService._store_profile_items`, and the worker's profile-post fetches (`scout.analyze_and_decide`, `ingest.analyze_reddit_user`). One `post_fingerprints` row per `(provider_id, external_post_id)`: exact hash (blake2b-128 of lower-cased `[a-z0-9']+` tokens) + bottom-64 MinHash sketch over 5-word shingles, **no text**, so it outlives scout history cleanup. The weheartbdsm details block is stripped first; titles are never fingerprinted; bodies under `COPY_MIN_CHARS` get an exact hash only and never cluster
+- **Matching** (no LLM / embeddings / provider call): the 8 smallest sketch values are band keys (`post_fingerprint_bands`); bands shared by > 200 fingerprints are boilerplate and ignored. Candidates with estimated Jaccard ≥ `COPY_JACCARD_THRESHOLD` by a *different* author join / create / merge a `copy_clusters` row (audited `copy_cluster.create` / `.join` / `.merge`); same-author matches only set `repost_of_id`
+- **Kinds** (`recompute_cluster`, plain Python over stored facts): `ring_suspect` (≥ 3 authors, or 2 live accounts within `COPY_RING_WINDOW_DAYS`), `returning_author` (2 authors, gap > window, earlier account deleted/suspended or silent since the later one appeared), else `unclassified`. Recomputed on membership change and when `SyncStatusUpdater.update_account_status` changes an account's status. The human decision (`confirmed_ring` / `same_person` / `coincidence`) overrides and is sticky; `coincidence` removes the members and suppresses their fingerprints (`copy_cluster_suppressions`) so the text never re-clusters — a later post whose best match is suppressed is suppressed too. Decisions write `copy_cluster.decision` and never touch leads, analyses or bans
+- **Spam rings are handled automatically** (skip + hide, never delete or ban): `copy_clusters.handled` = a `confirmed_ring`, or an undecided `ring_suspect` with ≥ `COPY_RING_MIN_AUTHORS` (3) authors whose posts average ≥ `COPY_RING_MIN_CHARS` (400) chars (`is_handled()`, stored with `avg_char_len`, refreshed by `recompute_cluster` and `decide`; `same_person` / `coincidence` clear it; `recompute_all()` after a threshold change). `GET /leads` and the needs-review queue exclude handled rings via `not_in_handled_ring()` unless `include_copies=true` (Leads page toggle "Show leads from spam rings"); the Copies tab defaults to `handled=false`. Two-author clusters and short templates stay for the human
+- **Scout pipeline**: `check_author_verdict` skips posts of handled rings (`is_handled_post`) right after do-not-contact (`SKIP_COPY_RING_SUSPECT`, reason `copy_ring_suspect`) when `COPY_SKIP_RING_SUSPECTS` is on; trials and manual re-analysis (`analyze_and_decide(manual=True)`) bypass it; `_should_promote` never auto-promotes a ring post even with the skip off. Trial yield reports `copy_ring_suspects`. `returning_author` never skips (context only)
+- **Read models**: `attach_copy()` (routes/copy_clusters.py) sets a `copy` field (alias of `copy_info`: cluster id, effective kind, author count, earliest other post) on `GET /leads`, lead detail, scout run detail and the needs-review queue with one batched lookup per page. `GET /copy-clusters` (`kind`, `decision` incl. `none`, `author`, keyset cursor; dissolved clusters only when asked for), `GET /copy-clusters/{id}` (members + per-author account state, lead + status, scout post, latest recommendation, effective human verdict, ban), `POST /copy-clusters/{id}/decision`
+- **UI**: `components/copy/` — `CopyBadge` (opens `CopyClusterDrawer`: decisions, per-author `BanControl`, "Ban cluster" via `POST /ban-list/bulk {cluster_id}` excluding the earliest poster), `CopyClusterPanel` (lead detail: other authors inline), `AuthorCopyClusters` (profile page), `CopyClustersTab`. Badges on lead cards, lead detail, scout history posts and needs-review items
+- **Backfill**: `copy.backfill_fingerprints` (queue `maintenance`, dry run by default, `jobs` ledger per mode) fingerprints scout posts, leads and post-type profile items (deduplicated; lead body preferred), links them oldest first, reclassifies every cluster, one `copy.backfill` audit entry
 
 ### External Listing Resolution
 Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `selftext` is empty and whose URL points to an external listing page. `domain/services/external_listing.py` fetches such pages and substitutes the listing's About text as the post body, so browse cards and the LLM analysis pipeline see real content:
@@ -289,7 +300,7 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 | `/login`, `/setup/identity`, `/oauth/reddit/callback` | Auth + onboarding (OAuth popup) |
 | `/inbox`, `/inbox/[conversationId]` | Conversation list + thread (drafts, search, lists/labels, star, attachments, remote-delete/scrub, profile panel) |
 | `/browse` | Browse subreddit feeds (sort/time/query presets), save leads |
-| `/leads`, `/leads/[id]` | Lead list (priority-first, expired hidden, priority/compatibility badges) + **Needs review** tab (cross-watch triage queue: promote / dismiss / evaluate); detail with multi-dimension AI analysis panels |
+| `/leads`, `/leads/[id]` | Lead list (priority-first, expired hidden, priority/compatibility/copy badges) + **Needs review** tab (cross-watch triage queue: promote / dismiss / evaluate) + **Copies** tab (copy clusters: filter by kind/decision, drawer with decisions and cluster ban); detail with multi-dimension AI analysis panels and the other authors of the same text |
 | `/directories` | Analyzed / Contacted / Engaged / Starred contact directories + **Banned** tab (ban list: search, source/status filters, lift, links to profile and leads; ban by username; copy-ring ban suggestions) |
 | `/evaluations` | Human evaluation of agent decisions: review queue (contradictions first, stratified), dashboard (agreement per dimension / prompt version, confusion matrix, tags, trend, missing info), JSONL export |
 | `/search` | Global hybrid search across messages/leads/profiles/conversations |
@@ -303,7 +314,7 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 
 ## Key Database Tables
 
-Head migration: `021_extend_do_not_contact`.
+Head migration: `023_add_copy_cluster_handling`.
 
 | Table | Purpose |
 |-------|---------|
@@ -331,6 +342,10 @@ Head migration: `021_extend_do_not_contact`.
 | `profile_items` | Public content items (posts/comments/images) per account |
 | `provider_credentials` | Encrypted OAuth tokens (Fernet) |
 | `do_not_contact` | Contact ban list: lower-cased username, `reason`, `source` (manual/copy_ring/import), `status` (active/lifted), `notes`, `cluster_id`, `created_by`, `lifted_at`; never deleted; only active rows block outreach |
+| `post_fingerprints` | One row per provider post seen: author, post/first-seen time, exact hash, MinHash sketch (no text), source, `repost_of_id` |
+| `post_fingerprint_bands` | Sketch band keys → fingerprint (candidate lookup) |
+| `copy_clusters`, `copy_cluster_members` | Cross-author copies: computed `kind`, sticky human `decision`, counts, time range, `avg_char_len`, `handled` (spam ring skipped + hidden automatically); members carry `ban_suggestion_dismissed_at` |
+| `copy_cluster_suppressions` | Fingerprints of texts marked `coincidence`; never cluster again |
 | `audit_log` | Append-only action log (actor: user/system/agent, identity-aware) |
 | `jobs` | Celery task idempotency ledger (incl. `cancelled`) |
 
@@ -397,13 +412,22 @@ LEAD_EXPIRY_DAYS=0
 DISCOVERY_MIN_QUALIFIED_AUTHORS=3
 DISCOVERY_TRIAL_SAMPLE=25
 DISCOVERY_WINDOW_DAYS=180
+
+# Post copy detection: exact-hash-only below this length, copy threshold,
+# ring window, and whether scout skips ring-suspect posts (rollout: false until reviewed)
+COPY_MIN_CHARS=200
+COPY_JACCARD_THRESHOLD=0.5
+COPY_RING_WINDOW_DAYS=7
+COPY_SKIP_RING_SUSPECTS=true
+COPY_RING_MIN_AUTHORS=3
+COPY_RING_MIN_CHARS=400
 ```
 
 ---
 
 ## Celery Tasks
 
-Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`, `scout` (also `discovery.*`), `maintenance`, `transfer`.
+Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`, `scout` (also `discovery.*`), `maintenance` (also `copy.*`), `transfer`.
 
 `task_routes` patterns in `celery_app.py` match **registered task names** (`ingest.*`, `message.*`), never module paths — a `rediska_worker.tasks.<module>.*` glob matches nothing and silently drops the task on the default `celery` queue. `tests/test_task_routing_unit.py` resolves through the live router and fails on any dead pattern or unrouted task. Core API dispatches pass `queue=` explicitly and so do not depend on these routes; beat and worker-internal dispatches do.
 
@@ -442,6 +466,9 @@ Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`,
 - `inbox.export` — dump conversations/messages/attachment metadata to JSON
 - `inbox.import` — atomic restore from a dump (skips existing content)
 - `inbox.clear` — delete inbox rows; keeps accounts, leads, profiles, and attachment files
+
+### Post Copy Detection (queue: `maintenance`)
+- `copy.backfill_fingerprints` — fingerprint all stored posts and build copy clusters; `dry_run=True` by default (counts + in-memory cluster estimate, writes nothing); idempotent (skips fingerprinted posts); `jobs` ledger per mode, refuses a second concurrent live run
 
 ### Maintenance (beat-scheduled)
 - `maintenance.mysql_dump_local` (daily 03:00 UTC)

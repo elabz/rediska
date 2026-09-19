@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from rediska_core.domain.services.post_copy import safe_fingerprint_post
 from rediska_core.domain.models import (
     ExternalAccount,
     LeadPost,
@@ -395,6 +396,18 @@ class AnalysisService:
                 )
                 self.db.add(new_item)
                 stored.append(new_item)
+
+            if item.item_type.value == "post":
+                safe_fingerprint_post(
+                    self.db,
+                    provider_id=account.provider_id,
+                    external_post_id=item.external_id,
+                    author_username=account.external_username,
+                    body_text=item.body_text,
+                    source="profile_item",
+                    posted_at=item.created_at,
+                    account_id=account.id,
+                )
 
         self.db.commit()
 

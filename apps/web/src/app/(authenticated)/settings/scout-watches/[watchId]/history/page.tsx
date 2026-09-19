@@ -29,6 +29,8 @@ import { Label } from '@/components/ui/label';
 import { AnalyzeUserButton } from '@/components/AnalyzeUserButton';
 import { ContactButton } from '@/components/ContactButton';
 import { BanControl } from '@/components/ban/BanControl';
+import { CopyBadge } from '@/components/copy/CopyBadge';
+import type { CopyInfo } from '@/lib/copyClusters';
 import {
   Collapsible,
   CollapsibleContent,
@@ -85,6 +87,7 @@ interface ScoutWatchPost {
   lead_id: number | null;
   evaluated_at?: string | null;
   evaluations?: EvaluationMap;
+  copy?: CopyInfo | null;
 }
 
 interface RunDetailResponse {
@@ -623,6 +626,7 @@ export default function ScoutWatchHistoryPage() {
                                       {post.analysis_confidence !== null && (
                                         <span>({Math.round(post.analysis_confidence * 100)}%)</span>
                                       )}
+                                      <CopyBadge copy={post.copy} externalPostId={post.external_post_id} />
                                       {post.lead_id && (
                                         <Link
                                           href={`/leads/${post.lead_id}`}

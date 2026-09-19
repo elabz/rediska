@@ -26,6 +26,7 @@ from typing import Any, Optional
 from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import Session
 
+from rediska_core.config import get_settings
 from rediska_core.domain.models import (
     ExternalAccount,
     Identity,
@@ -35,6 +36,7 @@ from rediska_core.domain.models import (
     ScoutWatchRun,
 )
 from rediska_core.domain.services.external_listing import maybe_resolve_post_body
+from rediska_core.domain.services.post_copy import is_handled_post, safe_fingerprint_post
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 from rediska_core.domain.services.source_discovery import (
     not_trial_post,
@@ -75,6 +77,7 @@ SKIP_DO_NOT_CONTACT = "do_not_contact"
 SKIP_ALREADY_CONTACTED = "already_contacted"
 SKIP_ALREADY_ENGAGED = "already_engaged"
 SKIP_LEAD_IGNORED = "lead_ignored"
+SKIP_COPY_RING_SUSPECT = "copy_ring_suspect"
 
 SKIP_REASON_TEXT = {
     SKIP_DO_NOT_CONTACT: "Skipped: author is on the do-not-contact list",
@@ -83,6 +86,10 @@ SKIP_REASON_TEXT = {
     SKIP_LEAD_IGNORED: (
         "Skipped: author's lead was previously ignored and this post's content "
         "was already analysed"
+    ),
+    SKIP_COPY_RING_SUSPECT: (
+        "Skipped: this text was also posted by other accounts (spam ring); "
+        "open the copy cluster to review, add to leads or re-analyse by hand"
     ),
 }
 
@@ -547,7 +554,11 @@ class ScoutWatchService:
     # =========================================================================
 
     @staticmethod
-    def _needs_review_filter(watch_id: Optional[int] = None, include_banned: bool = False):
+    def _needs_review_filter(
+        watch_id: Optional[int] = None,
+        include_banned: bool = False,
+        include_copies: bool = False,
+    ):
         """Analysed needs_review posts nobody has triaged yet."""
         conditions = [
             ScoutWatchPost.analysis_status == "analyzed",
@@ -564,6 +575,10 @@ class ScoutWatchService:
             from rediska_core.domain.services.ban_list import username_not_banned
 
             conditions.append(username_not_banned(ScoutWatchPost.post_author))
+        if not include_copies:
+            from rediska_core.domain.services.post_copy import not_in_handled_ring
+
+            conditions.append(not_in_handled_ring(ScoutWatchPost.external_post_id))
         return and_(*conditions)
 
     @staticmethod
@@ -582,6 +597,7 @@ class ScoutWatchService:
         limit: int = 25,
         watch_id: Optional[int] = None,
         include_banned: bool = False,
+        include_copies: bool = False,
     ) -> tuple[list[ScoutWatchPost], Optional[str]]:
         """Cross-watch needs-review queue, newest first (keyset-paginated).
 
@@ -594,7 +610,7 @@ class ScoutWatchService:
             (posts, next_cursor) — next_cursor is None on the last page.
         """
         query = self.db.query(ScoutWatchPost).filter(
-            self._needs_review_filter(watch_id, include_banned)
+            self._needs_review_filter(watch_id, include_banned, include_copies)
         )
         if cursor:
             seen, post_id = self.decode_queue_cursor(cursor)
@@ -616,12 +632,15 @@ class ScoutWatchService:
         return posts, next_cursor
 
     def count_needs_review(
-        self, watch_id: Optional[int] = None, include_banned: bool = False
+        self,
+        watch_id: Optional[int] = None,
+        include_banned: bool = False,
+        include_copies: bool = False,
     ) -> int:
         """Size of the needs-review queue."""
         return (
             self.db.query(ScoutWatchPost)
-            .filter(self._needs_review_filter(watch_id, include_banned))
+            .filter(self._needs_review_filter(watch_id, include_banned, include_copies))
             .count()
         )
 
@@ -775,6 +794,7 @@ class ScoutWatchService:
         post_body: Optional[str] = None,
         post_author: Optional[str] = None,
         post_url: Optional[str] = None,
+        posted_at: Optional[datetime] = None,
     ) -> ScoutWatchPost:
         """Record a post as seen by this watch.
 
@@ -797,6 +817,10 @@ class ScoutWatchService:
             post_body: The post body text.
             post_author: The post author (for audit display).
             post_url: The post URL, used to resolve external listing content.
+            posted_at: When the post was created on the provider.
+
+        Every recorded post is fingerprinted for copy detection before any
+        analysis is queued (best-effort: a failure never fails recording).
 
         Returns:
             The created ScoutWatchPost.
@@ -816,16 +840,11 @@ class ScoutWatchService:
         self.db.add(post)
         self.db.flush()
 
-        # If the author already has an ExternalAccount, save this post as
-        # a profile_item so it's available for analysis even if the author's
-        # profile is hidden (NSFW).
-        if post_author and (post_body or post_title):
-            # Look up the watch to get provider_id and source_location
-            watch = self.db.query(ScoutWatch).filter(ScoutWatch.id == watch_id).first()
-            provider_id = watch.provider_id if watch else "reddit"
-            source_location = watch.source_location if watch else None
-
-            # Only create profile_item if author is already known
+        watch = self.db.query(ScoutWatch).filter(ScoutWatch.id == watch_id).first()
+        provider_id = watch.provider_id if watch else "reddit"
+        source_location = watch.source_location if watch else None
+        account = None
+        if post_author:
             account = (
                 self.db.query(ExternalAccount)
                 .filter(
@@ -834,6 +853,24 @@ class ScoutWatchService:
                 )
                 .first()
             )
+
+        safe_fingerprint_post(
+            self.db,
+            provider_id=provider_id,
+            external_post_id=external_post_id,
+            author_username=post_author,
+            body_text=post_body,
+            source="trial" if watch is not None and watch.is_trial else "scout",
+            posted_at=posted_at,
+            location=source_location,
+            account_id=account.id if account else None,
+        )
+
+        # If the author already has an ExternalAccount, save this post as
+        # a profile_item so it's available for analysis even if the author's
+        # profile is hidden (NSFW).
+        if post_author and (post_body or post_title):
+            # Only create profile_item if author is already known
             if account:
                 upsert_profile_item_from_post(
                     db=self.db,
@@ -900,6 +937,8 @@ class ScoutWatchService:
         username: str,
         post_title: Optional[str] = None,
         post_body: Optional[str] = None,
+        external_post_id: Optional[str] = None,
+        copy_check: bool = True,
     ) -> Optional[str]:
         """Check whether a standing verdict makes analysing this author pointless.
 
@@ -921,6 +960,13 @@ class ScoutWatchService:
             username: The post author's username.
             post_title: The incoming post's title, for the content check.
             post_body: The incoming post's body, for the content check.
+            external_post_id: The incoming post's id, for the copy-ring check.
+            copy_check: False for trials and manual re-analysis, which never
+                apply the copy-ring skip.
+
+        Right after do-not-contact, a post whose copy cluster is a handled spam
+        ring (``post_copy.is_handled``) is skipped when ``COPY_SKIP_RING_SUSPECTS``
+        is on.
 
         Returns:
             A skip reason code (see SKIP_REASON_TEXT) or None to proceed.
@@ -930,6 +976,14 @@ class ScoutWatchService:
 
         if is_banned(self.db, provider_id, username):
             return SKIP_DO_NOT_CONTACT
+
+        if (
+            copy_check
+            and external_post_id
+            and get_settings().copy_skip_ring_suspects
+            and is_handled_post(self.db, provider_id, external_post_id)
+        ):
+            return SKIP_COPY_RING_SUSPECT
 
         account = (
             self.db.query(ExternalAccount)
@@ -1141,6 +1195,7 @@ __all__ = [
     "SKIP_ALREADY_CONTACTED",
     "SKIP_ALREADY_ENGAGED",
     "SKIP_LEAD_IGNORED",
+    "SKIP_COPY_RING_SUSPECT",
     "SKIP_REASON_TEXT",
     "content_fingerprint",
 ]

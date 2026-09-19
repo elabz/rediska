@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ContactButton } from '@/components/ContactButton';
 import { BanControl } from '@/components/ban/BanControl';
+import { AuthorCopyClusters } from '@/components/copy/AuthorCopyClusters';
 import { BannedBanner } from '@/components/ban/BannedBanner';
 import { useBanStatus } from '@/components/ban/useBanStatus';
 import { EmptyState } from '@/components';
@@ -190,6 +191,8 @@ function ProfileHeader({
             className="mt-3"
           />
         )}
+
+        <AuthorCopyClusters username={account.external_username} />
 
         {/* Actions */}
         <div className="flex items-center gap-3 mt-4">

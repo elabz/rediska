@@ -17,6 +17,7 @@ from rediska_core.api.schemas.profile_items import (
 )
 from rediska_core.domain.models import ExternalAccount, ProfileItem
 from rediska_core.domain.services.external_listing import maybe_resolve_post_body
+from rediska_core.domain.services.post_copy import safe_fingerprint_post
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
 router = APIRouter(prefix="/profile-items", tags=["profile-items"])
@@ -75,6 +76,25 @@ async def ingest_browse_posts(
     for post in request.posts:
         key = (post.provider_id, post.author_username)
         account_id = account_map.get(key)
+
+        # Link-only posts from supported listing hosts: substitute the listing's
+        # About text so the stored profile_item carries real content.
+        body_text = maybe_resolve_post_body(post.body_text, post.post_url)
+
+        # Every browsed post is fingerprinted for copy detection, known author
+        # or not (best-effort, never fails the request).
+        safe_fingerprint_post(
+            db,
+            provider_id=post.provider_id,
+            external_post_id=post.external_post_id,
+            author_username=post.author_username,
+            body_text=body_text,
+            source="browse",
+            posted_at=post.post_created_at,
+            location=post.source_location,
+            account_id=account_id,
+        )
+
         if not account_id:
             continue
 

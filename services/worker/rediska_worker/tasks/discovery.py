@@ -305,6 +305,7 @@ def run_trial(self, trial_id: int) -> dict:
                 post_body=post.body_text,
                 post_author=post.author_username,
                 post_url=post.url,
+                posted_at=post.created_at,
             )
             posts_new += 1
             db.commit()

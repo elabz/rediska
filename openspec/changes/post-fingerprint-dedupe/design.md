@@ -32,6 +32,9 @@ A new post matching members of one cluster joins it; matching two clusters merge
 **6. Ring-suspect skip sits in `check_author_verdict`, after do-not-contact.**
 It reuses the existing `skipped` + stored-reason mechanism, so the post stays visible in history and costs no profile fetch or inference. `returning_author` never skips: the new account may have new profile content and the analysis is cheap relative to the value. Trials ignore the skip so yield reports reflect the raw source, but count ring suspects in the yield report.
 
+**6b. Spam rings are handled automatically, by skip and hide only (added 2026-09-19).**
+The user judged ring suspects not worth reviewing one by one. A cluster is `handled` when it is a `confirmed_ring`, or an undecided `ring_suspect` with ≥ `COPY_RING_MIN_AUTHORS` (3) authors whose posts average ≥ `COPY_RING_MIN_CHARS` (400) characters. The flag and `avg_char_len` are stored on `copy_clusters` (migration 023) and recomputed with the kind. Handled clusters drive the scout skip and are excluded from `GET /leads` and the needs-review queue (`include_copies=true` shows them). Two-author clusters (145 of 325 at backfill) and short posts (possible posting templates, e.g. a 17-account 222-char cluster) stay for the human; any ring still never auto-promotes. *Alternative rejected:* automatic bans — they would block the authors' other posts and messaging on timing evidence alone, and break "bans only by user action".
+
 **7. `coincidence` needs a suppression list.**
 Dissolving a cluster stores its members' `exact_hash`/sketch in `copy_cluster_suppressions`; a future match whose best partner is suppressed does not form a cluster. This handles subreddit templates and quoted song lyrics.
 

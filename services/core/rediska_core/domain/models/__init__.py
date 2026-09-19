@@ -15,6 +15,8 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    BINARY,
+    VARBINARY,
     String,
     Text,
     UniqueConstraint,
@@ -1592,6 +1594,168 @@ class SourceLinkSighting(Base):
     )
 
 
+class PostFingerprint(Base):
+    """Fingerprint of one provider post: exact hash + MinHash sketch, no text.
+
+    Lives in its own table so copies stay detectable after scout history
+    cleanup deletes the post text. See domain/services/post_copy.py.
+    """
+
+    __tablename__ = "post_fingerprints"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    provider_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_post_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    author_username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    account_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("external_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    posted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    char_len: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    exact_hash: Mapped[bytes] = mapped_column(BINARY(16), nullable=False)
+    # Bottom-k shingle hashes, 8 bytes each, ascending. NULL for short bodies.
+    sketch: Mapped[Optional[bytes]] = mapped_column(VARBINARY(512), nullable=True)
+    source: Mapped[str] = mapped_column(
+        Enum(
+            "scout", "trial", "browse", "lead", "profile_item",
+            name="post_fingerprint_source_enum",
+        ),
+        nullable=False,
+    )
+    # Earlier post by the same author with the same text (a repost, not a copy).
+    repost_of_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("post_fingerprints.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider_id", "external_post_id", name="uq_post_fingerprint"),
+        Index("idx_post_fp_external_post", "external_post_id"),
+        Index("idx_post_fp_author", "author_username"),
+        Index("idx_post_fp_exact_hash", "exact_hash"),
+    )
+
+
+class PostFingerprintBand(Base):
+    """One band key (a small sketch value) of a fingerprint, for candidate lookup."""
+
+    __tablename__ = "post_fingerprint_bands"
+
+    band_hash: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    fingerprint_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("post_fingerprints.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    __table_args__ = (Index("idx_post_fp_band_fp", "fingerprint_id"),)
+
+
+class CopyCluster(Base):
+    """Posts of the same text by two or more different authors."""
+
+    __tablename__ = "copy_clusters"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    provider_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(
+        Enum(
+            "ring_suspect", "returning_author", "unclassified",
+            name="copy_cluster_kind_enum",
+        ),
+        nullable=False,
+        default="unclassified",
+    )
+    # Human decision; overrides `kind` and is sticky.
+    decision: Mapped[Optional[str]] = mapped_column(
+        Enum(
+            "confirmed_ring", "same_person", "coincidence",
+            name="copy_cluster_decision_enum",
+        ),
+        nullable=True,
+    )
+    decision_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    author_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    member_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_posted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_posted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    avg_char_len: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Spam ring handled automatically: skipped by the scout and hidden from the
+    # lead list / needs-review queue (see post_copy.is_handled). Never deleted.
+    handled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    classified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("idx_copy_cluster_kind", "kind", "decision"),
+        Index("idx_copy_cluster_last_posted", "last_posted_at"),
+        Index("idx_copy_cluster_handled", "handled"),
+    )
+
+    @property
+    def effective_kind(self) -> str:
+        return self.decision or self.kind
+
+
+class CopyClusterMember(Base):
+    """A fingerprint's membership of a copy cluster (at most one cluster each)."""
+
+    __tablename__ = "copy_cluster_members"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cluster_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("copy_clusters.id", ondelete="CASCADE"), nullable=False
+    )
+    fingerprint_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("post_fingerprints.id", ondelete="CASCADE"), nullable=False
+    )
+    # Best estimated Jaccard to the member it matched when it joined.
+    similarity: Mapped[Optional[float]] = mapped_column(nullable=True)
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    # contact-ban-list: the user dismissed this author's ban suggestion.
+    ban_suggestion_dismissed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("fingerprint_id", name="uq_copy_cluster_member_fp"),
+        Index("idx_copy_cluster_member_cluster", "cluster_id"),
+    )
+
+
+class CopyClusterSuppression(Base):
+    """A fingerprint whose text the human marked as a coincidence (template)."""
+
+    __tablename__ = "copy_cluster_suppressions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    fingerprint_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("post_fingerprints.id", ondelete="CASCADE"), nullable=False
+    )
+    exact_hash: Mapped[bytes] = mapped_column(BINARY(16), nullable=False)
+    # The dissolved cluster, when the suppression came from a decision.
+    cluster_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("fingerprint_id", name="uq_copy_suppression_fp"),
+        Index("idx_copy_suppression_hash", "exact_hash"),
+    )
+
+
 # Export all models
 __all__ = [
     "Base",
@@ -1622,6 +1786,11 @@ __all__ = [
     "SourceCandidate",
     "SourceTrial",
     "SourceLinkSighting",
+    "PostFingerprint",
+    "PostFingerprintBand",
+    "CopyCluster",
+    "CopyClusterMember",
+    "CopyClusterSuppression",
     # Enums
     "SourceCandidateStatus",
     "SourceTrialStatus",

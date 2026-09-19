@@ -539,6 +539,23 @@ def analyze_reddit_user(
                 session.add(item)
                 posts_stored += 1
 
+        # Fingerprint the author's posts for copy detection (best-effort).
+        from rediska_core.domain.services.post_copy import safe_fingerprint_post
+
+        for p in posts:
+            if p.external_id:
+                safe_fingerprint_post(
+                    session,
+                    provider_id="reddit",
+                    external_post_id=p.external_id,
+                    author_username=username,
+                    body_text=p.body_text,
+                    source="profile_item",
+                    posted_at=p.created_at,
+                    location=p.location,
+                    account_id=account.id,
+                )
+
         # Store ProfileItems for comments
         comments_stored = 0
         for c in comments:

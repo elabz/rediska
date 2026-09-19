@@ -6,6 +6,8 @@ from typing import Optional
 from rediska_core.domain.schemas.evaluation import EffectiveEvaluation
 from pydantic import BaseModel, Field
 
+from rediska_core.api.schemas.copy_clusters import CopyInfo
+
 
 # =============================================================================
 # REQUEST SCHEMAS
@@ -166,8 +168,12 @@ class ScoutWatchPostResponse(BaseModel):
     dismissed_at: Optional[datetime] = None
     triaged_at: Optional[datetime] = None
 
+    # Copy cluster of this post (post-copy-detection); null when none.
+    copy_info: Optional[CopyInfo] = Field(default=None, alias="copy")
+
     class Config:
         from_attributes = True
+        populate_by_name = True
 
 
 class ScoutWatchRunDetailResponse(BaseModel):

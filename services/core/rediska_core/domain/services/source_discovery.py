@@ -1247,6 +1247,14 @@ class SourceDiscoveryService:
                 if isinstance(g, dict) and g.get("status") == "fail" and g.get("gate"):
                     gate_failures[g["gate"]] += 1
 
+        from rediska_core.domain.services.post_copy import RING_KINDS, copy_summaries
+
+        copies = copy_summaries(
+            self.db, trial.candidate.provider_id if trial.candidate else "reddit",
+            [p.external_post_id for p in posts],
+        )
+        ring_suspects = sum(1 for c in copies.values() if c["kind"] in RING_KINDS)
+
         top_gate = gate_failures.most_common(1)
         return {
             "posts_fetched": posts_fetched,
@@ -1257,6 +1265,7 @@ class SourceDiscoveryService:
             "needs_review": by_rec.get("needs_review", 0),
             "not_recommended": by_rec.get("not_recommended", 0),
             "skipped_prior_verdict": skipped,
+            "copy_ring_suspects": ring_suspects,
             "failed": failed,
             "top_failing_gate": top_gate[0][0] if top_gate else None,
             "top_failing_gate_count": top_gate[0][1] if top_gate else 0,

@@ -170,3 +170,52 @@ def test_cleanup_failed_analyses_deletes_nothing():
     assert result["retained"] is True
     assert result["stale_failed_analyses"] == 3
     db.delete.assert_not_called()
+
+
+# =============================================================================
+# Copy-ring skip (post-fingerprint-dedupe)
+# =============================================================================
+
+
+def _gate_kwargs(manual: bool, is_trial: bool = False) -> dict:
+    """kwargs analyze_and_decide passes to check_author_verdict."""
+    from rediska_core.domain.services.scout_watch import SKIP_COPY_RING_SUSPECT
+
+    service = MagicMock()
+    service.check_author_verdict.return_value = SKIP_COPY_RING_SUSPECT
+    watch = MagicMock()
+    watch.is_trial = is_trial
+    watch.provider_id = "reddit"
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = watch
+
+    with (
+        patch.object(scout_module, "_get_db_session", return_value=db),
+        patch.object(scout_module, "_get_reddit_adapter") as mock_adapter,
+        patch(
+            "rediska_core.domain.services.scout_watch.ScoutWatchService",
+            return_value=service,
+        ),
+    ):
+        result = scout_module.analyze_and_decide(
+            watch_id=1, scout_post_id=42, post_data=dict(POST_DATA), manual=manual,
+        )
+    assert result["skip_reason"] == SKIP_COPY_RING_SUSPECT
+    mock_adapter.assert_not_called()
+    return service.check_author_verdict.call_args.kwargs
+
+
+def test_scout_run_applies_copy_ring_check():
+    kwargs = _gate_kwargs(manual=False)
+    assert kwargs["external_post_id"] == "gated_post" and kwargs["copy_check"] is True
+
+
+def test_manual_reanalysis_and_trials_bypass_copy_ring_check():
+    assert _gate_kwargs(manual=True)["copy_check"] is False
+    assert _gate_kwargs(manual=False, is_trial=True)["copy_check"] is False
+
+
+def test_copy_ring_post_never_auto_promotes():
+    suitable = {"recommendation": "suitable", "score": 0.95}
+    assert scout_module._should_promote(suitable, 0.7) is True
+    assert scout_module._should_promote(suitable, 0.7, copy_ring=True) is False

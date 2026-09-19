@@ -24,12 +24,15 @@ MAX_PROFILE_POSTS = 20
 MAX_PROFILE_COMMENTS = 100
 
 
-def _should_promote(verdict: dict, min_confidence: float, is_trial: bool = False) -> bool:
+def _should_promote(
+    verdict: dict, min_confidence: float, is_trial: bool = False, copy_ring: bool = False
+) -> bool:
     """Auto-promotion rule: only a code-gated `suitable` verdict whose
     computed score meets the watch threshold creates a lead.
     `needs_review` / `not_recommended` never auto-promote, and neither does
-    any post of a source-discovery trial watch (the user promotes by hand)."""
-    if is_trial:
+    any post of a source-discovery trial watch or any post whose copy cluster
+    is a ring suspect / confirmed ring (the user promotes by hand)."""
+    if is_trial or copy_ring:
         return False
     return (
         verdict.get("recommendation") == "suitable"
@@ -404,6 +407,7 @@ def run_single_watch(self, watch_id: int) -> dict:
                 post_body=post.body_text,
                 post_author=post.author_username,
                 post_url=post.url,
+                posted_at=post.created_at,
             )
             db.commit()
 
@@ -529,6 +533,7 @@ def analyze_and_decide(
     watch_id: int,
     scout_post_id: int,
     post_data: dict,
+    manual: bool = False,
 ) -> dict:
     """Full analysis pipeline for a Scout Watch post.
 
@@ -549,6 +554,8 @@ def analyze_and_decide(
         watch_id: ID of the watch.
         scout_post_id: ID of the scout_watch_posts record.
         post_data: Normalized post data dict.
+        manual: True for a user-requested re-analysis, which bypasses the
+            copy-ring skip (the other standing verdicts still apply).
 
     Returns:
         dict: Analysis results and lead_id (if created).
@@ -614,6 +621,10 @@ def analyze_and_decide(
             author_username,
             post_title=post_data.get("title"),
             post_body=post_data.get("body_text"),
+            external_post_id=external_post_id,
+            # Trials measure the raw source; a manual re-analysis is the
+            # user's explicit override. Neither applies the copy-ring skip.
+            copy_check=not (manual or bool(getattr(watch, "is_trial", False))),
         )
         if skip_reason:
             from rediska_core.domain.models import AuditLog
@@ -766,6 +777,23 @@ def analyze_and_decide(
                     subreddit=p.location,
                     remote_visibility="visible",
                 ))
+
+        # Fingerprint the author's posts for copy detection (best-effort).
+        from rediska_core.domain.services.post_copy import safe_fingerprint_post
+
+        for p in user_posts:
+            if p.external_id:
+                safe_fingerprint_post(
+                    db,
+                    provider_id=watch.provider_id,
+                    external_post_id=p.external_id,
+                    author_username=author_username,
+                    body_text=p.body_text,
+                    source="profile_item",
+                    posted_at=p.created_at,
+                    location=p.location,
+                    account_id=account.id,
+                )
 
         # Store fetched comments as ProfileItems
         for c in user_comments:
@@ -1088,7 +1116,25 @@ def analyze_and_decide(
                 f"never auto-promoted (recommendation={recommendation})"
             )
 
-        if _should_promote(verdict_dict, watch.min_confidence, bool(getattr(watch, "is_trial", False))):
+        copy_ring = False
+        try:
+            from rediska_core.domain.services.post_copy import is_ring_post
+
+            copy_ring = is_ring_post(db, watch.provider_id, external_post_id)
+        except Exception as e:
+            logger.warning(f"Copy cluster lookup failed for {external_post_id}: {e}")
+        if copy_ring:
+            logger.info(
+                f"Post {external_post_id} is a copy-ring suspect: never auto-promoted "
+                f"(recommendation={recommendation})"
+            )
+
+        if _should_promote(
+            verdict_dict,
+            watch.min_confidence,
+            bool(getattr(watch, "is_trial", False)),
+            copy_ring=copy_ring,
+        ):
             try:
                 from rediska_core.domain.models import LeadAnalysis, AnalysisDimension
                 from rediska_core.domain.services.agent_prompt import AgentPromptService
@@ -1375,6 +1421,7 @@ def reanalyze_post(
                 "watch_id": watch_id,
                 "scout_post_id": post_id,
                 "post_data": post_data,
+                "manual": True,
             }
         )
 

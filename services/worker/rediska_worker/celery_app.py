@@ -26,6 +26,7 @@ app = Celery(
         "rediska_worker.tasks.maintenance",
         "rediska_worker.tasks.message",
         "rediska_worker.tasks.multi_agent_analysis",
+        "rediska_worker.tasks.post_copy",
         "rediska_worker.tasks.scout",
     ],
 )
@@ -62,6 +63,8 @@ app.conf.update(
         "embed.*": {"queue": "embed"},
         "agent.*": {"queue": "agent"},
         "maintenance.*": {"queue": "maintenance"},
+        # Post copy detection backfill: a one-off batch beside the backups.
+        "copy.*": {"queue": "maintenance"},
         "message.*": {"queue": "messages"},
         "multi_agent_analysis.*": {"queue": "multi_agent_analysis"},
         # Prompt replay shares the analysis queue so it sits behind the inference gate

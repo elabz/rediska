@@ -22,6 +22,8 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { BanControl } from '@/components/ban/BanControl';
+import { CopyBadge, CopyClusterPanel } from '@/components/copy';
+import type { CopyInfo } from '@/lib/copyClusters';
 import { BannedBanner } from '@/components/ban/BannedBanner';
 import { useBanStatus } from '@/components/ban/useBanStatus';
 import { bannedDetail, errorMessage } from '@/lib/banList';
@@ -59,6 +61,7 @@ interface Lead {
   latest_analysis_id: number | null;
   analysis_recommendation: string | null;
   analysis_confidence: number | null;
+  copy: CopyInfo | null;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -240,6 +243,7 @@ export default function LeadDetailPage() {
                 >
                   {lead.status.replace('_', ' ')}
                 </Badge>
+                <CopyBadge copy={lead.copy} externalPostId={lead.external_post_id} />
               </div>
               <CardTitle className="text-xl leading-tight">
                 {lead.title || '(No title)'}
@@ -294,6 +298,8 @@ export default function LeadDetailPage() {
               lifting={banState.lifting}
             />
           )}
+
+          <CopyClusterPanel copy={lead.copy} externalPostId={lead.external_post_id} />
 
           {/* Author Info with Profile Panel */}
           {lead.author_username && (

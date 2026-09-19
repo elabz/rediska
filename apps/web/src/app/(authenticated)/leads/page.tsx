@@ -48,6 +48,8 @@ import {
 import { EmptyState } from '@/components';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { NeedsReviewQueue } from './components/NeedsReviewQueue';
+import { CopyBadge, CopyClustersTab } from '@/components/copy';
+import type { CopyInfo } from '@/lib/copyClusters';
 import { errorMessage } from '@/lib/banList';
 
 interface AuthorInfo {
@@ -83,6 +85,7 @@ interface Lead {
   lead_source: string | null;
   priority: 'high' | 'medium' | 'low' | null;
   compatibility_score: number | null;
+  copy: CopyInfo | null;
 }
 
 interface LeadsResponse {
@@ -340,6 +343,7 @@ function LeadCard({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          <CopyBadge copy={lead.copy} externalPostId={lead.external_post_id} />
           {lead.priority && (
             <Badge
               variant="outline"
@@ -509,6 +513,7 @@ export default function LeadsPage() {
   const [sourceFilter, setSourceFilter] = useState('all');
   const [sort, setSort] = useState('priority');
   const [postedWithin, setPostedWithin] = useState('14');
+  const [showSpamRings, setShowSpamRings] = useState(false);
   const [tab, setTab] = useState('leads');
   const [needsReviewCount, setNeedsReviewCount] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -534,6 +539,7 @@ export default function LeadsPage() {
       if (statusFilter && statusFilter !== 'all') params.set('status', statusFilter);
       if (sourceFilter && sourceFilter !== 'all') params.set('lead_source', sourceFilter);
       if (searchQuery) params.set('search', searchQuery);
+      if (showSpamRings) params.set('include_copies', 'true');
 
       const response = await fetch(`/api/core/leads?${params.toString()}`, {
         credentials: 'include',
@@ -553,7 +559,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, sourceFilter, searchQuery, sort, postedWithin]);
+  }, [statusFilter, sourceFilter, searchQuery, sort, postedWithin, showSpamRings]);
 
   useEffect(() => {
     fetchLeads();
@@ -721,10 +727,15 @@ export default function LeadsPage() {
               </Badge>
             )}
           </TabsTrigger>
+          <TabsTrigger value="copies">Copies</TabsTrigger>
         </TabsList>
 
         <TabsContent value="needs-review">
           <NeedsReviewQueue onCountChange={setNeedsReviewCount} />
+        </TabsContent>
+
+        <TabsContent value="copies">
+          <CopyClustersTab />
         </TabsContent>
 
         <TabsContent value="leads" className="space-y-6">
@@ -822,6 +833,14 @@ export default function LeadsPage() {
                 </Select>
               </div>
             </div>
+            <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showSpamRings}
+                onChange={(e) => setShowSpamRings(e.target.checked)}
+              />
+              Show leads from spam rings (the same text posted by 3+ accounts; hidden by default)
+            </label>
           </Card>
 
           {/* Error Alert */}

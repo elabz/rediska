@@ -20,6 +20,7 @@ from celery import Celery
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from rediska_core.api.routes.copy_clusters import attach_copy
 from rediska_core.api.deps import CurrentUser, get_db
 from rediska_core.config import get_settings
 from rediska_core.api.schemas.scout_watch import (
@@ -189,13 +190,15 @@ async def list_needs_review(
     limit: int = Query(default=25, ge=1, le=100),
     watch_id: Optional[int] = Query(default=None, description="Restrict to one watch"),
     include_banned: bool = Query(default=False, description="Include banned authors"),
+    include_copies: bool = Query(default=False, description="Include handled spam-ring posts"),
 ) -> NeedsReviewListResponse:
     """Scout posts analysed as needs_review that nobody has triaged, newest first."""
     service = ScoutWatchService(db)
 
     try:
         posts, next_cursor = service.list_needs_review(
-            cursor=cursor, limit=limit, watch_id=watch_id, include_banned=include_banned
+            cursor=cursor, limit=limit, watch_id=watch_id, include_banned=include_banned,
+            include_copies=include_copies,
         )
     except ValueError:
         raise HTTPException(
@@ -219,10 +222,16 @@ async def list_needs_review(
     from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
 
     AnalysisEvaluationService(db).attach_to_scout_posts(items)
+    attach_copy(
+        db, items,
+        provider_of=lambda i: watches[i.watch_id].provider_id if watches.get(i.watch_id) else "reddit",
+    )
 
     return NeedsReviewListResponse(
         items=items,
-        total=service.count_needs_review(watch_id=watch_id, include_banned=include_banned),
+        total=service.count_needs_review(
+            watch_id=watch_id, include_banned=include_banned, include_copies=include_copies
+        ),
         next_cursor=next_cursor,
     )
 
@@ -560,6 +569,7 @@ async def get_run_detail(
         from rediska_core.domain.services.analysis_evaluation import AnalysisEvaluationService
 
         AnalysisEvaluationService(db).attach_to_scout_posts(post_responses)
+        attach_copy(db, post_responses)
 
         return ScoutWatchRunDetailResponse(
             run=ScoutWatchRunResponse.model_validate(run),

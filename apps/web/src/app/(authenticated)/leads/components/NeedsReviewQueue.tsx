@@ -18,6 +18,8 @@ import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components';
 import { EvaluationControl } from '@/components/evaluations/EvaluationControl';
 import { BanControl } from '@/components/ban/BanControl';
+import { CopyBadge } from '@/components/copy/CopyBadge';
+import type { CopyInfo } from '@/lib/copyClusters';
 import { cn } from '@/lib/utils';
 import type { EffectiveEvaluation, EvaluationMap } from '@/lib/evaluations';
 
@@ -44,6 +46,7 @@ export interface NeedsReviewItem {
   evaluations: EvaluationMap;
   watch_source_location: string | null;
   watch_search_query: string | null;
+  copy?: CopyInfo | null;
 }
 
 interface NeedsReviewResponse {
@@ -150,6 +153,7 @@ function QueueCard({
             >
               <ExternalLink className="h-3 w-3" /> Source
             </a>
+            <CopyBadge copy={item.copy} externalPostId={item.external_post_id} />
           </div>
         </div>
         {item.analysis_confidence !== null && (

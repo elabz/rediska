@@ -5,6 +5,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from rediska_core.api.schemas.copy_clusters import CopyInfo
+
 
 # =============================================================================
 # SAVE LEAD SCHEMAS
@@ -74,8 +76,12 @@ class LeadResponse(BaseModel):
     priority: Optional[str] = Field(default=None, description="Priority tier ('high', 'medium', 'low')")
     compatibility_score: Optional[float] = Field(default=None, description="Preferences compatibility score")
 
+    # Copy cluster of this lead's post (post-copy-detection); null when none.
+    copy_info: Optional[CopyInfo] = Field(default=None, alias="copy")
+
     class Config:
         from_attributes = True
+        populate_by_name = True
 
 
 # =============================================================================

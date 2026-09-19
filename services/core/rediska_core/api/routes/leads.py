@@ -291,13 +291,17 @@ def _lead_response(lead, author: Optional[tuple[str, AuthorInfo]]) -> LeadRespon
 
 def build_lead_responses(leads, db: Session) -> list[LeadResponse]:
     """Build LeadResponses for a page of leads with batched author lookups."""
+    from rediska_core.api.routes.copy_clusters import attach_copy
+
     authors = _author_infos(
         db, {lead.author_account_id for lead in leads if lead.author_account_id}
     )
-    return [
+    responses = [
         _lead_response(lead, authors.get(lead.author_account_id))
         for lead in leads
     ]
+    attach_copy(db, responses, provider_of=lambda r: r.provider_id)
+    return responses
 
 
 def build_lead_response(lead, db: Session) -> LeadResponse:
@@ -400,6 +404,9 @@ async def list_leads(
     include_banned: bool = Query(
         default=False, description="Also list leads of authors on the ban list"
     ),
+    include_copies: bool = Query(
+        default=False, description="Also list leads whose post is in a handled spam ring"
+    ),
 ):
     """List leads with optional filters and search."""
     if sort not in VALID_SORTS:
@@ -419,6 +426,7 @@ async def list_leads(
         sort=sort,
         posted_within_days=posted_within_days,
         include_banned=include_banned,
+        include_copies=include_copies,
     )
 
     total = leads_service.count_leads(
@@ -429,6 +437,7 @@ async def list_leads(
         search=search,
         posted_within_days=posted_within_days,
         include_banned=include_banned,
+        include_copies=include_copies,
     )
 
     return ListLeadsResponse(

@@ -41,6 +41,17 @@ Each cluster SHALL carry a computed kind. It SHALL be `ring_suspect` when two or
 - **WHEN** account A (now deleted) posted a text 60 days before account B posts a lightly edited copy
 - **THEN** the cluster kind is `returning_author`
 
+### Requirement: Spam rings are handled without a human
+A cluster SHALL be handled as a spam ring when its effective kind is `confirmed_ring`, or when it has no decision, its computed kind is `ring_suspect`, it has at least `COPY_RING_MIN_AUTHORS` (default 3) distinct authors, and its posts average at least `COPY_RING_MIN_CHARS` (default 400) characters. The flag SHALL be recomputed with the kind and on every decision; `same_person` and `coincidence` SHALL clear it. Handling SHALL only skip and hide: it SHALL NOT delete any row, change any lead or analysis, or create a ban.
+
+#### Scenario: Seventeen accounts posting a long ad
+- **WHEN** seventeen live accounts post the same 800-character text within a week
+- **THEN** the cluster is handled: later copies are skipped by the scout and the existing leads are hidden
+
+#### Scenario: A short template shared by many accounts
+- **WHEN** twelve accounts post the same 250-character text
+- **THEN** the cluster is a ring suspect but not handled, and it stays listed in the Copies tab for review
+
 ### Requirement: The human decides what a cluster means
 `POST /copy-clusters/{id}/decision` SHALL accept `confirmed_ring`, `same_person`, or `coincidence` with optional notes, SHALL override the computed kind until changed, and SHALL write `audit_log`. `coincidence` SHALL dissolve the cluster and record a suppression so the same texts do not cluster again. No decision SHALL change any lead status, analysis, or ban entry by itself.
 
@@ -49,7 +60,7 @@ Each cluster SHALL carry a computed kind. It SHALL be `ring_suspect` when two or
 - **THEN** the cluster no longer appears in any view and a later post with the same text does not re-create it
 
 ### Requirement: Copy clusters are listable and inspectable
-`GET /copy-clusters` SHALL list clusters with kind, decision, distinct author count, first and last post time, and cursor pagination, filterable by kind and decision. `GET /copy-clusters/{id}` SHALL return members with author, account remote status, post time, source, and links to any lead, scout post, analysis, lead status, human evaluation, and do-not-contact entry for that author. The Leads page SHALL provide a Copies tab over these endpoints with empty and error states.
+`GET /copy-clusters` SHALL list clusters with kind, decision, handled flag, average post length, distinct author count, first and last post time, and cursor pagination, filterable by kind, decision, handled flag and author. The Copies tab SHALL default to clusters that are not handled. `GET /copy-clusters/{id}` SHALL return members with author, account remote status, post time, source, and links to any lead, scout post, analysis, lead status, human evaluation, and do-not-contact entry for that author. The Leads page SHALL provide a Copies tab over these endpoints with empty and error states.
 
 #### Scenario: Inspecting a ring
 - **WHEN** the user opens a `ring_suspect` cluster

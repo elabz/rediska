@@ -96,9 +96,10 @@ def test_query_count_is_constant_in_page_size(db_session, provider):
     _, small_queries = _count_queries(db_session, lambda: build_lead_responses(small, db_session))
     _, large_queries = _count_queries(db_session, lambda: build_lead_responses(large, db_session))
 
-    # accounts, latest snapshots, grouped item counts
-    assert small_queries == 3
-    assert large_queries == 3
+    # accounts, latest snapshots, grouped item counts, copy clusters
+    # (the copy lookup adds one more only when some post is in a cluster)
+    assert small_queries == 4
+    assert large_queries == 4
 
 
 def test_author_info_matches_latest_snapshot_and_counts(db_session, provider):

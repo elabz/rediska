@@ -4,8 +4,8 @@ import { cookies } from 'next/headers';
 const CORE_API_URL = process.env.CORE_API_URL || 'http://localhost:8000';
 
 /**
- * Forward a ban-list request to the core API with the session cookie.
- * Shared by the /api/core/ban-list/* route handlers.
+ * Forward a request to the core API with the session cookie.
+ * Shared by the /api/core/ban-list/* and /api/core/copy-clusters/* route handlers.
  */
 export async function proxyToCore(
   request: NextRequest,

@@ -55,6 +55,13 @@ docker compose up -d
 docker compose exec rediska-core alembic upgrade head
 ```
 
+On an existing database, fingerprint the stored posts for copy detection (dry run first, then live):
+
+```bash
+docker compose exec -T rediska-worker python -c "from rediska_worker.tasks.post_copy import backfill_fingerprints as t; print(t.apply(kwargs={'dry_run': True}).result)"
+docker compose exec -T rediska-worker python -c "from rediska_worker.tasks.post_copy import backfill_fingerprints as t; print(t.apply(kwargs={'dry_run': False}).result)"
+```
+
 ### 6. Create the Admin User & Log In
 
 Bootstrap the single admin user via `POST /setup/bootstrap` (see `docs/deploy.md §3.4`), then open https://rediska.local, log in, and connect a Reddit identity via OAuth (`/setup/identity`).
@@ -73,7 +80,7 @@ Browser (LAN/VPN) → dev-proxy (TLS, external stack) → Next.js Web (BFF) → 
 |---------|-------------|
 | rediska-web | Next.js 14 frontend + BFF proxy routes (internal :3000) |
 | rediska-core | FastAPI backend (internal :8000) |
-| rediska-worker | Celery task worker (ingest, index, embed, agents, scout, source discovery, maintenance) |
+| rediska-worker | Celery task worker (ingest, index, embed, agents, scout, source discovery, copy detection, maintenance) |
 | rediska-beat | Celery scheduler (sync every 60/120s, scout watches every 5m, daily source-discovery mining, nightly backups) |
 | rediska-mysql | MySQL 8.4 (internal) |
 | rediska-redis | Redis 7 broker/cache (internal) |

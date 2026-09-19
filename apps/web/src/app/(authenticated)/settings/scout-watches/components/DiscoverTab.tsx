@@ -43,6 +43,8 @@ export interface TrialYield {
   needs_review: number;
   not_recommended: number;
   skipped_prior_verdict: number;
+  /** Posts whose text other accounts also posted (ring suspects); absent on old trials. */
+  copy_ring_suspects?: number;
   failed: number;
   top_failing_gate: string | null;
   top_failing_gate_count: number;
@@ -240,6 +242,7 @@ function TrialSummary({
       <p className="text-muted-foreground">
         {y.posts_fetched} fetched · {y.skipped_empty} empty · {y.link_only_resolved} link-only
         resolved
+        {y.copy_ring_suspects ? ` · ${y.copy_ring_suspects} copy-ring suspects` : ''}
         {y.top_failing_gate
           ? ` · top failing gate: ${y.top_failing_gate} (${y.top_failing_gate_count})`
           : ''}
