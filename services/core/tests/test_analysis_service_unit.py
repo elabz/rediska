@@ -332,12 +332,19 @@ class TestAnalyzeLead:
 
         # Exact count, not `>= 1`: the fixtures supply 1 snapshot + 2 profile
         # items, so anything less than 3 means items were silently skipped.
-        assert mock_indexing_service.upsert_content.call_count == 3
-        assert result.indexed_count == 3
+        # One of the items is a comment, so the account's merged comments
+        # document is rebuilt too (semantic-similarity-search): 4 in all.
+        assert mock_indexing_service.upsert_content.call_count == 4
+        assert result.indexed_count == 4
 
-        # Both doc types must be indexed, not just the snapshot.
+        # Every doc type must be indexed, not just the snapshot.
         indexed_types = [c.args[0] for c in mock_indexing_service.upsert_content.call_args_list]
-        assert indexed_types == ["profile_snapshot", "profile_item", "profile_item"]
+        assert indexed_types == [
+            "profile_snapshot",
+            "profile_item",
+            "profile_item",
+            "account_comments",
+        ]
 
     @pytest.mark.asyncio
     async def test_analyze_lead_generates_embeddings(

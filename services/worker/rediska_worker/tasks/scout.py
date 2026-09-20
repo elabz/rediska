@@ -1256,6 +1256,14 @@ def analyze_and_decide(
         scout_post.lead_id = lead_id
         db.commit()
 
+        # Analysed posts are kept permanently, so they are worth indexing for
+        # search and "more like this". A promoted post is indexed as its lead
+        # instead (save_lead_from_watch drops the scout document).
+        if not lead_id:
+            from rediska_core.domain.services.indexing import IndexingService
+
+            IndexingService.enqueue_index("scout_post", scout_post.id)
+
         # Update watch stats
         watch.total_posts_seen = (watch.total_posts_seen or 0) + 1
         db.commit()

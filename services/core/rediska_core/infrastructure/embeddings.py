@@ -34,6 +34,15 @@ class EmbeddingsError(Exception):
     pass
 
 
+class EmbeddingsInputTooLargeError(EmbeddingsError):
+    """The server refused the input as too large for its batch settings.
+
+    llama.cpp answers HTTP 500 "input is too large to process" above roughly
+    512 tokens (a server `--ubatch-size` limit, not a model limit). The caller
+    must chunk rather than retry the same text, so this is typed separately.
+    """
+
+
 # =============================================================================
 # CLIENT
 # =============================================================================
@@ -51,6 +60,7 @@ class EmbeddingsClient:
         model: str,
         api_key: Optional[str] = None,
         timeout: int = 60,
+        max_chars: int = 1400,
     ):
         """Initialize the embeddings client.
 
@@ -59,12 +69,34 @@ class EmbeddingsClient:
             model: Model name to use for embeddings.
             api_key: Optional API key for authentication.
             timeout: Request timeout in seconds.
+            max_chars: Largest input this client will send (see `_check_size`).
         """
         self.url = url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.max_chars = max_chars
         self._cached_dimensions: Optional[int] = None
+
+    def _check_size(self, texts: list[str]) -> None:
+        """Refuse locally what the server would refuse with a 500.
+
+        Callers prepare text with `embedding_text.chunk_text`, so an oversize
+        input here is a bug in the caller, not a server condition.
+        """
+        for text in texts:
+            if len(text) > self.max_chars:
+                raise EmbeddingsInputTooLargeError(
+                    f"Input of {len(text)} chars exceeds the {self.max_chars}-char "
+                    "budget; chunk it before embedding"
+                )
+
+    @staticmethod
+    def _is_too_large(status_code: int, body: str) -> bool:
+        lowered = (body or "").lower()
+        return status_code in (400, 413, 500) and (
+            "too large" in lowered or "exceeds" in lowered or "n_ubatch" in lowered
+        )
 
     def _get_headers(self) -> dict[str, str]:
         """Get request headers including auth if configured."""
@@ -92,6 +124,8 @@ class EmbeddingsClient:
         if not text or not text.strip():
             return None
 
+        self._check_size([text])
+
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(
@@ -104,6 +138,11 @@ class EmbeddingsClient:
                 )
 
                 if response.status_code != 200:
+                    if self._is_too_large(response.status_code, response.text):
+                        raise EmbeddingsInputTooLargeError(
+                            f"Server refused the input: {response.status_code} - "
+                            f"{response.text[:200]}"
+                        )
                     raise EmbeddingsError(
                         f"API error: {response.status_code} - {response.text}"
                     )
@@ -161,6 +200,8 @@ class EmbeddingsClient:
         if not valid_texts:
             return []
 
+        self._check_size(valid_texts)
+
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(
@@ -173,6 +214,11 @@ class EmbeddingsClient:
                 )
 
                 if response.status_code != 200:
+                    if self._is_too_large(response.status_code, response.text):
+                        raise EmbeddingsInputTooLargeError(
+                            f"Server refused the batch: {response.status_code} - "
+                            f"{response.text[:200]}"
+                        )
                     raise EmbeddingsError(
                         f"API error: {response.status_code} - {response.text}"
                     )
@@ -243,6 +289,36 @@ class EmbeddingsClient:
         except EmbeddingsError:
             return False
 
+    def embed_document(self, text: str) -> Optional[list[float]]:
+        """Embed prepared document text, chunking and averaging when needed.
+
+        The single place that turns arbitrary-length prepared text into one
+        vector: chunks within the input budget, embeds at most
+        `MAX_CHUNKS` of them in one batch, and stores the normalised mean.
+        """
+        from rediska_core.domain.services.embedding_text import (
+            as_document,
+            chunk_text,
+            mean_vector,
+        )
+
+        chunks = chunk_text(text, max_chars=self.max_chars - len(as_document("")))
+        if not chunks:
+            return None
+        if len(chunks) == 1:
+            return self.embed(as_document(chunks[0]))
+        vectors = self.embed_batch([as_document(c) for c in chunks])
+        return mean_vector(vectors)
+
+    def embed_query(self, text: str) -> Optional[list[float]]:
+        """Embed a search-box query with the query task prefix."""
+        from rediska_core.domain.services.embedding_text import as_query, chunk_text
+
+        chunks = chunk_text(text, max_chars=self.max_chars - len(as_query("")))
+        if not chunks:
+            return None
+        return self.embed(as_query(chunks[0]))
+
     def truncate_text(self, text: str, max_chars: int = 8000) -> str:
         """Truncate text to a maximum number of characters.
 
@@ -278,4 +354,5 @@ class EmbeddingsClient:
 __all__ = [
     "EmbeddingsClient",
     "EmbeddingsError",
+    "EmbeddingsInputTooLargeError",
 ]

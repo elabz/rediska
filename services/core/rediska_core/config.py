@@ -59,6 +59,29 @@ class Settings(BaseSettings):
     embeddings_url: Optional[str] = None
     embeddings_model: Optional[str] = None
     embeddings_api_key: Optional[str] = None
+    # Semantic search: indexing enqueues embedding only while this is on, so
+    # the pipeline can be deployed dark and switched on after the reindex.
+    embeddings_enabled: bool = Field(
+        default=False,
+        description="Enqueue embedding after indexing and allow semantic ranking",
+    )
+    embed_max_chars: int = Field(
+        default=1400,
+        ge=100,
+        description="Hard input budget per embeddings call; longer text is chunked "
+        "and averaged (the llama.cpp server rejects ~512+ tokens)",
+    )
+    embed_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        description="Embedding calls allowed at once, so backfill leaves the GPU to analysis",
+    )
+    embed_batch_size: int = Field(
+        default=16,
+        ge=1,
+        le=64,
+        description="Documents per embeddings batch call",
+    )
 
     # Web
     base_url: str = Field(default="https://rediska.local")

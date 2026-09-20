@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import ExternalAccount, LeadPost
 from rediska_core.domain.services.external_listing import maybe_resolve_post_body
+from rediska_core.domain.services.indexing import IndexingService
 from rediska_core.domain.services.post_copy import safe_fingerprint_post
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 
@@ -208,6 +209,11 @@ class LeadsService:
             )
             # Attach as transient attribute for the response
             lead._profile_item_id = profile_item_id  # type: ignore[attr-defined]
+
+        # Search: a saved lead becomes text- and (once embedded) meaning-
+        # searchable. Queued, never inline, so ES or the broker being down
+        # cannot fail the save.
+        IndexingService.enqueue_index("lead_post", lead.id)
 
         safe_fingerprint_post(
             self.db,

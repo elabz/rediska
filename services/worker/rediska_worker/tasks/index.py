@@ -1,12 +1,16 @@
 """Indexing tasks for Elasticsearch.
 
 These tasks handle indexing content (messages, conversations, profiles, posts)
-to Elasticsearch for search functionality.
+to Elasticsearch for search functionality, and rebuilding the index into a new
+version behind the alias (semantic-similarity-search).
 """
 
+import logging
 from typing import Any
 
 from rediska_worker.celery_app import app
+
+logger = logging.getLogger(__name__)
 
 
 @app.task(name="index.upsert_content")
@@ -257,3 +261,164 @@ def bulk_index_conversation(conversation_id: int) -> dict[str, Any]:
         }
     finally:
         session.close()
+
+
+# =============================================================================
+# INDEX VERSION REBUILD (semantic-similarity-search)
+# =============================================================================
+
+
+@app.task(
+    name="index.reindex_to_version",
+    bind=True,
+    max_retries=0,
+    soft_time_limit=7200,
+    time_limit=7500,
+)
+def reindex_to_version(
+    self,
+    target_index: str = "",
+    switch_alias: bool = False,
+    batch_size: int = 500,
+) -> dict[str, Any]:
+    """Rebuild the content index from MySQL into a new version.
+
+    The vector field is excluded from `_source` in v2, which cannot be changed
+    in place, so the new version is built beside the old one and the alias is
+    switched only when every document type matches in count. MySQL is the
+    source of truth, so the rebuild reads rows rather than copying documents
+    (v1 holds no vectors worth keeping). Embeddings are queued separately by
+    `embed.backfill`.
+
+    Args:
+        target_index: Index to build (defaults to the current version).
+        switch_alias: Point the alias at the new index when counts match.
+        batch_size: Rows per batch.
+
+    Returns:
+        Per-type counts, the parity verdict, and whether the alias moved.
+    """
+    from sqlalchemy import select
+
+    from rediska_core.config import get_settings
+    from rediska_core.domain.models import (
+        Conversation,
+        ExternalAccount,
+        LeadPost,
+        Message,
+        ProfileItem,
+        ProfileSnapshot,
+        ScoutWatchPost,
+    )
+    from rediska_core.domain.services.indexing import IndexingService
+    from rediska_core.infrastructure.elasticsearch import (
+        CONTENT_DOCS_ALIAS,
+        CONTENT_DOCS_INDEX_CURRENT,
+        CONTENT_DOCS_MAPPING,
+    )
+    from rediska_core.infra.db import get_sync_session_factory
+
+    settings = get_settings()
+    index = target_index or CONTENT_DOCS_INDEX_CURRENT
+    session = get_sync_session_factory()()
+
+    try:
+        service = IndexingService(db=session, es_url=settings.elastic_url)
+        es = service.es_client
+        if not es.create_index(index, CONTENT_DOCS_MAPPING):
+            return {"status": "error", "error": f"Could not create {index}"}
+
+        # (doc_type, model, id column, row filter) — the same set the readers use.
+        sources = [
+            ("message", Message, Message.id, None),
+            ("conversation", Conversation, Conversation.id, None),
+            ("lead_post", LeadPost, LeadPost.id, LeadPost.deleted_at.is_(None)),
+            (
+                "scout_post",
+                ScoutWatchPost,
+                ScoutWatchPost.id,
+                ScoutWatchPost.analysis_status == "analyzed",
+            ),
+            ("profile_item", ProfileItem, ProfileItem.id, ProfileItem.deleted_at.is_(None)),
+            ("profile_snapshot", ProfileSnapshot, ProfileSnapshot.id, None),
+            ("account_comments", ExternalAccount, ExternalAccount.id, None),
+        ]
+
+        indexed: dict[str, int] = {}
+        failed: dict[str, int] = {}
+        for doc_type, model, id_column, row_filter in sources:
+            stmt = select(id_column)
+            if row_filter is not None:
+                stmt = stmt.where(row_filter)
+            ids = [row[0] for row in session.execute(stmt).all()]
+
+            done = miss = 0
+            for start in range(0, len(ids), batch_size):
+                for entity_id in ids[start:start + batch_size]:
+                    document = _document_for(service, doc_type, entity_id)
+                    if document is None:
+                        miss += 1
+                        continue
+                    if es.index_document(
+                        index=index, doc_id=f"{doc_type}:{entity_id}", document=document
+                    ):
+                        done += 1
+                    else:
+                        miss += 1
+                session.expire_all()
+            indexed[doc_type] = done
+            failed[doc_type] = miss
+            logger.info(f"reindex {doc_type}: {done} indexed, {miss} skipped")
+
+        es.refresh(index)
+        parity = {}
+        for doc_type, count in indexed.items():
+            in_index = es.count(index, {"term": {"doc_type": doc_type}})
+            parity[doc_type] = {"built": count, "in_index": in_index, "match": in_index == count}
+
+        all_match = all(p["match"] for p in parity.values())
+        switched = False
+        if switch_alias and all_match:
+            switched = es.switch_alias(CONTENT_DOCS_ALIAS, index)
+
+        return {
+            "status": "success" if all_match else "parity_mismatch",
+            "index": index,
+            "indexed": indexed,
+            "skipped": failed,
+            "parity": parity,
+            "alias_switched": switched,
+            "alias": CONTENT_DOCS_ALIAS,
+        }
+
+    except Exception as e:
+        logger.error(f"index.reindex_to_version failed: {e}", exc_info=True)
+        return {"status": "error", "error": str(e)}
+    finally:
+        session.close()
+
+
+def _document_for(service, doc_type: str, entity_id: int):
+    """Build one document for the rebuild, or None when the row is gone."""
+    from rediska_core.domain.models import (
+        Conversation,
+        LeadPost,
+        Message,
+        ProfileItem,
+        ProfileSnapshot,
+        ScoutWatchPost,
+    )
+
+    builders = {
+        "message": (Message, service.message_to_document),
+        "conversation": (Conversation, service.conversation_to_document),
+        "lead_post": (LeadPost, service.lead_post_to_document),
+        "scout_post": (ScoutWatchPost, service.scout_post_to_document),
+        "profile_item": (ProfileItem, service.profile_item_to_document),
+        "profile_snapshot": (ProfileSnapshot, service.profile_snapshot_to_document),
+    }
+    if doc_type == "account_comments":
+        return service.account_comments_to_document(entity_id)
+    model, builder = builders[doc_type]
+    row = service.db.get(model, entity_id)
+    return builder(row) if row is not None else None

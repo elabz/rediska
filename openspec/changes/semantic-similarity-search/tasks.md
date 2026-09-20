@@ -1,20 +1,20 @@
 ## 1. Index version and mapping
 
-- [ ] 1.1 Mapping v2: `_source.excludes: ["embedding"]`, fields `embedding_model`, `embedding_prep`, `embedding_text_hash`, `embedded_at`, `author_username`, `location`, `outcome_label`; alias `rediska_content_docs`
-- [ ] 1.2 All readers and writers address the alias; `ensure_index` creates v2 + alias on a clean host
-- [ ] 1.3 `index.reindex_to_version`: rebuild from MySQL in batches, per-type parity check, alias switch, `jobs` ledger
+- [x] 1.1 Mapping v2: `_source.excludes: ["embedding"]`, fields `embedding_model`, `embedding_prep`, `embedding_text_hash`, `embedded_at`, `author_username`, `location`, `outcome_label`; alias `rediska_content_docs`
+- [x] 1.2 All readers and writers address the alias; `ensure_index` creates v2 + alias on a clean host
+- [x] 1.3 `index.reindex_to_version`: rebuild from MySQL in batches, per-type parity check, alias switch, `jobs` ledger
 
 ## 2. Embedding pipeline
 
-- [ ] 2.1 `prepare_embedding_text()` with truncation and paragraph chunking; unit tests (short, long, no paragraphs, empty)
+- [x] 2.1 `prepare_embedding_text()` with truncation and paragraph chunking; unit tests (short, long, no paragraphs, empty)
 - [ ] 2.1a Task prefixes (`search_document:` / `search_query:`) in one place, recorded in `embedding_prep`; re-measure the 0.80 and 0.95 thresholds with prefixes on
-- [ ] 2.2 `EmbeddingsClient`: never send over-limit input; chunk-mean helper; surface HTTP 500 "too large" as a typed error
-- [ ] 2.3 Implement `lead_post`, `scout_post`, `profile_item`, `profile_snapshot` branches in `embed.generate_for_entity`; vector write that never reads the vector back; skip when text hash unchanged
-- [ ] 2.3a `account_comments` document: merge newest first with community prefix up to `EMBED_MAX_CHARS`, rebuild on profile ingest, re-embed only on text-hash change; comments themselves indexed text-only; tests on synthetic comments
-- [ ] 2.4 `IndexingService.scout_post_to_document`; remove `scout_post` document on promotion
-- [ ] 2.5 Enqueue chain index → embed; hooks in `LeadsService.save_lead`, scout promotion, `analyze_and_decide` completion, message ingest, profile analysis; `EMBEDDINGS_ENABLED` flag in config, `.env.example` and compose blocks
-- [ ] 2.6 `embed.sweep_missing` beat entry (10 min, bounded), `embed.backfill` (dry run, cancellable, `EMBED_MAX_CONCURRENT` semaphore, inference-gate-aware pause)
-- [ ] 2.7 Task routing test covers the new task names
+- [x] 2.2 `EmbeddingsClient`: never send over-limit input; chunk-mean helper; surface HTTP 500 "too large" as a typed error
+- [x] 2.3 Implement `lead_post`, `scout_post`, `profile_item`, `profile_snapshot` branches in `embed.generate_for_entity`; vector write that never reads the vector back; skip when text hash unchanged
+- [x] 2.3a `account_comments` document: merge newest first with community prefix up to `EMBED_MAX_CHARS`, rebuild on profile ingest, re-embed only on text-hash change; comments themselves indexed text-only; tests on synthetic comments
+- [x] 2.4 `IndexingService.scout_post_to_document`; remove `scout_post` document on promotion
+- [x] 2.5 Enqueue chain index → embed; hooks in `LeadsService.save_lead`, scout promotion, `analyze_and_decide` completion, message ingest, profile analysis; `EMBEDDINGS_ENABLED` flag in config, `.env.example` and compose blocks
+- [x] 2.6 `embed.sweep_missing` beat entry (10 min, bounded), `embed.backfill` (dry run, cancellable, `EMBED_MAX_CONCURRENT` semaphore, inference-gate-aware pause)
+- [x] 2.7 Task routing test covers the new task names
 
 ## 3. Search honesty
 

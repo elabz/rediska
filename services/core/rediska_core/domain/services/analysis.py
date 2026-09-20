@@ -451,6 +451,12 @@ class AnalysisService:
             if self.indexing_service.upsert_content("profile_item", item.id):
                 count += 1
 
+        # One merged document per account holds the comments (they are far too
+        # short to embed one by one); rebuilt whenever profile items land.
+        if any(item.item_type == "comment" for item in items):
+            if self.indexing_service.upsert_content("account_comments", snapshot.account_id):
+                count += 1
+
         return count
 
     # =========================================================================

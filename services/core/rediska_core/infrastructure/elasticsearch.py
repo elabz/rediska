@@ -11,19 +11,19 @@ Usage:
 
     client = ElasticsearchClient(url="http://localhost:9200")
 
-    # Create index
-    client.create_index("rediska_content_docs_v1")
+    # Create the current index version and point the alias at it
+    client.ensure_index()
 
-    # Index document
+    # Index document (readers and writers address the alias)
     client.index_document(
-        index="rediska_content_docs_v1",
+        index="rediska_content_docs",
         doc_id="message:123",
         document={"doc_type": "message", "content": "Hello world"}
     )
 
     # Search
     results = client.search(
-        index="rediska_content_docs_v1",
+        index="rediska_content_docs",
         query={"match": {"content": "hello"}},
         filters={"provider_id": "reddit"}
     )
@@ -54,6 +54,11 @@ CONTENT_DOCS_MAPPING = {
         }
     },
     "mappings": {
+        # The vector is indexed but never returned: keeping it in _source cost
+        # 15.8 KB per document against ~4 KB without it. Excluding a field from
+        # _source cannot be changed in place, which is why this is a new index
+        # version behind an alias (see index_version.py).
+        "_source": {"excludes": ["embedding"]},
         "properties": {
             # Document identification
             "doc_type": {
@@ -119,6 +124,34 @@ CONTENT_DOCS_MAPPING = {
                 "similarity": "cosine",
             },
 
+            # Embedding provenance: which model produced the vector, which
+            # text-preparation rule was used, and a hash of the prepared text
+            # so re-indexing unchanged text does not re-embed it.
+            "embedding_model": {
+                "type": "keyword",
+            },
+            "embedding_prep": {
+                "type": "keyword",
+            },
+            "embedding_text_hash": {
+                "type": "keyword",
+            },
+            "embedded_at": {
+                "type": "date",
+            },
+
+            # Similarity filters
+            "author_username": {
+                "type": "keyword",
+            },
+            "location": {
+                "type": "keyword",
+            },
+            # Reserved for lead-affinity-signal.
+            "outcome_label": {
+                "type": "keyword",
+            },
+
             # Message-specific fields
             "direction": {
                 "type": "keyword",
@@ -151,8 +184,15 @@ CONTENT_DOCS_MAPPING = {
 }
 
 
-# Index name constant
-CONTENT_DOCS_INDEX = "rediska_content_docs_v1"
+# Index names. Readers and writers address the ALIAS; the versioned names
+# exist so a new version can be built from MySQL and switched atomically.
+CONTENT_DOCS_ALIAS = "rediska_content_docs"
+CONTENT_DOCS_INDEX_V1 = "rediska_content_docs_v1"
+CONTENT_DOCS_INDEX_V2 = "rediska_content_docs_v2"
+CONTENT_DOCS_INDEX_CURRENT = CONTENT_DOCS_INDEX_V2
+
+# What every reader and writer passes as `index`.
+CONTENT_DOCS_INDEX = CONTENT_DOCS_ALIAS
 
 
 # =============================================================================
@@ -281,18 +321,65 @@ class ElasticsearchClient:
         except Exception:
             return False
 
+    def alias_exists(self, alias: str) -> bool:
+        """Whether an alias (or an index of that name) exists."""
+        try:
+            return bool(self._client.indices.exists_alias(name=alias))
+        except Exception:
+            return False
+
+    def get_alias_indices(self, alias: str) -> list[str]:
+        """Concrete indices behind an alias (empty when it does not exist)."""
+        try:
+            return sorted(self._client.indices.get_alias(name=alias).keys())
+        except Exception:
+            return []
+
+    def switch_alias(self, alias: str, to_index: str) -> bool:
+        """Point an alias at one index atomically, removing it from others."""
+        actions: list[dict] = [
+            {"remove": {"index": old, "alias": alias}}
+            for old in self.get_alias_indices(alias)
+            if old != to_index
+        ]
+        actions.append({"add": {"index": to_index, "alias": alias}})
+        try:
+            self._client.indices.update_aliases(body={"actions": actions})
+            return True
+        except Exception:
+            return False
+
+    def refresh(self, index: str) -> bool:
+        """Make recent writes searchable (used after a rebuild, before parity)."""
+        try:
+            self._client.indices.refresh(index=index)
+            return True
+        except Exception:
+            return False
+
+    def count(self, index: str, query: Optional[dict] = None) -> int:
+        """Document count, optionally for a query (-1 when unavailable)."""
+        try:
+            body = {"query": query} if query else None
+            return int(self._client.count(index=index, body=body)["count"])
+        except Exception:
+            return -1
+
     def ensure_index(self, index: str = CONTENT_DOCS_INDEX) -> bool:
-        """Ensure the content docs index exists.
+        """Ensure the content docs index exists and is reachable by the alias.
 
-        Creates the index with default mapping if it doesn't exist.
-
-        Args:
-            index: Index name (defaults to CONTENT_DOCS_INDEX).
-
-        Returns:
-            True if index exists or was created.
+        On a clean host this creates the current version (v2) and points the
+        alias at it. Called with a concrete index name it just creates that
+        index with the standard mapping.
         """
-        return self.create_index(index, CONTENT_DOCS_MAPPING)
+        if index != CONTENT_DOCS_ALIAS:
+            return self.create_index(index, CONTENT_DOCS_MAPPING)
+
+        if self.alias_exists(CONTENT_DOCS_ALIAS):
+            return True
+        if not self.create_index(CONTENT_DOCS_INDEX_CURRENT, CONTENT_DOCS_MAPPING):
+            return False
+        return self.switch_alias(CONTENT_DOCS_ALIAS, CONTENT_DOCS_INDEX_CURRENT)
 
     # =========================================================================
     # DOCUMENT OPERATIONS
@@ -678,6 +765,10 @@ __all__ = [
     "ElasticsearchClient",
     "CONTENT_DOCS_MAPPING",
     "CONTENT_DOCS_INDEX",
+    "CONTENT_DOCS_ALIAS",
+    "CONTENT_DOCS_INDEX_V1",
+    "CONTENT_DOCS_INDEX_V2",
+    "CONTENT_DOCS_INDEX_CURRENT",
     "NotFoundError",
     "UnsupportedFilterError",
 ]

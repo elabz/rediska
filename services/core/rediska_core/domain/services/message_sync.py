@@ -479,6 +479,12 @@ class MessageSyncService:
         self.db.add(message)
         self.db.flush()
 
+        # Search index (and, once embedded, semantic search). Queued, so a
+        # broker or ES problem never costs us the synced message.
+        from rediska_core.domain.services.indexing import IndexingService
+
+        IndexingService.enqueue_index("message", message.id)
+
         # Update engagement_state when receiving a new incoming message
         # from a contacted account
         if direction == "in":

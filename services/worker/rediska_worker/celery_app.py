@@ -84,6 +84,14 @@ app.conf.update(
 
 # Beat schedule for periodic tasks
 app.conf.beat_schedule = {
+    # Documents whose vector is missing or came from another model. Bounded
+    # per run; the chained embed after indexing does the routine work, this is
+    # the safety net for an endpoint that was down (semantic-similarity-search).
+    "embed-sweep-missing": {
+        "task": "embed.sweep_missing",
+        "schedule": 600.0,  # 10 minutes
+        "args": (),
+    },
     # Inbox check every 60 seconds - catches new incoming messages quickly.
     # Page-capped, and skipped while another message sync holds the lock.
     "sync-inbox-fast-periodic": {

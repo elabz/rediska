@@ -19,6 +19,8 @@ Usage:
     service.delete_content("message", message_id)
 """
 
+import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -26,6 +28,8 @@ from sqlalchemy.orm import Session
 
 from rediska_core.domain.models import (
     Conversation,
+    ExternalAccount,
+    ScoutWatchPost,
     LeadPost,
     Message,
     ProfileItem,
@@ -35,6 +39,53 @@ from rediska_core.infrastructure.elasticsearch import (
     CONTENT_DOCS_INDEX,
     ElasticsearchClient,
 )
+
+logger = logging.getLogger(__name__)
+
+# Indexing is queued from write paths (saving a lead, syncing a message), so a
+# broker that is down must cost those writes nothing. The connection is given
+# one second, publishing is never retried, and after a failure dispatch is
+# skipped entirely for a short while rather than paying the timeout per row.
+_DISPATCH_TIMEOUT_SECONDS = 1.0
+_DISPATCH_BACKOFF_SECONDS = 60.0
+_dispatch_blocked_until = 0.0
+_celery_app = None
+
+
+def _get_celery_app():
+    global _celery_app
+    if _celery_app is None:
+        from celery import Celery
+
+        from rediska_core.config import get_settings
+
+        _celery_app = Celery("rediska_core", broker=get_settings().celery_broker_url)
+        _celery_app.conf.update(
+            broker_connection_retry=False,
+            broker_connection_retry_on_startup=False,
+            broker_connection_max_retries=0,
+            broker_transport_options={
+                "socket_connect_timeout": _DISPATCH_TIMEOUT_SECONDS,
+                "socket_timeout": _DISPATCH_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+    return _celery_app
+
+
+def _dispatch(task_name: str, kwargs: dict[str, Any], queue: str) -> bool:
+    """Send a task without waiting on, or failing because of, the broker."""
+    global _dispatch_blocked_until
+
+    if time.monotonic() < _dispatch_blocked_until:
+        return False
+    try:
+        _get_celery_app().send_task(task_name, kwargs=kwargs, queue=queue, retry=False)
+        return True
+    except Exception as e:  # noqa: BLE001 - search must not break writes
+        _dispatch_blocked_until = time.monotonic() + _DISPATCH_BACKOFF_SECONDS
+        logger.warning("Could not queue %s for %s: %s", task_name, kwargs, e)
+        return False
 
 
 # =============================================================================
@@ -46,9 +97,17 @@ SUPPORTED_DOC_TYPES = {
     "message",
     "conversation",
     "lead_post",
+    "scout_post",
     "profile_item",
     "profile_snapshot",
+    "account_comments",
 }
+
+# Types whose text is worth a vector (conversations carry no text of their own).
+EMBEDDABLE_DOC_TYPES = SUPPORTED_DOC_TYPES - {"conversation"}
+
+# Post-like types, for the probable-rewrite pass and similarity defaults.
+POST_DOC_TYPES = ("lead_post", "scout_post", "profile_item")
 
 
 # =============================================================================
@@ -148,11 +207,14 @@ class IndexingService:
         Returns:
             Dictionary suitable for ES indexing.
         """
+        author = lead_post.author_account.external_username if lead_post.author_account else None
         return {
             "doc_type": "lead_post",
             "entity_id": lead_post.id,
             "provider_id": lead_post.provider_id,
             "source_location": lead_post.source_location,
+            "location": lead_post.source_location,
+            "author_username": (author or "").lower() or None,
             "account_id": lead_post.author_account_id,
             "title": lead_post.title or "",
             "content": lead_post.body_text or "",
@@ -161,6 +223,96 @@ class IndexingService:
             "local_deleted": lead_post.deleted_at is not None,
             "created_at": lead_post.post_created_at.isoformat() if lead_post.post_created_at else None,
             "indexed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def scout_post_to_document(self, post: "ScoutWatchPost") -> dict[str, Any]:
+        """Convert an analysed scout post to an ES document.
+
+        Only analysed posts are indexed: unanalysed sightings are deleted by
+        the 3-day history cleanup, so indexing them would leave dangling hits.
+        """
+        watch = post.watch if hasattr(post, "watch") else None
+        return {
+            "doc_type": "scout_post",
+            "entity_id": post.id,
+            "provider_id": watch.provider_id if watch else "reddit",
+            "source_location": watch.source_location if watch else None,
+            "location": watch.source_location if watch else None,
+            "author_username": (post.post_author or "").lower() or None,
+            "title": post.post_title or "",
+            "content": post.post_body or "",
+            "remote_visibility": "unknown",
+            "local_deleted": False,
+            "created_at": post.first_seen_at.isoformat() if post.first_seen_at else None,
+            "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "external_post_id": post.external_post_id,
+                "watch_id": post.watch_id,
+                "analysis_recommendation": post.analysis_recommendation,
+            },
+        }
+
+    def account_comments_to_document(self, account_id: int) -> Optional[dict[str, Any]]:
+        """One merged document holding an account's recent comments.
+
+        Comments average ~108 characters; embedding them one by one would
+        double the index while each vector said almost nothing. Instead the
+        account's comments are merged newest first, each line prefixed with its
+        community, up to the input budget — so the vector describes how the
+        person talks and where. Individual comments stay text-searchable as
+        their own `profile_item` documents.
+        """
+        from rediska_core.config import get_settings
+
+        account = self.db.get(ExternalAccount, account_id)
+        if account is None:
+            return None
+
+        budget = get_settings().embed_max_chars
+        rows = (
+            self.db.query(ProfileItem)
+            .filter(
+                ProfileItem.account_id == account_id,
+                ProfileItem.item_type == "comment",
+                ProfileItem.deleted_at.is_(None),
+            )
+            .order_by(
+                ProfileItem.item_created_at.desc().nullslast(),
+                ProfileItem.id.desc(),
+            )
+            .limit(500)
+            .all()
+        )
+
+        lines: list[str] = []
+        used = 0
+        newest = None
+        for row in rows:
+            text = (row.text_content or "").strip()
+            if not text:
+                continue
+            line = f"r/{row.subreddit}: {text}" if row.subreddit else text
+            if used + len(line) + 1 > budget:
+                break
+            lines.append(line)
+            used += len(line) + 1
+            if newest is None:
+                newest = row.item_created_at
+        if not lines:
+            return None
+
+        return {
+            "doc_type": "account_comments",
+            "entity_id": account_id,
+            "provider_id": account.provider_id,
+            "account_id": account_id,
+            "author_username": (account.external_username or "").lower() or None,
+            "item_type": "comment",
+            "content": "\n".join(lines),
+            "local_deleted": False,
+            "created_at": newest.isoformat() if newest else None,
+            "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"comment_count": len(lines)},
         }
 
     def profile_item_to_document(self, profile_item: ProfileItem) -> dict[str, Any]:
@@ -177,11 +329,14 @@ class IndexingService:
         if profile_item.account:
             provider_id = profile_item.account.provider_id
 
+        author = profile_item.account.external_username if profile_item.account else None
         return {
             "doc_type": "profile_item",
             "entity_id": profile_item.id,
             "provider_id": provider_id,
             "account_id": profile_item.account_id,
+            "author_username": (author or "").lower() or None,
+            "location": f"r/{profile_item.subreddit}" if profile_item.subreddit else None,
             "item_type": profile_item.item_type,
             "content": profile_item.text_content or "",
             "remote_visibility": profile_item.remote_visibility or "unknown",
@@ -204,11 +359,13 @@ class IndexingService:
         if snapshot.account:
             provider_id = snapshot.account.provider_id
 
+        author = snapshot.account.external_username if snapshot.account else None
         return {
             "doc_type": "profile_snapshot",
             "entity_id": snapshot.id,
             "provider_id": provider_id,
             "account_id": snapshot.account_id,
+            "author_username": (author or "").lower() or None,
             "content": snapshot.summary_text or "",
             "local_deleted": False,  # Snapshots don't have deleted_at
             "created_at": snapshot.fetched_at.isoformat() if snapshot.fetched_at else None,
@@ -277,16 +434,79 @@ class IndexingService:
                 return False
             document = self.profile_snapshot_to_document(entity)
 
+        elif doc_type == "scout_post":
+            entity = (
+                self.db.query(ScoutWatchPost).filter(ScoutWatchPost.id == entity_id).first()
+            )
+            # Only analysed posts are indexed; the rest are deleted by cleanup.
+            if not entity or entity.analysis_status != "analyzed":
+                return False
+            document = self.scout_post_to_document(entity)
+
+        elif doc_type == "account_comments":
+            built = self.account_comments_to_document(entity_id)
+            if built is None:
+                # No comments left to merge: drop any stale document.
+                self.delete_content("account_comments", entity_id)
+                return False
+            document = built
+
         else:
             # Unknown type
             return False
 
         # Index the document
         doc_id = f"{doc_type}:{entity_id}"
-        return self.es_client.index_document(
+        indexed = self.es_client.index_document(
             index=CONTENT_DOCS_INDEX,
             doc_id=doc_id,
             document=document,
+        )
+        if indexed:
+            # Embedding is chained, never inline: a document without a vector
+            # is still text-searchable, and the sweeper picks it up later.
+            self.enqueue_embedding(doc_type, entity_id)
+        return indexed
+
+    @staticmethod
+    def enqueue_index(doc_type: str, entity_id: int) -> bool:
+        """Queue `index.upsert_content`, best-effort.
+
+        The indexing task chains embedding itself, so callers hook this one
+        place after writing content. Never raises and never waits: search is a
+        read model, and losing an index write must not fail the write that
+        produced it.
+        """
+        return _dispatch(
+            "index.upsert_content",
+            {"doc_type": doc_type, "entity_id": entity_id},
+            "index",
+        )
+
+    @staticmethod
+    def enqueue_delete(doc_type: str, entity_id: int) -> bool:
+        """Queue `index.delete_content`, best-effort."""
+        return _dispatch(
+            "index.delete_content",
+            {"doc_type": doc_type, "entity_id": entity_id},
+            "index",
+        )
+
+    @staticmethod
+    def enqueue_embedding(doc_type: str, entity_id: int) -> bool:
+        """Queue `embed.generate_for_entity`, best-effort.
+
+        Returns False when embeddings are disabled, the type carries no text,
+        or the broker is unreachable — indexing never fails because of it.
+        """
+        from rediska_core.config import get_settings
+
+        if not get_settings().embeddings_enabled or doc_type not in EMBEDDABLE_DOC_TYPES:
+            return False
+        return _dispatch(
+            "embed.generate_for_entity",
+            {"doc_type": doc_type, "entity_id": entity_id},
+            "embed",
         )
 
     def delete_content(

@@ -36,6 +36,7 @@ from rediska_core.domain.models import (
     ScoutWatchRun,
 )
 from rediska_core.domain.services.external_listing import maybe_resolve_post_body
+from rediska_core.domain.services.indexing import IndexingService
 from rediska_core.domain.services.post_copy import is_handled_post, safe_fingerprint_post
 from rediska_core.domain.services.profile_item_utils import upsert_profile_item_from_post
 from rediska_core.domain.services.source_discovery import (
@@ -1175,7 +1176,26 @@ class ScoutWatchService:
         self.db.add(lead)
         self.db.flush()
         lead._attached = False  # type: ignore[attr-defined]
+        self._index_promoted_post(lead, post_data.get("external_post_id"))
         return lead
+
+    def _index_promoted_post(self, lead: LeadPost, external_post_id: Optional[str]) -> None:
+        """Index the new lead and drop the scout document it replaces.
+
+        A promoted post would otherwise appear twice in search — once as
+        `scout_post`, once as `lead_post`.
+        """
+        IndexingService.enqueue_index("lead_post", lead.id)
+        if not external_post_id:
+            return
+        scout_post = (
+            self.db.query(ScoutWatchPost)
+            .filter(ScoutWatchPost.external_post_id == external_post_id)
+            .order_by(ScoutWatchPost.id.desc())
+            .first()
+        )
+        if scout_post is not None:
+            IndexingService.enqueue_delete("scout_post", scout_post.id)
 
 
 # =============================================================================
