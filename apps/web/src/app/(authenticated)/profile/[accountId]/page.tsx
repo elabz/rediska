@@ -25,6 +25,7 @@ import { Badge } from '@/components/ui/badge';
 import { ContactButton } from '@/components/ContactButton';
 import { BanControl } from '@/components/ban/BanControl';
 import { AuthorCopyClusters } from '@/components/copy/AuthorCopyClusters';
+import { SimilarButton } from '@/components/similar';
 import { BannedBanner } from '@/components/ban/BannedBanner';
 import { useBanStatus } from '@/components/ban/useBanStatus';
 import { EmptyState } from '@/components';
@@ -442,6 +443,7 @@ function ContentTabs({
                           {formatDate(item.item_created_at)}
                         </span>
                       )}
+                      <SimilarButton docType="profile_item" entityId={item.id} compact />
                     </div>
                   </div>
                 </div>

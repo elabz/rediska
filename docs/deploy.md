@@ -428,7 +428,54 @@ Major-version skew between source and target ES will break restore — verify ve
 
 Docker's `restart: unless-stopped` policy plus enabling Docker at boot (`sudo systemctl enable docker`) is enough to bring Rediska back after a reboot. A dedicated systemd unit is unnecessary for this stack, but if you want one for an explicit "rediska target" managed via `systemctl`, see the Docker docs for `docker compose up` wrapped in a unit file.
 
-### 7.4 Security posture
+### 7.4 Semantic search: sizing and rollout
+
+The content index carries one 768-dimension vector per embeddable document.
+
+**Sizing.** Budget roughly **1 GB of page cache and 4 GB of disk per million
+vectors**. kNN wants the HNSW graph in memory: if the graph does not fit, every
+query pays disk reads and latency goes from milliseconds to hundreds of them.
+Size the ES heap (`ES_JAVA_OPTS`) for the *rest* of Elasticsearch, and leave the
+page cache to the operating system — the vectors live there, not in the heap.
+
+**Operator note on the embeddings host.** `EMBED_MAX_CHARS` (1,400 by default)
+is the per-call input budget the application will never exceed. What the
+llama.cpp server will actually accept in one call is its `--ubatch-size`.
+Raising it to 2048 lets a whole post embed in one call instead of being chunked
+and averaged, which is slightly better quality and slightly fewer calls. The
+code deliberately does not depend on it: chunking is always correct, just less
+direct.
+
+**Rollout order** (each step is safe to stop at):
+
+1. **Deploy dark.** `EMBEDDINGS_ENABLED=false`. Rebuild core, worker **and**
+   beat — beat runs the baked image, so a source-only change never reaches it.
+   Verify the new task names are really registered in the worker; a stale worker
+   looks perfectly healthy.
+2. **Build the new index version and switch the alias.**
+   ```bash
+   docker compose exec -T rediska-worker python -c "
+   from rediska_worker.tasks.index import reindex_to_version as t
+   print(t.apply(kwargs={'switch_alias': False}).result)"
+   ```
+   Check `parity` per document type, then re-run with `switch_alias=True`. Keep
+   the old version until search is confirmed working. If an index already exists
+   under the *alias* name (ES auto-creates one when something writes to a name
+   that is not yet an alias), it must be deleted first — an alias and an index
+   cannot share a name. Nothing is lost: the rebuild reads MySQL.
+3. **Enable the hooks.** `EMBEDDINGS_ENABLED=true`, then
+   `docker compose up -d` core, worker and beat — a `restart` does not re-read
+   `.env`.
+4. **Backfill.** `embed.backfill` with `dry_run=True` first for per-type counts,
+   then live. Watch that live analysis is not starved; the backfill pauses while
+   the inference gate is saturated.
+5. **Verify.** Coverage on the `/ops` card (aim for ≥ 99%), one smoke search in
+   `meaning` mode, then drop the old index version.
+
+**Rollback:** point the alias back at the previous version and set
+`EMBEDDINGS_ENABLED=false`. No data is lost either way — vectors are derived.
+
+### 7.5 Security posture
 
 - `.env` is world-readable by default until you `chmod 600` it; do so on every server.
 - Self-signed TLS is only as good as the trust store of each device; treat the mkcert root CA as a moderately-sensitive secret.

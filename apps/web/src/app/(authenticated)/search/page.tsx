@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { EmptyState } from '@/components';
+import { SimilarButton } from '@/components/similar';
 
 interface SearchHit {
   id: string;
@@ -41,7 +42,27 @@ interface SearchResponse {
   total: number;
   hits: SearchHit[];
   max_score: number | null;
+  /** Whether vector (meaning) ranking actually contributed to this ranking. */
+  semantic_used?: boolean;
+  semantic_unavailable_reason?: string | null;
 }
+
+/**
+ * Why meaning ranking sat this one out. The API only ever sends one of these
+ * codes, and the user is told rather than left to assume they got both halves.
+ */
+const SEMANTIC_REASONS: Record<string, string> = {
+  embeddings_not_configured:
+    'No embeddings endpoint is configured, so these are keyword matches only.',
+  query_not_embeddable:
+    'This query produced no embeddable text, so these are keyword matches only.',
+  embeddings_endpoint_failed:
+    'The embeddings endpoint could not be reached, so these are keyword matches only.',
+  vector_search_failed:
+    'The vector query failed, so these are keyword matches only.',
+  no_embedded_matches:
+    'Nothing with a vector matched, so these are keyword matches only. Documents may still be waiting to be embedded.',
+};
 
 function formatDate(dateString: string): string {
   const date = new Date(dateString);
@@ -135,6 +156,14 @@ function SearchResultCard({ hit }: { hit: SearchHit }) {
                 <ExternalLink className="h-3 w-3" />
                 View
               </span>
+            )}
+            {hit.source.entity_id && docType !== 'conversation' && (
+              <SimilarButton
+                docType={docType}
+                entityId={hit.source.entity_id}
+                title={hit.source.title}
+                compact
+              />
             )}
           </div>
         </div>
@@ -268,9 +297,9 @@ export default function SearchPage() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="hybrid">Hybrid (Text + Vector)</SelectItem>
-                <SelectItem value="text">Text Only (BM25)</SelectItem>
-                <SelectItem value="vector">Vector Only (Semantic)</SelectItem>
+                <SelectItem value="hybrid">Hybrid (words + meaning)</SelectItem>
+                <SelectItem value="text">Words only (BM25)</SelectItem>
+                <SelectItem value="vector">Meaning only (vector)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -285,6 +314,7 @@ export default function SearchPage() {
                 <SelectItem value="message">Messages</SelectItem>
                 <SelectItem value="conversation">Conversations</SelectItem>
                 <SelectItem value="lead_post">Lead Posts</SelectItem>
+                <SelectItem value="scout_post">Scout Posts</SelectItem>
                 <SelectItem value="profile">Profiles</SelectItem>
               </SelectContent>
             </Select>
@@ -317,6 +347,19 @@ export default function SearchPage() {
             />
           ) : (
             <>
+              {results.semantic_used === false && mode === 'hybrid' && (
+                <Card
+                  data-testid="semantic-notice"
+                  className="p-3 border-amber-500/40 bg-amber-500/5"
+                >
+                  <p className="text-sm text-amber-700 dark:text-amber-300">
+                    Ranked by words alone.{' '}
+                    {SEMANTIC_REASONS[results.semantic_unavailable_reason ?? ''] ??
+                      'Semantic ranking was unavailable.'}
+                  </p>
+                </Card>
+              )}
+
               <div className="flex items-center justify-between">
                 <p className="text-sm text-muted-foreground">
                   Found {results.total} result{results.total !== 1 ? 's' : ''}

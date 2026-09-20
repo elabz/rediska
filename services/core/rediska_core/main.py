@@ -41,6 +41,8 @@ from rediska_core.api.routes import profile_items as profile_items_routes
 from rediska_core.api.routes import reddit_oauth as reddit_oauth_routes
 from rediska_core.api.routes import scout_watches as scout_watches_routes
 from rediska_core.api.routes import search as search_routes
+from rediska_core.api.routes import copy_suggestions as copy_suggestion_routes
+from rediska_core.api.routes import similar as similar_routes
 from rediska_core.api.routes import setup as setup_routes
 from rediska_core.api.routes import sources as sources_routes
 from rediska_core.api.routes import source_candidates as source_candidates_routes
@@ -97,6 +99,8 @@ app.include_router(profile_items_routes.router)
 app.include_router(reddit_oauth_routes.router)
 app.include_router(scout_watches_routes.router)
 app.include_router(search_routes.router)
+app.include_router(similar_routes.router)
+app.include_router(copy_suggestion_routes.router)
 app.include_router(setup_routes.router)
 app.include_router(sources_routes.router)
 app.include_router(source_candidates_routes.router)

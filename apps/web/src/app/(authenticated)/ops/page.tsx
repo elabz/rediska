@@ -25,6 +25,7 @@ import {
   Archive,
 } from 'lucide-react';
 import { CalibrationReportPanel } from './components/CalibrationReportPanel';
+import { EmbeddingCoveragePanel } from './components/EmbeddingCoveragePanel';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -1065,6 +1066,8 @@ export default function OpsPage() {
       </Card>
 
       {/* Calibration Report Panel */}
+      <EmbeddingCoveragePanel />
+
       <CalibrationReportPanel />
 
       {/* Sync Status Panel */}

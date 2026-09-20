@@ -87,7 +87,7 @@ class TestKNNSearch:
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
             with patch("rediska_core.domain.services.search.EmbeddingsClient") as mock_embed:
                 mock_embed_instance = MagicMock()
-                mock_embed_instance.embed.return_value = [0.1] * 768
+                mock_embed_instance.embed_query.return_value = [0.1] * 768
                 mock_embed.return_value = mock_embed_instance
 
                 mock_client = MagicMock()
@@ -109,7 +109,7 @@ class TestKNNSearch:
                 result = service.vector_search(query="find similar content")
 
                 assert result["total"] == 2
-                mock_embed_instance.embed.assert_called_once()
+                mock_embed_instance.embed_query.assert_called_once()
                 mock_client.knn_search.assert_called_once()
 
     def test_vector_search_uses_query_embedding(self, test_settings):
@@ -120,7 +120,7 @@ class TestKNNSearch:
             with patch("rediska_core.domain.services.search.EmbeddingsClient") as mock_embed:
                 expected_vector = [0.5] * 768
                 mock_embed_instance = MagicMock()
-                mock_embed_instance.embed.return_value = expected_vector
+                mock_embed_instance.embed_query.return_value = expected_vector
                 mock_embed.return_value = mock_embed_instance
 
                 mock_client = MagicMock()
@@ -137,15 +137,46 @@ class TestKNNSearch:
                 call_args = mock_client.knn_search.call_args
                 assert call_args[1]["vector"] == expected_vector
 
-    def test_vector_search_without_embeddings_config_returns_empty(self, test_settings):
-        """Vector search without embeddings configured should return empty."""
-        from rediska_core.domain.services.search import SearchService
+    def test_vector_search_without_embeddings_config_raises(self, test_settings):
+        """Vector mode says it cannot run rather than returning nothing.
+
+        An empty result set is indistinguishable from "nothing is similar",
+        which is the lie this change exists to stop telling.
+        """
+        import pytest
+
+        from rediska_core.domain.services.search import (
+            REASON_NOT_CONFIGURED,
+            SearchService,
+            SemanticUnavailableError,
+        )
 
         service = SearchService(es_url="http://localhost:9200")
-        result = service.vector_search(query="test")
+        with pytest.raises(SemanticUnavailableError) as exc:
+            service.vector_search(query="test")
 
-        assert result["total"] == 0
-        assert result["hits"] == []
+        assert exc.value.reason == REASON_NOT_CONFIGURED
+
+    def test_vector_search_filters_on_the_configured_model(self, test_settings):
+        """Vectors written by another model are a different space."""
+        from rediska_core.domain.services.search import SearchService
+
+        with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
+            with patch("rediska_core.domain.services.search.EmbeddingsClient") as mock_embed:
+                mock_embed.return_value.embed_query.return_value = [0.1] * 8
+                mock_client = MagicMock()
+                mock_client.knn_search.return_value = {"total": 0, "hits": []}
+                mock_es.return_value = mock_client
+
+                service = SearchService(
+                    es_url="http://localhost:9200",
+                    embeddings_url="http://localhost:8080",
+                    embeddings_model="nomic-embed-text",
+                )
+                service.vector_search(query="test")
+
+                filters = mock_client.knn_search.call_args[1]["filters"]
+                assert filters["embedding_model"] == "nomic-embed-text"
 
 
 # =============================================================================
@@ -163,7 +194,7 @@ class TestHybridSearch:
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
             with patch("rediska_core.domain.services.search.EmbeddingsClient") as mock_embed:
                 mock_embed_instance = MagicMock()
-                mock_embed_instance.embed.return_value = [0.1] * 768
+                mock_embed_instance.embed_query.return_value = [0.1] * 768
                 mock_embed.return_value = mock_embed_instance
 
                 mock_client = MagicMock()
@@ -205,7 +236,7 @@ class TestHybridSearch:
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
             with patch("rediska_core.domain.services.search.EmbeddingsClient") as mock_embed:
                 mock_embed_instance = MagicMock()
-                mock_embed_instance.embed.return_value = [0.1] * 768
+                mock_embed_instance.embed_query.return_value = [0.1] * 768
                 mock_embed.return_value = mock_embed_instance
 
                 mock_client = MagicMock()
@@ -255,7 +286,10 @@ class TestHybridSearch:
 
     def test_hybrid_search_falls_back_to_text_only(self, test_settings):
         """Hybrid search should fall back to text-only when embeddings unavailable."""
-        from rediska_core.domain.services.search import SearchService
+        from rediska_core.domain.services.search import (
+            REASON_NOT_CONFIGURED,
+            SearchService,
+        )
 
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
             mock_client = MagicMock()
@@ -270,6 +304,8 @@ class TestHybridSearch:
             result = service.hybrid_search(query="test")
 
             assert result["total"] == 1
+            assert result["semantic_used"] is False
+            assert result["semantic_unavailable_reason"] == REASON_NOT_CONFIGURED
             mock_client.search.assert_called_once()
 
 
@@ -455,7 +491,7 @@ class TestSearchFilters:
                 mock_client = MagicMock()
                 mock_client.knn_search.return_value = {"total": 0, "hits": []}
                 mock_es.return_value = mock_client
-                mock_emb.return_value.embed.return_value = [0.1] * 8
+                mock_emb.return_value.embed_query.return_value = [0.1] * 8
 
                 service = SearchService(
                     es_url="http://localhost:9200",
@@ -574,13 +610,16 @@ class TestSearchErrorHandling:
 
     def test_handles_embeddings_error_in_hybrid(self, test_settings):
         """Hybrid search should handle embeddings errors gracefully."""
-        from rediska_core.domain.services.search import SearchService
+        from rediska_core.domain.services.search import (
+            REASON_ENDPOINT_FAILED,
+            SearchService,
+        )
         from rediska_core.infrastructure.embeddings import EmbeddingsError
 
         with patch("rediska_core.domain.services.search.ElasticsearchClient") as mock_es:
             with patch("rediska_core.domain.services.search.EmbeddingsClient") as mock_embed:
                 mock_embed_instance = MagicMock()
-                mock_embed_instance.embed.side_effect = EmbeddingsError("API error")
+                mock_embed_instance.embed_query.side_effect = EmbeddingsError("API error")
                 mock_embed.return_value = mock_embed_instance
 
                 mock_client = MagicMock()
@@ -596,9 +635,11 @@ class TestSearchErrorHandling:
                     embeddings_model="nomic-embed-text",
                 )
 
-                # Should fall back to text-only search
+                # Should fall back to text-only search, and say why
                 result = service.hybrid_search(query="test")
                 assert result["total"] == 1
+                assert result["semantic_used"] is False
+                assert result["semantic_unavailable_reason"] == REASON_ENDPOINT_FAILED
 
 
 # =============================================================================

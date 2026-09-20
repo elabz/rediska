@@ -590,12 +590,45 @@ class ElasticsearchClient:
 
         return clauses
 
+    @staticmethod
+    def _build_range_clauses(ranges: Optional[dict[str, dict[str, Any]]]) -> list[dict]:
+        """Turn a field->{gte,lte,...} mapping into `range` clauses.
+
+        Same contract as `_build_clauses`: a `None` bound is no constraint, and
+        anything that cannot become a clause raises instead of vanishing.
+
+        Raises:
+            UnsupportedFilterError: If a bound cannot become a clause.
+        """
+        allowed = {"gt", "gte", "lt", "lte"}
+        clauses: list[dict] = []
+
+        for field, bounds in (ranges or {}).items():
+            if bounds is None:
+                continue
+            if not isinstance(bounds, dict):
+                raise UnsupportedFilterError(
+                    f"Cannot build a range clause for filter {field!r} "
+                    f"of type {type(bounds).__name__}"
+                )
+            kept = {k: v for k, v in bounds.items() if v is not None}
+            unknown = set(kept) - allowed
+            if unknown:
+                raise UnsupportedFilterError(
+                    f"Unsupported range bound(s) {sorted(unknown)} for filter {field!r}"
+                )
+            if kept:
+                clauses.append({"range": {field: kept}})
+
+        return clauses
+
     def search(
         self,
         index: str,
         query: dict[str, Any],
         filters: Optional[dict[str, Any]] = None,
         must_not: Optional[dict[str, Any]] = None,
+        ranges: Optional[dict[str, dict[str, Any]]] = None,
         from_: int = 0,
         size: int = 10,
         sort: Optional[list[dict]] = None,
@@ -626,6 +659,7 @@ class ElasticsearchClient:
         # by the error handling below.
         must = [query]
         filter_clauses = self._build_clauses(filters)
+        filter_clauses += self._build_range_clauses(ranges)
         must_not_clauses = self._build_clauses(must_not)
 
         bool_query: dict[str, Any] = {
@@ -691,6 +725,7 @@ class ElasticsearchClient:
         num_candidates: int = 100,
         filters: Optional[dict[str, Any]] = None,
         must_not: Optional[dict[str, Any]] = None,
+        ranges: Optional[dict[str, dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """Perform k-nearest neighbors search.
 
@@ -701,6 +736,8 @@ class ElasticsearchClient:
             num_candidates: Number of candidates to consider.
             filters: Optional field filters.
             must_not: Optional field exclusions, same shape as `filters`.
+            ranges: Optional field->{gte,lte} range filters, applied inside the
+                kNN filter so `k` results satisfying them are returned.
 
         Returns:
             Dict with "total", "hits", and "max_score".
@@ -709,6 +746,7 @@ class ElasticsearchClient:
             UnsupportedFilterError: If a filter or exclusion cannot be applied.
         """
         filter_clauses = self._build_clauses(filters)
+        filter_clauses += self._build_range_clauses(ranges)
         must_not_clauses = self._build_clauses(must_not)
 
         body = {

@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from 'react';
 import { Loader2, ExternalLink, ImageIcon, MoreVertical, Trash2, RefreshCw, AlertTriangle, ShieldOff } from 'lucide-react';
+import { SimilarButton } from '@/components/similar';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -189,6 +190,7 @@ export function MessageBubble({
               Deleted
             </Badge>
           )}
+          <SimilarButton docType="message" entityId={message.id} compact />
 
           {(canDelete || canRetry || canRemoteDelete || (isFailed && redditComposeUrl)) && (
             <DropdownMenu>

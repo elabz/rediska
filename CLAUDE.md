@@ -94,7 +94,7 @@ rediska/
         infra/                 # db engines/sessions
         infrastructure/        # crypto (Fernet), elasticsearch, embeddings, rate_limiter
         observability/
-      alembic/versions/        # head: 023_add_copy_cluster_handling
+      alembic/versions/        # head: 024_add_copy_suggestions
 
     worker/                    # Celery worker (imports core)
       rediska_worker/
@@ -280,6 +280,18 @@ The same text posted by different accounts (`domain/services/post_copy.py`, `/co
 - **UI**: `components/copy/` — `CopyBadge` (opens `CopyClusterDrawer`: decisions, per-author `BanControl`, "Ban cluster" via `POST /ban-list/bulk {cluster_id}` excluding the earliest poster), `CopyClusterPanel` (lead detail: other authors inline), `AuthorCopyClusters` (profile page), `CopyClustersTab`. Badges on lead cards, lead detail, scout history posts and needs-review items
 - **Backfill**: `copy.backfill_fingerprints` (queue `maintenance`, dry run by default, `jobs` ledger per mode) fingerprints scout posts, leads and post-type profile items (deduplicated; lead body preferred), links them oldest first, reclassifies every cluster, one `copy.backfill` audit entry
 
+### Semantic Search and Similarity
+Every embeddable document carries one vector, so search can rank by meaning and "what else reads like this?" has an answer (`infrastructure/embeddings.py`, `domain/services/embedding.py`, `embedding_text.py`, `similarity.py`):
+- **Index version and alias**: readers and writers address the alias `rediska_content_docs`; the concrete index is `rediska_content_docs_v2`, whose mapping excludes `embedding` from `_source` (which cannot be changed in place — hence the version). `index.reindex_to_version` rebuilds from MySQL per type, compares counts, and switches the alias only when every type matches
+- **One text rule**: `prepare_embedding_text()` = title, blank line, resolved body, whitespace collapsed. Text over `EMBED_MAX_CHARS` (1,400) is split on paragraphs into at most 4 chunks and stored as the normalised mean; no request ever exceeds the budget. Task prefixes (`search_document:` / `search_query:`) are part of `PREP_VERSION`, so changing either invalidates every vector via `embedding_text_hash`. Content is embedded verbatim
+- **Comments are embedded together**: one `account_comments:<account_id>` document per account, comments merged newest first with a `r/<sub>: ` prefix up to the budget; individual comments stay text-searchable as `profile_item` documents but carry no vector of their own
+- **Hooks, never inline**: successful indexing chains `embed.generate_for_entity`; an embedding failure never fails indexing. `embed.sweep_missing` (beat, 10 min) picks up documents with no vector or another model's vector; `embed.backfill` catches up the corpus. All of it is behind `EMBEDDINGS_ENABLED`
+- **Search honesty** (`POST /search`): the response carries `semantic_used` and, when false, `semantic_unavailable_reason` (`embeddings_not_configured`, `query_not_embeddable`, `embeddings_endpoint_failed`, `vector_search_failed`, `no_embedded_matches`); `vector` mode returns **503**, never BM25 results dressed as semantic ones; kNN filters on `embedding_model` so a model change cannot mix vector spaces. The `/search` page offers hybrid / words / meaning and shows the notice
+- **`POST /similar`**: by reference (`doc_type` + `entity_id`) or by `text`. The source vector is re-derived from the indexed text rather than read back (v2 excludes it from `_source`). Filters `doc_types`, `author` (same/other/any), `location`, `since`/`until`, `lead_status`, `include_deleted`; an inapplicable filter raises rather than being dropped. `lead_status` is applied against live MySQL rows (status changes without the document being rewritten), so the kNN over-fetches. Cosine = `score * 2 - 1`, `min_score` 0.80, `limit` 10; results are enriched with lead status, latest recommendation, effective human verdict and ban state. No vector → `more_like_this` with `method: "text"`, never an empty list
+- **Probable rewrites** (`domain/services/copy_suggestions.py`, `/copy-suggestions` API): after a post-like document is embedded, one kNN (`author=other`, cosine ≥ 0.95) on the vector just computed. Matches not already in one cluster become `copy_suggestions` rows. Accepting joins the posts into a copy cluster (audited `copy_suggestion.accept`), rejecting records the no (`copy_suggestion.reject`) and stops the pair coming back. **Nothing clusters, bans or hides on similarity alone.** The backfill skips this pass (`rewrites=False`); the sweeper runs it
+- **Coverage**: `GET /ops/embeddings/status` reports indexed/embedded per type, the model and the embed queue depth; the `/ops` page shows it
+- **UI**: `components/similar/` — `SimilarButton`/`SimilarPanel` on lead cards, lead detail, scout history, needs-review and search results; `RewriteSuggestions` on lead detail
+
 ### External Listing Resolution
 Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `selftext` is empty and whose URL points to an external listing page. `domain/services/external_listing.py` fetches such pages and substitutes the listing's About text as the post body, so browse cards and the LLM analysis pipeline see real content:
 - Registry of supported hosts (initially `weheartbdsm.com/listings/<id>`) maps URL pattern → parser; unregistered hosts are never fetched (no generic scraping)
@@ -303,7 +315,7 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 | `/leads`, `/leads/[id]` | Lead list (priority-first, expired hidden, priority/compatibility/copy badges) + **Needs review** tab (cross-watch triage queue: promote / dismiss / evaluate) + **Copies** tab (copy clusters: filter by kind/decision, drawer with decisions and cluster ban); detail with multi-dimension AI analysis panels and the other authors of the same text |
 | `/directories` | Analyzed / Contacted / Engaged / Starred contact directories + **Banned** tab (ban list: search, source/status filters, lift, links to profile and leads; ban by username; copy-ring ban suggestions) |
 | `/evaluations` | Human evaluation of agent decisions: review queue (contradictions first, stratified), dashboard (agreement per dimension / prompt version, confusion matrix, tags, trend, missing info), JSONL export |
-| `/search` | Global hybrid search across messages/leads/profiles/conversations |
+| `/search` | Global search across messages/leads/profiles/conversations: hybrid / words / meaning, with a notice when semantic ranking was unavailable |
 | `/profile/[accountId]` | Account profile: snapshot, signals, risk flags, posts/comments/images |
 | `/ops` | Job queue, sync, backfills, attachment re-download, calibration report panel |
 | `/ops/backup` | Inbox export / import / clear with progress tracking |
@@ -314,7 +326,7 @@ Some subreddits (e.g. r/bdsmpersonals) now post link-only submissions whose `sel
 
 ## Key Database Tables
 
-Head migration: `023_add_copy_cluster_handling`.
+Head migration: `024_add_copy_suggestions`.
 
 | Table | Purpose |
 |-------|---------|
@@ -346,6 +358,7 @@ Head migration: `023_add_copy_cluster_handling`.
 | `post_fingerprint_bands` | Sketch band keys → fingerprint (candidate lookup) |
 | `copy_clusters`, `copy_cluster_members` | Cross-author copies: computed `kind`, sticky human `decision`, counts, time range, `avg_char_len`, `handled` (spam ring skipped + hidden automatically); members carry `ban_suggestion_dismissed_at` |
 | `copy_cluster_suppressions` | Fingerprints of texts marked `coincidence`; never cluster again |
+| `copy_suggestions` | Probable rewrites found by vector similarity: the pair, the cosine, the model, and the human's `new` / `accepted` / `rejected` decision |
 | `audit_log` | Append-only action log (actor: user/system/agent, identity-aware) |
 | `jobs` | Celery task idempotency ledger (incl. `cancelled`) |
 
@@ -421,6 +434,14 @@ COPY_RING_WINDOW_DAYS=7
 COPY_SKIP_RING_SUSPECTS=true
 COPY_RING_MIN_AUTHORS=3
 COPY_RING_MIN_CHARS=400
+
+# Semantic search: hooks off until the corpus is backfilled. EMBED_MAX_CHARS is
+# the hard per-call input budget (the llama.cpp server's --ubatch-size decides
+# what it will actually accept in one call).
+EMBEDDINGS_ENABLED=false
+EMBED_MAX_CHARS=1400
+EMBED_MAX_CONCURRENT=1
+EMBED_BATCH_SIZE=16
 ```
 
 ---
@@ -443,7 +464,11 @@ Queues: `ingest`, `index`, `embed`, `agent`, `messages`, `multi_agent_analysis`,
 
 ### Indexing / Embeddings
 - `index.upsert_content`, `index.delete_content`, `index.bulk_index_all_messages`, `index.bulk_index_conversation`
-- `embed.generate`, `embed.generate_batch`, `embed.generate_for_entity`
+- `embed.generate`, `embed.generate_batch`
+- `embed.generate_for_entity` — embed one indexed entity; runs the probable-rewrite pass unless `rewrites=False`
+- `embed.sweep_missing` (beat: every 10 min, bounded) — documents with no vector or another model's vector
+- `embed.backfill` — corpus catch-up; dry run by default, `jobs` ledger per mode, cancellable, `EMBED_MAX_CONCURRENT` semaphore, pauses while the inference gate is saturated
+- `index.reindex_to_version` — rebuild the content index into a new version from MySQL, parity check, alias switch
 
 ### Agents / Analysis
 - `agent.profile_summary`, `agent.lead_scoring`, `agent.draft_intro`

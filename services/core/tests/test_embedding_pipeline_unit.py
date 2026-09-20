@@ -312,3 +312,25 @@ class TestEmbedEntity:
         lead = self._lead(db_session)
         result = service(db_session, FakeES(), Broken()).embed_entity("lead_post", lead.id)
         assert result["success"] is False and "endpoint down" in result["error"]
+
+
+class TestDialectPortability:
+    """Statements the SQLite tests accept but MySQL rejects."""
+
+    def test_comment_order_has_no_nulls_last(self):
+        """`NULLS LAST` is Postgres/SQLite syntax; MySQL 8 errors on it.
+
+        This is not hypothetical: it aborted a live rebuild of the content
+        index part-way through the `account_comments` pass.
+        """
+        from sqlalchemy import select
+        from sqlalchemy.dialects import mysql
+
+        from rediska_core.domain.models import ProfileItem
+        from rediska_core.domain.services.indexing import newest_comment_order
+
+        statement = select(ProfileItem.id).order_by(*newest_comment_order())
+        sql = str(statement.compile(dialect=mysql.dialect()))
+
+        assert "NULLS" not in sql.upper()
+        assert "ORDER BY" in sql.upper()

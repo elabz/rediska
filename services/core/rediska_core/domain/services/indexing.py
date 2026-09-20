@@ -110,6 +110,21 @@ EMBEDDABLE_DOC_TYPES = SUPPORTED_DOC_TYPES - {"conversation"}
 POST_DOC_TYPES = ("lead_post", "scout_post", "profile_item")
 
 
+def newest_comment_order() -> list:
+    """Newest comment first, with undated ones last — portably.
+
+    MySQL has no `NULLS LAST`, and SQLAlchemy renders `nullslast()` literally,
+    so the SQLite-backed tests accepted a statement MySQL rejects outright.
+    Ordering on the null test first says the same thing in both dialects
+    (False sorts before True).
+    """
+    return [
+        ProfileItem.item_created_at.is_(None),
+        ProfileItem.item_created_at.desc(),
+        ProfileItem.id.desc(),
+    ]
+
+
 # =============================================================================
 # SERVICE
 # =============================================================================
@@ -276,10 +291,7 @@ class IndexingService:
                 ProfileItem.item_type == "comment",
                 ProfileItem.deleted_at.is_(None),
             )
-            .order_by(
-                ProfileItem.item_created_at.desc().nullslast(),
-                ProfileItem.id.desc(),
-            )
+            .order_by(*newest_comment_order())
             .limit(500)
             .all()
         )

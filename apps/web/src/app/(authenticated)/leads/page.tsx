@@ -49,6 +49,7 @@ import { EmptyState } from '@/components';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { NeedsReviewQueue } from './components/NeedsReviewQueue';
 import { CopyBadge, CopyClustersTab } from '@/components/copy';
+import { SimilarButton } from '@/components/similar';
 import type { CopyInfo } from '@/lib/copyClusters';
 import { errorMessage } from '@/lib/banList';
 
@@ -344,6 +345,7 @@ function LeadCard({
 
         <div className="flex items-center gap-1.5 shrink-0">
           <CopyBadge copy={lead.copy} externalPostId={lead.external_post_id} />
+          <SimilarButton docType="lead_post" entityId={lead.id} title={lead.title} compact />
           {lead.priority && (
             <Badge
               variant="outline"

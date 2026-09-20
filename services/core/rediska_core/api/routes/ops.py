@@ -16,7 +16,7 @@ from typing import Annotated, Optional
 from celery import Celery
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, func
 
 from rediska_core.api.deps import CurrentUser, DBSession
@@ -753,4 +753,128 @@ async def generate_calibration_report(
         job_id=task.id,
         status="queued",
         message="Calibration report queued. At most one report is stored per day.",
+    )
+
+
+# =============================================================================
+# EMBEDDING COVERAGE
+# =============================================================================
+
+
+class EmbeddingTypeCoverage(BaseModel):
+    """Coverage for one document type."""
+
+    doc_type: str
+    indexed: int
+    embedded: int
+    coverage: float = Field(..., description="embedded / indexed, 0..1")
+
+
+class EmbeddingStatusResponse(BaseModel):
+    """How much of the corpus can be searched by meaning."""
+
+    enabled: bool
+    configured: bool
+    model: Optional[str] = None
+    index: str
+    available: bool = Field(
+        ..., description="False when Elasticsearch could not be reached"
+    )
+    indexed: int
+    embedded: int
+    coverage: float
+    types: list[EmbeddingTypeCoverage]
+    queue_depth: Optional[int] = Field(
+        default=None, description="Tasks waiting on the embed queue"
+    )
+    last_error: Optional[str] = None
+
+
+@router.get(
+    "/embeddings/status",
+    response_model=EmbeddingStatusResponse,
+    summary="Embedding coverage",
+    description="Per document type: how many documents are indexed, how many carry a "
+                "vector from the configured model, plus the embed queue depth.",
+)
+async def get_embeddings_status(
+    current_user: CurrentUser,
+):
+    """Report vector coverage over the content index.
+
+    Counts come from Elasticsearch rather than from a stored tally so the
+    number cannot drift from what search actually has.
+    """
+    from rediska_core.domain.services.indexing import EMBEDDABLE_DOC_TYPES
+    from rediska_core.infrastructure.elasticsearch import (
+        CONTENT_DOCS_INDEX,
+        ElasticsearchClient,
+    )
+
+    settings = get_settings()
+    model = settings.embeddings_model
+    configured = bool(settings.embeddings_url and model)
+
+    types: list[EmbeddingTypeCoverage] = []
+    total_indexed = total_embedded = 0
+    available = True
+    last_error: Optional[str] = None
+
+    try:
+        es = ElasticsearchClient(url=settings.elastic_url)
+        for doc_type in sorted(EMBEDDABLE_DOC_TYPES):
+            indexed = es.count(CONTENT_DOCS_INDEX, {"term": {"doc_type": doc_type}})
+            embedded = (
+                es.count(
+                    CONTENT_DOCS_INDEX,
+                    {
+                        "bool": {
+                            "filter": [
+                                {"term": {"doc_type": doc_type}},
+                                {"term": {"embedding_model": model}},
+                                {"exists": {"field": "embedding"}},
+                            ]
+                        }
+                    },
+                )
+                if model
+                else 0
+            )
+            total_indexed += indexed
+            total_embedded += embedded
+            types.append(
+                EmbeddingTypeCoverage(
+                    doc_type=doc_type,
+                    indexed=indexed,
+                    embedded=embedded,
+                    coverage=round(embedded / indexed, 4) if indexed else 0.0,
+                )
+            )
+    except Exception as e:
+        # A dashboard card must not 500 the whole page when ES is down.
+        available = False
+        last_error = str(e)
+
+    queue_depth: Optional[int] = None
+    try:
+        import redis as redis_lib
+
+        client = redis_lib.Redis.from_url(settings.celery_broker_url)
+        # Celery keeps a Redis list per queue name; its length is the backlog.
+        queue_depth = int(client.llen("embed"))  # type: ignore[arg-type]
+    except Exception as e:
+        last_error = last_error or str(e)
+
+    return EmbeddingStatusResponse(
+        enabled=settings.embeddings_enabled,
+        configured=configured,
+        model=model,
+        index=CONTENT_DOCS_INDEX,
+        available=available,
+        indexed=total_indexed,
+        embedded=total_embedded,
+        coverage=round(total_embedded / total_indexed, 4) if total_indexed else 0.0,
+        types=types,
+        queue_depth=queue_depth,
+        last_error=last_error,
     )

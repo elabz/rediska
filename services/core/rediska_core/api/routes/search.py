@@ -18,6 +18,7 @@ from rediska_core.config import Settings, get_settings
 from rediska_core.domain.services.search import (
     SearchError,
     SearchService,
+    SemanticUnavailableError,
     UnsupportedFilterError,
     MAX_LIMIT,
 )
@@ -111,8 +112,21 @@ async def search(
             total=result.get("total", 0),
             hits=hits,
             max_score=result.get("max_score"),
+            semantic_used=result.get("semantic_used", False),
+            semantic_unavailable_reason=result.get("semantic_unavailable_reason"),
         )
 
+    except SemanticUnavailableError as e:
+        # Vector mode asked for meaning and meaning is unavailable. Keyword
+        # results dressed up as semantic ones would be a lie, so this fails.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "semantic_unavailable",
+                "reason": e.reason,
+                "error": str(e),
+            },
+        )
     except UnsupportedFilterError as e:
         # The caller supplied a filter the search layer cannot apply. Failing
         # is the point: returning results here would silently be a wider set

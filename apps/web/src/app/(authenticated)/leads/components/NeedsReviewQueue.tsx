@@ -19,6 +19,7 @@ import { EmptyState } from '@/components';
 import { EvaluationControl } from '@/components/evaluations/EvaluationControl';
 import { BanControl } from '@/components/ban/BanControl';
 import { CopyBadge } from '@/components/copy/CopyBadge';
+import { SimilarButton } from '@/components/similar';
 import type { CopyInfo } from '@/lib/copyClusters';
 import { cn } from '@/lib/utils';
 import type { EffectiveEvaluation, EvaluationMap } from '@/lib/evaluations';
@@ -154,6 +155,7 @@ function QueueCard({
               <ExternalLink className="h-3 w-3" /> Source
             </a>
             <CopyBadge copy={item.copy} externalPostId={item.external_post_id} />
+            <SimilarButton docType="scout_post" entityId={item.id} title={item.post_title} compact />
           </div>
         </div>
         {item.analysis_confidence !== null && (

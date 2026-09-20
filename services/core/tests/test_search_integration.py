@@ -252,6 +252,54 @@ class TestSearchModes:
             assert response.status_code == 200
             mock_instance.vector_search.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_vector_mode_errors_when_meaning_is_unavailable(self, auth_client):
+        """Vector mode fails loudly rather than answering with keywords."""
+        from rediska_core.domain.services.search import (
+            REASON_ENDPOINT_FAILED,
+            SemanticUnavailableError,
+        )
+
+        with patch("rediska_core.api.routes.search.SearchService") as mock_service:
+            mock_instance = MagicMock()
+            mock_instance.vector_search.side_effect = SemanticUnavailableError(
+                REASON_ENDPOINT_FAILED, "Connection refused"
+            )
+            mock_service.return_value = mock_instance
+
+            response = await auth_client.post("/search", json={
+                "query": "test",
+                "mode": "vector",
+            })
+
+            assert response.status_code == 503
+            detail = response.json()["detail"]
+            assert detail["code"] == "semantic_unavailable"
+            assert detail["reason"] == REASON_ENDPOINT_FAILED
+
+    @pytest.mark.asyncio
+    async def test_hybrid_response_reports_semantic_state(self, auth_client):
+        """The response says whether meaning ranking contributed, and why not."""
+        from rediska_core.domain.services.search import REASON_NO_VECTOR_MATCHES
+
+        with patch("rediska_core.api.routes.search.SearchService") as mock_service:
+            mock_instance = MagicMock()
+            mock_instance.hybrid_search.return_value = {
+                "total": 1,
+                "hits": [{"id": "message:1", "score": 1.0, "source": {}}],
+                "max_score": 1.0,
+                "semantic_used": False,
+                "semantic_unavailable_reason": REASON_NO_VECTOR_MATCHES,
+            }
+            mock_service.return_value = mock_instance
+
+            response = await auth_client.post("/search", json={"query": "test"})
+
+            assert response.status_code == 200
+            body = response.json()
+            assert body["semantic_used"] is False
+            assert body["semantic_unavailable_reason"] == REASON_NO_VECTOR_MATCHES
+
 
 class TestSearchResponseFormat:
     """Tests for search response format."""

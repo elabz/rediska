@@ -63,3 +63,16 @@ class SearchResponse(BaseModel):
         default=None,
         description="Maximum relevance score",
     )
+    semantic_used: bool = Field(
+        default=False,
+        description="Whether vector (meaning) ranking contributed to these results",
+    )
+    semantic_unavailable_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why semantic ranking did not contribute, when it did not: "
+            "embeddings_not_configured, query_not_embeddable, "
+            "embeddings_endpoint_failed, vector_search_failed, "
+            "no_embedded_matches"
+        ),
+    )

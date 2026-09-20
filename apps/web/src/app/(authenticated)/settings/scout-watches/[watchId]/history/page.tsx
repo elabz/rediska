@@ -30,6 +30,7 @@ import { AnalyzeUserButton } from '@/components/AnalyzeUserButton';
 import { ContactButton } from '@/components/ContactButton';
 import { BanControl } from '@/components/ban/BanControl';
 import { CopyBadge } from '@/components/copy/CopyBadge';
+import { SimilarButton } from '@/components/similar';
 import type { CopyInfo } from '@/lib/copyClusters';
 import {
   Collapsible,
@@ -627,6 +628,7 @@ export default function ScoutWatchHistoryPage() {
                                         <span>({Math.round(post.analysis_confidence * 100)}%)</span>
                                       )}
                                       <CopyBadge copy={post.copy} externalPostId={post.external_post_id} />
+                                      <SimilarButton docType="scout_post" entityId={post.id} title={post.post_title} compact />
                                       {post.lead_id && (
                                         <Link
                                           href={`/leads/${post.lead_id}`}

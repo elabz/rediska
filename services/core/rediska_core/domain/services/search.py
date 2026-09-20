@@ -48,6 +48,20 @@ class SearchError(Exception):
     pass
 
 
+class SemanticUnavailableError(SearchError):
+    """Raised when semantic ranking cannot run for this query.
+
+    Carries a stable `reason` code so the caller can say *why* the meaning
+    half of the search is missing instead of quietly returning keyword
+    results that look like semantic ones.
+    """
+
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = reason
+        self.detail = detail
+        super().__init__(detail or reason)
+
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -65,6 +79,14 @@ DEFAULT_KNN_WEIGHT = 0.7
 # remote_visibility values that mean the content is gone upstream. Excluded
 # unless the caller opts in with include_deleted.
 REMOTE_DELETED_VISIBILITY = ("removed", "deleted_by_author")
+
+# Stable reason codes for `semantic_unavailable_reason`. The UI maps these to
+# sentences; the API never invents a reason outside this set.
+REASON_NOT_CONFIGURED = "embeddings_not_configured"
+REASON_QUERY_NOT_EMBEDDABLE = "query_not_embeddable"
+REASON_ENDPOINT_FAILED = "embeddings_endpoint_failed"
+REASON_VECTOR_SEARCH_FAILED = "vector_search_failed"
+REASON_NO_VECTOR_MATCHES = "no_embedded_matches"
 
 
 # =============================================================================
@@ -127,6 +149,33 @@ class SearchService:
                 )
             return self._embeddings_client
         return None
+
+    def _embed_query(self, query: str) -> list[float]:
+        """Embed a search-box query, or say why it could not be embedded.
+
+        Uses the query task prefix, so the vector lands in the same corner of
+        the space as the documents, which were embedded with the document
+        prefix.
+
+        Raises:
+            SemanticUnavailableError: With a stable reason code.
+        """
+        client = self.embeddings_client
+        if client is None:
+            raise SemanticUnavailableError(
+                REASON_NOT_CONFIGURED,
+                "No embeddings endpoint is configured",
+            )
+        try:
+            vector = client.embed_query(query)
+        except EmbeddingsError as e:
+            raise SemanticUnavailableError(REASON_ENDPOINT_FAILED, str(e))
+        if not vector:
+            raise SemanticUnavailableError(
+                REASON_QUERY_NOT_EMBEDDABLE,
+                "The query produced no embeddable text",
+            )
+        return vector
 
     def _build_filters(
         self,
@@ -242,7 +291,7 @@ class SearchService:
         """
         # Handle empty query
         if not query or not query.strip():
-            return {"total": 0, "hits": [], "max_score": None}
+            return {"total": 0, "hits": [], "max_score": None, "semantic_used": False}
 
         # Enforce max limit
         limit = min(limit, MAX_LIMIT)
@@ -285,6 +334,8 @@ class SearchService:
                 highlight=highlight,
             )
 
+            # Keyword mode by definition: the caller asked for no meaning.
+            result.setdefault("semantic_used", False)
             return result
 
         except UnsupportedFilterError:
@@ -322,30 +373,37 @@ class SearchService:
             num_candidates: Candidates for approximate search.
 
         Returns:
-            Dict with total, hits, and max_score.
-        """
-        # Check if embeddings configured
-        if not self.embeddings_client:
-            return {"total": 0, "hits": [], "max_score": None}
+            Dict with total, hits, max_score and `semantic_used`.
 
+        Raises:
+            SemanticUnavailableError: When the query cannot be embedded or the
+                kNN query fails. Vector mode never degrades into keyword
+                results behind the caller's back.
+        """
         # Handle empty query
         if not query or not query.strip():
-            return {"total": 0, "hits": [], "max_score": None}
+            return {
+                "total": 0,
+                "hits": [],
+                "max_score": None,
+                "semantic_used": False,
+                "semantic_unavailable_reason": REASON_QUERY_NOT_EMBEDDABLE,
+            }
+
+        query_vector = self._embed_query(query)
 
         try:
-            # Generate query embedding
-            query_vector = self.embeddings_client.embed(query)
-
-            if query_vector is None:
-                return {"total": 0, "hits": [], "max_score": None}
-
-            # Build filters
+            # Build filters. The model filter keeps vectors written by a
+            # previous model out of the neighbourhood: they live in a
+            # different space and their distances are meaningless here.
             filters = self._build_filters(
                 provider_id=provider_id,
                 identity_id=identity_id,
                 doc_types=doc_types,
                 include_deleted=include_deleted,
             )
+            if self._embeddings_model:
+                filters["embedding_model"] = self._embeddings_model
             exclusions = self._build_exclusions(
                 exclude_visibility=exclude_visibility,
                 include_deleted=include_deleted,
@@ -360,16 +418,20 @@ class SearchService:
                 must_not=exclusions,
             )
 
-            return result
-
         except UnsupportedFilterError:
             # See text_search: an inapplicable filter fails the request.
             raise
-        except EmbeddingsError:
-            # Fall back to empty results on embeddings error
-            return {"total": 0, "hits": [], "max_score": None}
         except Exception as e:
             raise SearchError(f"Vector search failed: {e}")
+
+        if result.get("error"):
+            raise SemanticUnavailableError(
+                REASON_VECTOR_SEARCH_FAILED, str(result["error"])
+            )
+
+        result.setdefault("semantic_used", True)
+        result.setdefault("semantic_unavailable_reason", None)
+        return result
 
     # =========================================================================
     # HYBRID SEARCH
@@ -407,7 +469,13 @@ class SearchService:
         """
         # Handle empty query
         if not query or not query.strip():
-            return {"total": 0, "hits": [], "max_score": None}
+            return {
+                "total": 0,
+                "hits": [],
+                "max_score": None,
+                "semantic_used": False,
+                "semantic_unavailable_reason": REASON_QUERY_NOT_EMBEDDABLE,
+            }
 
         # Get BM25 results
         bm25_results = self.text_search(
@@ -422,23 +490,26 @@ class SearchService:
         )
 
         # Try to get kNN results
-        knn_results = {"hits": []}
-        if self.embeddings_client:
-            try:
-                knn_results = self.vector_search(
-                    query=query,
-                    provider_id=provider_id,
-                    identity_id=identity_id,
-                    doc_types=doc_types,
-                    exclude_visibility=exclude_visibility,
-                    include_deleted=include_deleted,
-                    k=limit * 2,
-                )
-            except (SearchError, EmbeddingsError):
-                # Fall back to BM25 only. UnsupportedFilterError is deliberately
-                # not caught here: a filter that could not be applied must fail
-                # the request, not degrade into a differently-filtered mode.
-                pass
+        knn_results: dict[str, Any] = {"hits": []}
+        reason: Optional[str] = None
+        try:
+            knn_results = self.vector_search(
+                query=query,
+                provider_id=provider_id,
+                identity_id=identity_id,
+                doc_types=doc_types,
+                exclude_visibility=exclude_visibility,
+                include_deleted=include_deleted,
+                k=limit * 2,
+            )
+        except SemanticUnavailableError as e:
+            # Hybrid degrades to BM25, but says so in the response.
+            reason = e.reason
+        except (SearchError, EmbeddingsError):
+            # Fall back to BM25 only. UnsupportedFilterError is deliberately
+            # not caught here: a filter that could not be applied must fail
+            # the request, not degrade into a differently-filtered mode.
+            reason = REASON_VECTOR_SEARCH_FAILED
 
         # If no kNN results, return BM25 results directly with original scores
         if not knn_results.get("hits"):
@@ -448,6 +519,10 @@ class SearchService:
                 "total": bm25_results.get("total", len(bm25_hits)),
                 "hits": paginated,
                 "max_score": paginated[0]["score"] if paginated else None,
+                "semantic_used": False,
+                # A successful kNN query that matched nothing is still a
+                # keyword-only ranking, and the user is told which it was.
+                "semantic_unavailable_reason": reason or REASON_NO_VECTOR_MATCHES,
             }
 
         # Blend results using RRF when we have both BM25 and kNN
@@ -465,6 +540,8 @@ class SearchService:
             "total": len(blended),
             "hits": paginated,
             "max_score": paginated[0]["score"] if paginated else None,
+            "semantic_used": True,
+            "semantic_unavailable_reason": None,
         }
 
     def _blend_results(
@@ -527,8 +604,14 @@ class SearchService:
 __all__ = [
     "SearchService",
     "SearchError",
+    "SemanticUnavailableError",
     "UnsupportedFilterError",
     "DEFAULT_LIMIT",
     "MAX_LIMIT",
     "REMOTE_DELETED_VISIBILITY",
+    "REASON_NOT_CONFIGURED",
+    "REASON_QUERY_NOT_EMBEDDABLE",
+    "REASON_ENDPOINT_FAILED",
+    "REASON_VECTOR_SEARCH_FAILED",
+    "REASON_NO_VECTOR_MATCHES",
 ]

@@ -18,30 +18,30 @@
 
 ## 3. Search honesty
 
-- [ ] 3.1 `semantic_used` / `semantic_unavailable_reason` in `SearchService` and the response schema; `vector` mode errors instead of falling back
-- [ ] 3.2 kNN filter on `embedding_model`
-- [ ] 3.3 `/search` page mode switch and notice
+- [x] 3.1 `semantic_used` / `semantic_unavailable_reason` in `SearchService` and the response schema; `vector` mode errors instead of falling back
+- [x] 3.2 kNN filter on `embedding_model`
+- [x] 3.3 `/search` page mode switch and notice
 
 ## 4. Similarity API
 
-- [ ] 4.1 `domain/services/similarity.py`: by reference, by text, filters, cosine conversion, `more_like_this` fallback
-- [ ] 4.2 `POST /similar` route + schemas; BFF proxy `/api/core/similar`
-- [ ] 4.3 Unit tests with a fake ES client; integration test with synthetic documents
+- [x] 4.1 `domain/services/similarity.py`: by reference, by text, filters, cosine conversion, `more_like_this` fallback
+- [x] 4.2 `POST /similar` route + schemas; BFF proxy `/api/core/similar`
+- [x] 4.3 Unit tests with a fake ES client; integration test with synthetic documents
 
 ## 5. UI
 
-- [ ] 5.1 `SimilarPanel` with filters, outcome badges, empty/error states
-- [ ] 5.2 Mount on lead card/detail, scout history, needs-review, profile items, conversation messages, search results
-- [ ] 5.3 `/ops` embeddings coverage card + `GET /ops/embeddings/status`
+- [x] 5.1 `SimilarPanel` with filters, outcome badges, empty/error states
+- [x] 5.2 Mount on lead card/detail, scout history, needs-review, profile items, conversation messages, search results
+- [x] 5.3 `/ops` embeddings coverage card + `GET /ops/embeddings/status`
 
 ## 6. Probable rewrites
 
-- [ ] 6.1 Post-embed kNN (`author=other`, 0.95) and notice on read models
-- [ ] 6.2 `copy_suggestions` storage and accept/reject endpoints when copy tables exist (audited)
+- [x] 6.1 Post-embed kNN (`author=other`, 0.95) and notice on read models
+- [x] 6.2 `copy_suggestions` storage and accept/reject endpoints when copy tables exist (audited)
 
 ## 7. Rollout
 
-- [ ] 7.1 Deploy with hooks off; build v2; parity check; switch alias
+- [x] 7.1 Deploy with hooks off; build v2; parity check; switch alias
 - [ ] 7.2 Enable hooks; backfill dry run, then live; coverage ≥ 99%
 - [ ] 7.3 Drop v1; update `lead-affinity-signal` tasks to depend on this change
-- [ ] 7.4 Docs: CLAUDE.md, `docs/deploy.md` sizing (1 GB page cache + 4 GB disk per million vectors), operator note on `--ubatch-size`
+- [x] 7.4 Docs: CLAUDE.md, `docs/deploy.md` sizing (1 GB page cache + 4 GB disk per million vectors), operator note on `--ubatch-size`

@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 from rediska_worker.celery_app import app
 
@@ -237,8 +237,100 @@ def generate_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
         session.close()
 
 
+def _suggest_rewrites(
+    session,
+    settings,
+    doc_type: str,
+    entity_id: int,
+    result: dict[str, Any],
+) -> Optional[dict[str, int]]:
+    """Record posts by other authors that read like this one, for review.
+
+    Runs on the vector `embed_entity` just produced, so it costs one kNN query
+    and no second trip to the embeddings endpoint. A suggestion is only ever a
+    suggestion: nothing joins a copy cluster until the user says so.
+
+    Best-effort — a failure here must never fail the embedding that succeeded.
+    """
+    from rediska_core.domain.services import copy_suggestions
+    from rediska_core.domain.services.similarity import SimilarityService
+
+    if doc_type not in copy_suggestions.POST_DOC_TYPES:
+        return None
+
+    try:
+        source = _post_identity(session, doc_type, entity_id)
+        if source is None:
+            return None
+        provider_id, external_post_id, author = source
+
+        service = SimilarityService(
+            db=session,
+            es_url=settings.elastic_url,
+            embeddings_url=settings.embeddings_url,
+            embeddings_model=settings.embeddings_model,
+            embeddings_api_key=settings.embeddings_api_key,
+        )
+        matches = service.probable_rewrites(
+            doc_type=doc_type, entity_id=entity_id, vector=result.get("vector")
+        )
+        if not matches:
+            return None
+
+        counts = copy_suggestions.record_suggestions(
+            db=session,
+            provider_id=provider_id,
+            doc_type=doc_type,
+            entity_id=entity_id,
+            external_post_id=external_post_id,
+            author_username=author,
+            matches=matches,
+            embedding_model=settings.embeddings_model,
+        )
+        session.commit()
+        return counts
+    except Exception as e:  # noqa: BLE001 - a suggestion is never worth a failure
+        session.rollback()
+        logger.warning(
+            f"probable-rewrite pass for {doc_type}:{entity_id} failed: {e}"
+        )
+        return None
+
+
+def _post_identity(session, doc_type: str, entity_id: int):
+    """`(provider_id, external_post_id, author)` for a post-like entity."""
+    from rediska_core.domain.models import LeadPost, ProfileItem, ScoutWatchPost
+
+    if doc_type == "lead_post":
+        row = session.get(LeadPost, entity_id)
+        if row is None:
+            return None
+        author = row.author_account.external_username if row.author_account else None
+        return row.provider_id, row.external_post_id, (author or "").lower() or None
+    if doc_type == "scout_post":
+        row = session.get(ScoutWatchPost, entity_id)
+        if row is None:
+            return None
+        provider = row.watch.provider_id if row.watch else "reddit"
+        return provider, row.external_post_id, (row.post_author or "").lower() or None
+    if doc_type == "profile_item":
+        row = session.get(ProfileItem, entity_id)
+        if row is None or row.item_type != "post":
+            return None
+        account = row.account if hasattr(row, "account") else None
+        provider = account.provider_id if account else "reddit"
+        author = account.external_username if account else None
+        return provider, row.external_item_id, (author or "").lower() or None
+    return None
+
+
 @app.task(name="embed.generate_for_entity")
-def generate_for_entity(doc_type: str, entity_id: int, force: bool = False) -> dict[str, Any]:
+def generate_for_entity(
+    doc_type: str,
+    entity_id: int,
+    force: bool = False,
+    rewrites: bool = True,
+) -> dict[str, Any]:
     """Embed one indexed entity, fetching and preparing its text from the DB.
 
     Chained after `index.upsert_content`. Skips silently when the prepared text
@@ -249,6 +341,9 @@ def generate_for_entity(doc_type: str, entity_id: int, force: bool = False) -> d
             profile_snapshot or account_comments.
         entity_id: The entity's id (the account id for account_comments).
         force: Re-embed even when the text hash and model are unchanged.
+        rewrites: Look for probable rewrites by other authors afterwards. The
+            backfill turns this off: one kNN per document over a corpus-sized
+            catch-up run costs hours, and the pass can be repeated later.
     """
     from rediska_core.config import get_settings
 
@@ -267,6 +362,13 @@ def generate_for_entity(doc_type: str, entity_id: int, force: bool = False) -> d
             result = _service(session, settings).embed_entity(
                 doc_type=doc_type, entity_id=entity_id, force=force
             )
+        if rewrites and result.get("status") == "embedded":
+            suggested = _suggest_rewrites(session, settings, doc_type, entity_id, result)
+            if suggested is not None:
+                result = {**result, "rewrite_suggestions": suggested}
+        # The vector is an implementation detail of the rewrite pass and has no
+        # business in a task result (or the result backend).
+        result.pop("vector", None)
         return {
             "status": "success" if result.get("success") else "error",
             **result,
@@ -350,6 +452,9 @@ def sweep_missing(self, limit: int = 200) -> dict[str, Any]:
                 failed += 1
             elif result.get("status") == "embedded":
                 embedded += 1
+                # The sweeper is the catch-up path for the live chain, so a
+                # document it rescues gets the same rewrite pass.
+                _suggest_rewrites(session, settings, doc_type, entity_id, result)
             else:
                 skipped += 1
             if failed >= 5:

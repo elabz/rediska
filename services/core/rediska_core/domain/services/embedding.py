@@ -265,6 +265,9 @@ class EmbeddingService:
             "entity_id": entity_id,
             "dimensions": len(vector),
             "chars": len(text),
+            # Handed back so the probable-rewrite pass can run its kNN on the
+            # vector we just paid for, instead of embedding the text twice.
+            "vector": vector,
         }
 
     # =========================================================================

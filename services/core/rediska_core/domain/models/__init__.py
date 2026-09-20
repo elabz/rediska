@@ -1756,6 +1756,59 @@ class CopyClusterSuppression(Base):
     )
 
 
+class CopySuggestion(Base):
+    """A probable rewrite: two posts that read alike but share little wording.
+
+    Semantic similarity is evidence, not a verdict. A suggestion sits here
+    until the user accepts it (the posts join a copy cluster) or rejects it;
+    nothing clusters, bans or hides on similarity alone.
+    """
+
+    __tablename__ = "copy_suggestions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    provider_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("providers.provider_id"), nullable=False
+    )
+    # The post that was just embedded, and the older post it reads like.
+    source_external_post_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_doc_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_author: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    match_external_post_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    match_doc_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    match_entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    match_author: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    # Cosine similarity and the model that produced both vectors: a score from
+    # another model is not comparable and must not be read as one.
+    similarity: Mapped[float] = mapped_column(nullable=False)
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(
+        Enum("new", "accepted", "rejected", name="copy_suggestion_status_enum"),
+        nullable=False,
+        default="new",
+    )
+    # The cluster the accept joined the posts into, for the audit trail.
+    cluster_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    decided_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_id",
+            "source_external_post_id",
+            "match_external_post_id",
+            name="uq_copy_suggestion_pair",
+        ),
+        Index("idx_copy_suggestion_status", "status", "created_at"),
+        Index("idx_copy_suggestion_source", "provider_id", "source_external_post_id"),
+        Index("idx_copy_suggestion_match", "provider_id", "match_external_post_id"),
+    )
+
+
 # Export all models
 __all__ = [
     "Base",
@@ -1791,6 +1844,7 @@ __all__ = [
     "CopyCluster",
     "CopyClusterMember",
     "CopyClusterSuppression",
+    "CopySuggestion",
     # Enums
     "SourceCandidateStatus",
     "SourceTrialStatus",

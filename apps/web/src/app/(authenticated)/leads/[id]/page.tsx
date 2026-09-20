@@ -23,6 +23,7 @@ import { Badge } from '@/components/ui/badge';
 import { UserProfilePanel } from '@/components/UserProfilePanel';
 import { BanControl } from '@/components/ban/BanControl';
 import { CopyBadge, CopyClusterPanel } from '@/components/copy';
+import { RewriteSuggestions, SimilarButton } from '@/components/similar';
 import type { CopyInfo } from '@/lib/copyClusters';
 import { BannedBanner } from '@/components/ban/BannedBanner';
 import { useBanStatus } from '@/components/ban/useBanStatus';
@@ -244,6 +245,7 @@ export default function LeadDetailPage() {
                   {lead.status.replace('_', ' ')}
                 </Badge>
                 <CopyBadge copy={lead.copy} externalPostId={lead.external_post_id} />
+                <SimilarButton docType="lead_post" entityId={lead.id} title={lead.title} />
               </div>
               <CardTitle className="text-xl leading-tight">
                 {lead.title || '(No title)'}
@@ -300,6 +302,8 @@ export default function LeadDetailPage() {
           )}
 
           <CopyClusterPanel copy={lead.copy} externalPostId={lead.external_post_id} />
+
+          <RewriteSuggestions externalPostId={lead.external_post_id} />
 
           {/* Author Info with Profile Panel */}
           {lead.author_username && (
