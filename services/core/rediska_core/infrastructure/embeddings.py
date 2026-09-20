@@ -44,6 +44,22 @@ class EmbeddingsInputTooLargeError(EmbeddingsError):
 
 
 # =============================================================================
+# CONSTANTS
+# =============================================================================
+
+
+# How many times the chunk budget may be halved when the server refuses the
+# input. Four halvings take a 1,400-char budget down to 87, which is below any
+# plausible token limit; text still refused there is refused for some other
+# reason and the error is worth surfacing.
+SHRINK_ATTEMPTS = 4
+
+# Below this, chunks are too small to carry meaning and shrinking further would
+# produce a vector that says nothing.
+MIN_CHUNK_CHARS = 80
+
+
+# =============================================================================
 # CLIENT
 # =============================================================================
 
@@ -293,31 +309,60 @@ class EmbeddingsClient:
         """Embed prepared document text, chunking and averaging when needed.
 
         The single place that turns arbitrary-length prepared text into one
-        vector: chunks within the input budget, embeds at most
-        `MAX_CHUNKS` of them in one batch, and stores the normalised mean.
-        """
-        from rediska_core.domain.services.embedding_text import (
-            as_document,
-            chunk_text,
-            mean_vector,
-        )
+        vector: chunks within the input budget, embeds at most `MAX_CHUNKS` of
+        them in one batch, and stores the normalised mean.
 
-        chunks = chunk_text(text, max_chars=self.max_chars - len(as_document("")))
-        if not chunks:
-            return None
-        if len(chunks) == 1:
-            return self.embed(as_document(chunks[0]))
-        vectors = self.embed_batch([as_document(c) for c in chunks])
-        return mean_vector(vectors)
+        The budget is in characters but the server's limit is in tokens, and
+        the ratio is not a constant — ordinary English runs about four
+        characters per token, dense or non-Latin text far fewer. So a budget
+        that is right for most documents is wrong for some, and being wrong
+        means the server refuses the input and the document silently never
+        gets a vector. Rather than guess a ratio, this halves the budget and
+        tries again when the server says the input was too large.
+        """
+        from rediska_core.domain.services.embedding_text import as_document
+
+        return self._embed_chunked(text, as_document, batch=True)
 
     def embed_query(self, text: str) -> Optional[list[float]]:
         """Embed a search-box query with the query task prefix."""
-        from rediska_core.domain.services.embedding_text import as_query, chunk_text
+        from rediska_core.domain.services.embedding_text import as_query
 
-        chunks = chunk_text(text, max_chars=self.max_chars - len(as_query("")))
-        if not chunks:
-            return None
-        return self.embed(as_query(chunks[0]))
+        return self._embed_chunked(text, as_query, batch=False)
+
+    def _embed_chunked(self, text: str, prefix, batch: bool) -> Optional[list[float]]:
+        """Chunk, embed and average, shrinking the budget if the server balks.
+
+        Args:
+            text: Prepared text.
+            prefix: `as_document` or `as_query`.
+            batch: Embed every chunk and average (documents), or just the
+                first one (queries, which are short by nature).
+        """
+        from rediska_core.domain.services.embedding_text import chunk_text, mean_vector
+
+        budget = self.max_chars - len(prefix(""))
+        last_error: Optional[EmbeddingsInputTooLargeError] = None
+
+        for _ in range(SHRINK_ATTEMPTS):
+            chunks = chunk_text(text, max_chars=budget)
+            if not chunks:
+                return None
+            try:
+                if not batch:
+                    return self.embed(prefix(chunks[0]))
+                if len(chunks) == 1:
+                    return self.embed(prefix(chunks[0]))
+                return mean_vector(self.embed_batch([prefix(c) for c in chunks]))
+            except EmbeddingsInputTooLargeError as e:
+                last_error = e
+                budget //= 2
+                if budget < MIN_CHUNK_CHARS:
+                    break
+
+        raise last_error or EmbeddingsInputTooLargeError(
+            "The server refused this text at every chunk size tried"
+        )
 
     def truncate_text(self, text: str, max_chars: int = 8000) -> str:
         """Truncate text to a maximum number of characters.

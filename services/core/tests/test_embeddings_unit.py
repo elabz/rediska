@@ -478,3 +478,84 @@ class TestClientUtilities:
         truncated = client.truncate_text(long_text, max_chars=1000)
 
         assert len(truncated) <= 1000
+
+
+class TestOversizeInputRecovery:
+    """The budget is in characters; the server's limit is in tokens.
+
+    Those two units do not convert by a constant, so a char budget that suits
+    ordinary prose is too generous for dense text. The client must recover
+    rather than leave the document without a vector — on the live corpus this
+    was silently stranding documents the server refused.
+    """
+
+    def _client(self, max_chars=1400):
+        from rediska_core.infrastructure.embeddings import EmbeddingsClient
+
+        return EmbeddingsClient(
+            url="http://localhost:8080", model="test-embed", max_chars=max_chars
+        )
+
+    def test_shrinks_the_budget_and_succeeds(self, test_settings):
+        from rediska_core.infrastructure.embeddings import (
+            EmbeddingsInputTooLargeError,
+        )
+
+        client = self._client()
+        seen: list[int] = []
+
+        def embed(text):
+            seen.append(len(text))
+            # Refuse anything over 400 characters, as a token limit would.
+            if len(text) > 400:
+                raise EmbeddingsInputTooLargeError("input is too large to process")
+            return [1.0, 0.0]
+
+        client.embed = embed  # type: ignore[method-assign]
+        client.embed_batch = lambda texts: [embed(t) for t in texts]  # type: ignore[method-assign]
+
+        vector = client.embed_document("word " * 240)  # 1,200 chars
+
+        assert vector is not None
+        # The attempts that were refused are in `seen` too; what matters is
+        # that it kept shrinking until the server accepted the text.
+        assert seen[-1] <= 400
+        assert len(seen) > 1  # it really did retry
+
+    def test_gives_up_loudly_rather_than_silently(self, test_settings):
+        """A document the server refuses at every size must not look embedded."""
+        import pytest
+
+        from rediska_core.infrastructure.embeddings import (
+            EmbeddingsInputTooLargeError,
+        )
+
+        client = self._client()
+
+        def always_refuse(text):
+            raise EmbeddingsInputTooLargeError("input is too large to process")
+
+        client.embed = always_refuse  # type: ignore[method-assign]
+        client.embed_batch = lambda texts: [always_refuse(t) for t in texts]  # type: ignore[method-assign]
+
+        with pytest.raises(EmbeddingsInputTooLargeError):
+            client.embed_document("word " * 240)
+
+    def test_a_query_shrinks_too(self, test_settings):
+        from rediska_core.infrastructure.embeddings import (
+            EmbeddingsInputTooLargeError,
+        )
+
+        client = self._client()
+        seen: list[int] = []
+
+        def embed(text):
+            seen.append(len(text))
+            if len(text) > 300:
+                raise EmbeddingsInputTooLargeError("input is too large to process")
+            return [1.0, 0.0]
+
+        client.embed = embed  # type: ignore[method-assign]
+
+        assert client.embed_query("word " * 200) is not None
+        assert seen[-1] <= 300
