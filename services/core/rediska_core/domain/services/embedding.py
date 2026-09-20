@@ -194,8 +194,19 @@ class EmbeddingService:
         """
         from rediska_core.domain.services.embedding_text import PREP_VERSION, text_hash
 
+        doc_id = f"{doc_type}:{entity_id}"
         text = self.text_for_entity(doc_type, entity_id)
         if not text:
+            # Mark it, or every sweep and backfill will pick this document up
+            # again forever: the only thing that would take it out of the
+            # "needs a vector" query is a vector it can never have. An image
+            # with no caption is not a failure, it is simply not embeddable.
+            # Re-indexing clears the mark, so text arriving later still counts.
+            self.es_client.update_document(
+                index=CONTENT_DOCS_INDEX,
+                doc_id=doc_id,
+                updates={"embedding_skipped": True},
+            )
             return {
                 "success": True,
                 "status": "skipped",
@@ -204,7 +215,6 @@ class EmbeddingService:
                 "entity_id": entity_id,
             }
 
-        doc_id = f"{doc_type}:{entity_id}"
         digest = text_hash(text)
         if not force:
             existing = self.es_client.get_document(index=CONTENT_DOCS_INDEX, doc_id=doc_id) or {}
@@ -249,6 +259,8 @@ class EmbeddingService:
                 "embedding_prep": PREP_VERSION,
                 "embedding_text_hash": digest,
                 "embedded_at": _utcnow_iso(),
+                # It had text after all.
+                "embedding_skipped": False,
             },
         )
         if not updated:

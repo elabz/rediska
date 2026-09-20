@@ -67,6 +67,13 @@ def _embed_slot(settings) -> Iterator[None]:
 
     Fails open: if Redis is unavailable or every slot looks taken for longer
     than the wait window, the call proceeds rather than stalling the pipeline.
+
+    Only the process that actually takes a slot sets the TTL. Refreshing it on
+    a *failed* acquire is what turns an ordinary leak — a worker killed while
+    embedding leaves its slot incremented — into a permanent one, because the
+    waiters keep pushing the expiry of the counter they are waiting on out of
+    reach. The inference gate learned this the hard way; the TTL is the only
+    thing that heals a leaked slot.
     """
     client = _redis(settings)
     held = False
@@ -75,8 +82,8 @@ def _embed_slot(settings) -> Iterator[None]:
         while time.monotonic() < deadline:
             try:
                 count = int(client.incr(EMBED_INFLIGHT_KEY))  # type: ignore[arg-type]
-                client.expire(EMBED_INFLIGHT_KEY, EMBED_SLOT_TTL_SECONDS)
                 if count <= max(1, settings.embed_max_concurrent):
+                    client.expire(EMBED_INFLIGHT_KEY, EMBED_SLOT_TTL_SECONDS)
                     held = True
                     break
                 client.decr(EMBED_INFLIGHT_KEY)
@@ -397,6 +404,10 @@ def _missing_vector_query(model: str) -> dict[str, Any]:
     return {
         "bool": {
             "filter": [{"terms": {"doc_type": sorted(EMBEDDABLE_DOC_TYPES)}}],
+            # Documents with no embeddable text at all are not pending work;
+            # without this they are returned by every sweep forever, because
+            # nothing they can ever do would satisfy the "has a vector" test.
+            "must_not": [{"term": {"embedding_skipped": True}}],
             "should": [
                 {"bool": {"must_not": {"exists": {"field": "embedding"}}}},
                 {"bool": {"must_not": {"term": {"embedding_model": model}}}},
@@ -554,6 +565,7 @@ def backfill(self, dry_run: bool = True, batch_size: int = 200, max_docs: int = 
 
         embedded = failed = skipped = 0
         cancelled = False
+        previous_page: Optional[list[tuple[str, int]]] = None
         while True:
             session.expire_all()
             job = session.execute(select(Job).where(Job.dedupe_key == key)).scalar()
@@ -563,6 +575,16 @@ def backfill(self, dry_run: bool = True, batch_size: int = 200, max_docs: int = 
             pending = _pending(service.es_client, model, batch_size)
             if not pending:
                 break
+            if pending == previous_page:
+                # The query is handing back the same documents it just handed
+                # back, so nothing this pass did changed what counts as
+                # pending. Continuing would spin forever.
+                logger.warning(
+                    "embed.backfill stopping: the pending page did not change "
+                    f"after processing {len(pending)} documents"
+                )
+                break
+            previous_page = pending
             _wait_for_inference(settings)
             for doc_type, entity_id in pending:
                 with _embed_slot(settings):
@@ -576,9 +598,6 @@ def backfill(self, dry_run: bool = True, batch_size: int = 200, max_docs: int = 
                 if max_docs and embedded + skipped + failed >= max_docs:
                     break
             if failed >= 20 or (max_docs and embedded + skipped + failed >= max_docs):
-                break
-            if skipped >= len(pending) and embedded == 0:
-                # Everything in this page reported "unchanged": nothing to do.
                 break
 
         report = {

@@ -334,3 +334,49 @@ class TestDialectPortability:
 
         assert "NULLS" not in sql.upper()
         assert "ORDER BY" in sql.upper()
+
+
+class TestUnembeddableDocuments:
+    """Some documents have no text and never will — an image with no caption.
+
+    They must be marked, or they come back in every "needs a vector" query
+    forever: the only thing that would clear them is a vector they cannot have.
+    On the live corpus 12,638 such documents stopped the backfill dead.
+    """
+
+    def test_no_text_marks_the_document(self, db_session, world):
+        es = FakeES()
+        svc = service(db_session, es)
+        item = ProfileItem(
+            account_id=world.id,
+            item_type="image",
+            external_item_id="test_img_1",
+            text_content=None,
+            item_created_at=NOW,
+        )
+        db_session.add(item)
+        db_session.flush()
+
+        result = svc.embed_entity("profile_item", item.id)
+
+        assert result["status"] == "skipped"
+        assert es.docs[f"profile_item:{item.id}"]["embedding_skipped"] is True
+
+    def test_embedding_clears_the_mark(self, db_session, world):
+        """Text arriving later must put the document back in the queue."""
+        es = FakeES()
+        svc = service(db_session, es)
+        item = ProfileItem(
+            account_id=world.id,
+            item_type="post",
+            external_item_id="test_post_1",
+            text_content="test body with real words in it",
+            item_created_at=NOW,
+        )
+        db_session.add(item)
+        db_session.flush()
+
+        result = svc.embed_entity("profile_item", item.id)
+
+        assert result["status"] == "embedded"
+        assert es.docs[f"profile_item:{item.id}"]["embedding_skipped"] is False

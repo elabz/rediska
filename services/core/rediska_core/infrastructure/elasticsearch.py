@@ -139,6 +139,13 @@ CONTENT_DOCS_MAPPING = {
             "embedded_at": {
                 "type": "date",
             },
+            # Set when a document has no embeddable text at all (an image with
+            # no caption, an empty post). Without it, such documents come back
+            # in every "needs a vector" query forever, because the only thing
+            # that would clear them is a vector they can never have.
+            "embedding_skipped": {
+                "type": "boolean",
+            },
 
             # Similarity filters
             "author_username": {
