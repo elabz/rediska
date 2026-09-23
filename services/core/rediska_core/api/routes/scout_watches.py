@@ -833,10 +833,24 @@ async def add_post_to_leads(
         db.add(audit)
         db.commit()
 
+        # A promotion does not always create a lead: when the author already
+        # has an active one, the post joins it. Saying "added to leads" for
+        # that case sends the user looking for a new entry that was never
+        # created, so the answer names the lead it actually went to.
+        attached = bool(getattr(lead, "_attached", False))
+        author = lead.author_account.external_username if lead.author_account else None
+        if attached:
+            who = f" for u/{author}" if author else ""
+            message = f"Attached to existing Lead #{lead.id}{who}"
+        else:
+            message = f"Post added to leads as Lead #{lead.id}"
+
         return ScoutWatchPostAddToLeadsResponse(
             post_id=post_id,
             lead_id=lead.id,
-            message=f"Post added to leads as Lead #{lead.id}",
+            message=message,
+            attached=attached,
+            lead_author=author,
         )
 
     except ScoutWatchNotFoundError:

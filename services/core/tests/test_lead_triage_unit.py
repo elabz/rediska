@@ -223,13 +223,26 @@ class TestListing:
         assert service.count_leads() == 1
         assert service.count_leads(status="expired") == 0
 
-    def test_posted_within_days_uses_post_date_then_save_date(self, db_session, provider):
+    def test_posted_within_days_takes_the_later_of_post_and_save_date(
+        self, db_session, provider
+    ):
+        """Acting on a lead makes it current, whatever the post's own age.
+
+        The window used to be post date *else* save date, so a post promoted
+        out of the needs-review queue today but written months ago was filtered
+        out of the lead list — and since promoting also takes it out of the
+        queue, it was left in neither view. 98% of that queue is older than
+        the default 14 days, so this was the normal case, not an edge one.
+        """
         now = datetime.utcnow()
         recent_post = _lead(db_session)
         recent_post.post_created_at = now - timedelta(days=3)
-        old_post_new_save = _lead(db_session)  # saved now, but posted a month ago
+        old_post_new_save = _lead(db_session)  # promoted today, posted a month ago
         old_post_new_save.created_at = now
         old_post_new_save.post_created_at = now - timedelta(days=30)
+        old_post_old_save = _lead(db_session)  # nobody has touched this in months
+        old_post_old_save.created_at = now - timedelta(days=40)
+        old_post_old_save.post_created_at = now - timedelta(days=45)
         undated_recent = _lead(db_session)
         undated_recent.created_at = now - timedelta(days=10)
         undated_old = _lead(db_session)
@@ -238,10 +251,13 @@ class TestListing:
         service = LeadsService(db_session)
 
         within_14 = {lead.id for lead in service.list_leads(posted_within_days=14)}
-        assert within_14 == {recent_post.id, undated_recent.id}
-        assert service.count_leads(posted_within_days=14) == 2
-        assert service.count_leads(posted_within_days=7) == 1
-        assert service.count_leads() == 4
+        assert within_14 == {recent_post.id, old_post_new_save.id, undated_recent.id}
+        assert service.count_leads(posted_within_days=14) == 3
+        # Saved today counts as recent even under a tighter window; a lead
+        # nobody has touched stays out regardless.
+        assert service.count_leads(posted_within_days=7) == 2
+        assert old_post_old_save.id not in within_14
+        assert service.count_leads() == 5
 
     def test_revive_expired_lead(self, db_session, provider):
         lead = _lead(db_session, status="expired")

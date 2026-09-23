@@ -168,7 +168,13 @@ class TestAddPostToLeadsVerdicts:
         )
 
         assert response.status_code == 200
-        assert response.json()["lead_id"] == active.id
+        body = response.json()
+        assert body["lead_id"] == active.id
+        # The promotion created nothing; saying "added to leads" would send the
+        # user looking for a new entry that does not exist.
+        assert body["attached"] is True
+        assert body["lead_author"] == "manual_author"
+        assert "Attached to existing" in body["message"]
 
     @pytest.mark.asyncio
     async def test_author_without_verdict_is_promoted(
@@ -182,4 +188,7 @@ class TestAddPostToLeadsVerdicts:
         )
 
         assert response.status_code == 200
-        assert response.json()["lead_id"] is not None
+        body = response.json()
+        assert body["lead_id"] is not None
+        assert body["attached"] is False
+        assert "added to leads" in body["message"]

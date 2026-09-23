@@ -278,7 +278,12 @@ export function NeedsReviewQueue({ onCountChange }: { onCountChange?: (count: nu
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Record<number, 'promote' | 'dismiss'>>({});
   const [itemErrors, setItemErrors] = useState<Record<number, string>>({});
-  const [promoted, setPromoted] = useState<{ postId: number; leadId: number } | null>(null);
+  const [promoted, setPromoted] = useState<{
+    postId: number;
+    leadId: number;
+    attached: boolean;
+    author: string | null;
+  } | null>(null);
 
   const load = useCallback(
     async (cursor: string | null) => {
@@ -340,7 +345,13 @@ export function NeedsReviewQueue({ onCountChange }: { onCountChange?: (count: nu
       if (!response.ok) {
         throw new Error(typeof data.detail === 'string' ? data.detail : `Failed to ${action}`);
       }
-      if (action === 'promote') setPromoted({ postId: item.id, leadId: data.lead_id });
+      if (action === 'promote')
+        setPromoted({
+          postId: item.id,
+          leadId: data.lead_id,
+          attached: Boolean(data.attached),
+          author: data.lead_author ?? null,
+        });
       removeItem(item.id);
     } catch (err) {
       setItemErrors((prev) => ({
@@ -400,10 +411,24 @@ export function NeedsReviewQueue({ onCountChange }: { onCountChange?: (count: nu
       {promoted && (
         <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm flex items-center justify-between gap-2">
           <span>
-            Promoted to{' '}
-            <Link href={`/leads/${promoted.leadId}`} className="font-medium underline">
-              Lead #{promoted.leadId}
-            </Link>
+            {promoted.attached ? (
+              <>
+                {/* A promotion does not always create a lead: this author
+                    already had an active one, so the post joined it. */}
+                Attached to existing{' '}
+                <Link href={`/leads/${promoted.leadId}`} className="font-medium underline">
+                  Lead #{promoted.leadId}
+                </Link>
+                {promoted.author ? ` for u/${promoted.author}` : ''}
+              </>
+            ) : (
+              <>
+                Promoted to{' '}
+                <Link href={`/leads/${promoted.leadId}`} className="font-medium underline">
+                  Lead #{promoted.leadId}
+                </Link>
+              </>
+            )}
           </span>
           <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setPromoted(null)}>
             <X className="h-4 w-4" />

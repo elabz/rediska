@@ -197,6 +197,16 @@ class ScoutWatchPostAddToLeadsResponse(BaseModel):
     post_id: int
     lead_id: int
     message: str
+    attached: bool = Field(
+        default=False,
+        description=(
+            "True when the post joined the author's existing lead instead of "
+            "creating one, so the caller can say which lead it went to"
+        ),
+    )
+    lead_author: Optional[str] = Field(
+        default=None, description="The lead's author, for the attach message"
+    )
 
 
 class NeedsReviewPostResponse(ScoutWatchPostResponse):

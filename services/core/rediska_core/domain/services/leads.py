@@ -369,15 +369,15 @@ class LeadsService:
             status: Filter by status (optional).
             lead_source: Filter by lead source ('manual', 'scout_watch') (optional).
             search: Search term for title, body, source_location (optional).
-            posted_within_days: Only leads posted in the last N days; leads
-                without a post date fall back to when they were saved.
+            posted_within_days: Only leads whose post date or save date falls
+                in the last N days, whichever is later.
             include_banned: Also list leads of authors on the ban list.
             include_copies: Also list leads whose post is in a handled spam ring.
 
         Returns:
             SQLAlchemy query object.
         """
-        from sqlalchemy import func, or_
+        from sqlalchemy import or_
 
         # Soft-deleted leads (e.g. losers of the duplicate-author merge) are
         # retained for history but never listed or counted.
@@ -410,8 +410,16 @@ class LeadsService:
 
         if posted_within_days:
             since = datetime.utcnow() - timedelta(days=posted_within_days)
+            # Recent by the post's date *or* by when this lead was saved —
+            # whichever is later. Acting on something makes it current: a post
+            # from eight months ago that you promoted out of the needs-review
+            # queue this morning is today's work, and filtering it out by the
+            # post's age made it vanish from both views at once.
             query = query.filter(
-                func.coalesce(LeadPost.post_created_at, LeadPost.created_at) >= since
+                or_(
+                    LeadPost.post_created_at >= since,
+                    LeadPost.created_at >= since,
+                )
             )
 
         if search:

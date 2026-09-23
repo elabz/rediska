@@ -139,6 +139,18 @@ const STATUS_COLORS: Record<string, string> = {
 
 const TIMEZONE = 'America/New_York';
 
+/**
+ * True when the post predates the lead's own save date by more than a day —
+ * i.e. this is an old post someone promoted, not fresh material.
+ */
+function isOldPost(lead: Lead): boolean {
+  if (!lead.post_created_at) return false;
+  const posted = new Date(lead.post_created_at).getTime();
+  const saved = new Date(lead.created_at).getTime();
+  if (Number.isNaN(posted) || Number.isNaN(saved)) return false;
+  return saved - posted > 24 * 60 * 60 * 1000;
+}
+
 function formatDate(dateString: string): string {
   const date = new Date(dateString);
   const now = new Date();
@@ -334,6 +346,17 @@ function LeadCard({
             {lead.post_created_at ? (
               <span title={`Posted: ${new Date(lead.post_created_at).toLocaleString('en-US', { timeZone: TIMEZONE, dateStyle: 'medium', timeStyle: 'short' })}`}>
                 Posted {formatDate(lead.post_created_at)}
+                {/* The age filter keeps a lead you acted on recently even when
+                    the post itself is old, so say which it is rather than let
+                    an eight-month-old post sit unexplained in a 14-day view. */}
+                {isOldPost(lead) && (
+                  <span
+                    className="ml-1 text-amber-600 dark:text-amber-400"
+                    title="Older post — listed because you saved it recently"
+                  >
+                    (old post)
+                  </span>
+                )}
               </span>
             ) : (
               <span className="text-muted-foreground/70" title={`Saved: ${new Date(lead.created_at).toLocaleString('en-US', { timeZone: TIMEZONE, dateStyle: 'medium', timeStyle: 'short' })}`}>
