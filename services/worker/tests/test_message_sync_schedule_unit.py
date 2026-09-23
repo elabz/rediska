@@ -50,7 +50,8 @@ class TestSyncResponse:
         assert response["status"] == "skipped"
         assert queued == []
 
-    def test_aborted_run_reports_error_but_still_indexes_what_it_committed(self, monkeypatch):
+    def test_aborted_run_reports_error_and_keeps_what_it_committed(self, monkeypatch):
+        """An aborted run still keeps (and has already indexed) its pages."""
         queued: list[str] = []
         monkeypatch.setattr(
             ingest.app,
@@ -64,4 +65,27 @@ class TestSyncResponse:
 
         assert response["status"] == "error"
         assert response["errors"] == ["Database error"]
-        assert queued == ["index.bulk_index_all_messages"]
+        assert queued == []
+
+    def test_a_sync_never_reindexes_the_whole_corpus(self, monkeypatch):
+        """New messages are indexed one by one as they are stored.
+
+        Queuing `index.bulk_index_all_messages` here re-wrote all 55k message
+        documents to catch the few that were new, and a bulk write replaces the
+        document — dropping its `embedding`. Since inbox sync runs every 60
+        seconds, every message vector was destroyed roughly that often, and the
+        sweeper needs ~46 hours to rebuild them. Semantic coverage for messages
+        could never converge.
+        """
+        queued: list[str] = []
+        monkeypatch.setattr(
+            ingest.app,
+            "send_task",
+            lambda name, **kw: queued.append(name) or SimpleNamespace(id="task-1"),
+        )
+
+        response = ingest._sync_response(sync_result(new_messages=25), "inbox_fast")
+
+        assert response["status"] == "success"
+        assert response["new_messages"] == 25
+        assert queued == []

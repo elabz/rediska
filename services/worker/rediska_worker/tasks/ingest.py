@@ -332,7 +332,20 @@ def _periodic_message_sync(sync_type: str, endpoint: str, identity_id: Optional[
 
 
 def _sync_response(result: Any, sync_type: str) -> dict:
-    """Task result for a message sync, queueing indexing when messages arrived."""
+    """Task result for a message sync.
+
+    Indexing is not queued here. `MessageSyncService._create_message_if_not_exists`
+    already indexes each message as it is stored, and that path also chains the
+    embedding, so re-indexing the whole corpus to catch a handful of new
+    messages was both redundant and destructive: a bulk index writes whole
+    documents, which drops the `embedding` field, and this ran on every sync
+    that found a single new message — every 60 seconds. All 55k message vectors
+    went with it each time, and the sweeper needs ~46 hours to rebuild them, so
+    semantic coverage for messages could never converge.
+
+    `ingest.backfill_conversations` still queues a bulk index, because
+    `IngestService._upsert_message` has no per-message hook.
+    """
     if result.skipped:
         return {
             "status": "skipped",
@@ -340,16 +353,6 @@ def _sync_response(result: Any, sync_type: str) -> dict:
             "sync_type": sync_type,
             "reason": "another message sync for this identity is still running",
         }
-
-    # Queue indexing if new messages were synced
-    index_task_id = None
-    if result.new_messages > 0:
-        index_task = app.send_task(
-            "index.bulk_index_all_messages",
-            kwargs={"batch_size": 500},
-            queue="celery",
-        )
-        index_task_id = index_task.id
 
     return {
         # An aborted run keeps the pages it committed, but it did not finish
@@ -362,7 +365,9 @@ def _sync_response(result: Any, sync_type: str) -> dict:
         "new_messages": result.new_messages,
         "pages_fetched": result.pages_fetched,
         "errors": result.errors,
-        "index_task_id": index_task_id,
+        # Kept for shape compatibility with older task results; indexing is now
+        # per message, so there is no bulk task to point at.
+        "index_task_id": None,
     }
 
 
