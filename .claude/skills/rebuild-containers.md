@@ -211,3 +211,17 @@ done
   `INFERENCE_*` vars by design.
 - Recreating a container discards its logs. If you need a failure's log evidence
   (e.g. a "JSON parse error … Context around" line), pull it *before* rebuilding.
+- **The worker does not read the core bind mount.** `docker-compose.override.yml`
+  mounts `./services/core/rediska_core` into the worker, but the worker imports
+  `rediska_core` from `/usr/local/lib/python3.11/site-packages/` — the mount is not on
+  its import path. So a **core** change reaches the worker only via
+  `docker compose build rediska-worker`; restarting it is not enough, and a stale
+  worker looks perfectly healthy. Verify with:
+  `docker compose exec -T rediska-worker python -c "import rediska_core, inspect; print('<a phrase from your change>' in inspect.getsource(rediska_core.domain.services.<mod>))"`
+- **Restarting the worker mid-task leaves state behind.** Two things need clearing, or
+  the next run wedges:
+  1. Redis slots held by the killed process — `docker compose exec rediska-redis
+     redis-cli del rediska:embed:inflight rediska:inference:inflight`
+  2. `jobs` rows stuck in `running`, which make an idempotent task return
+     `already_running` forever. Mark them `failed` with an honest `last_error`
+     before re-dispatching.
