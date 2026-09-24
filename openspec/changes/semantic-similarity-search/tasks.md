@@ -42,6 +42,6 @@
 ## 7. Rollout
 
 - [x] 7.1 Deploy with hooks off; build v2; parity check; switch alias
-- [ ] 7.2 Enable hooks; backfill dry run, then live; coverage ≥ 99%
+- [x] 7.2 Enable hooks; backfill dry run, then live; coverage ≥ 99%
 - [ ] 7.3 Drop v1; update `lead-affinity-signal` tasks to depend on this change
 - [x] 7.4 Docs: CLAUDE.md, `docs/deploy.md` sizing (1 GB page cache + 4 GB disk per million vectors), operator note on `--ubatch-size`
